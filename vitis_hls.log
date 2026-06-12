@@ -1,0 +1,116 @@
+
+****** Vitis HLS - High-Level Synthesis from C, C++ and OpenCL v2023.2 (64-bit)
+  **** SW Build 4023990 on Oct 11 2023
+  **** IP Build 4028589 on Sat Oct 14 00:45:43 MDT 2023
+  **** SharedData Build 4025554 on Tue Oct 10 17:18:54 MDT 2023
+    ** Copyright 1986-2022 Xilinx, Inc. All Rights Reserved.
+    ** Copyright 2022-2023 Advanced Micro Devices, Inc. All Rights Reserved.
+
+source /tools/Xilinx/Vitis_HLS/2023.2/scripts/vitis_hls/hls.tcl -notrace
+INFO: [HLS 200-10] Running '/tools/Xilinx/Vitis_HLS/2023.2/bin/unwrapped/lnx64.o/vitis_hls'
+INFO: [HLS 200-10] For user 'jovyan' on host 'jupyter-nchenjia-40upenn-2eedu' (Linux_x86_64 version 5.15.0-179-generic) on Thu Jun 11 19:40:33 UTC 2026
+INFO: [HLS 200-10] On os Ubuntu 22.04.3 LTS
+INFO: [HLS 200-10] In directory '/home/jovyan/PTQWorkflow/nPELICAN-fpga'
+INFO: [HLS 200-2053] The vitis_hls executable is being deprecated. Consider using vitis-run --mode hls --tcl
+Sourcing Tcl script 'build_prj.tcl'
+INFO: [HLS 200-1510] Running: open_project -reset nPELICAN_prj 
+INFO: [HLS 200-10] Opening and resetting project '/home/jovyan/PTQWorkflow/nPELICAN-fpga/nPELICAN_prj'.
+INFO: [HLS 200-1510] Running: set_top nPELICAN 
+INFO: [HLS 200-1510] Running: add_files firmware/nPELICAN.cpp -cflags -std=c++0x 
+INFO: [HLS 200-10] Adding design file 'firmware/nPELICAN.cpp' to the project
+INFO: [HLS 200-1510] Running: add_files -tb nPELICAN_tb.cpp -cflags -std=c++0x 
+INFO: [HLS 200-10] Adding test bench file 'nPELICAN_tb.cpp' to the project
+INFO: [HLS 200-1510] Running: add_files -tb firmware/weights 
+INFO: [HLS 200-10] Adding test bench file 'firmware/weights' to the project
+INFO: [HLS 200-1510] Running: add_files -tb tb_data 
+INFO: [HLS 200-10] Adding test bench file 'tb_data' to the project
+INFO: [HLS 200-1510] Running: open_solution -reset solution 
+INFO: [HLS 200-10] Creating and opening solution '/home/jovyan/PTQWorkflow/nPELICAN-fpga/nPELICAN_prj/solution'.
+INFO: [HLS 200-10] Cleaning up the solution database.
+INFO: [HLS 200-1505] Using default flow_target 'vivado'
+Resolution: For help on HLS 200-1505 see docs.xilinx.com/access/sources/dita/topic?Doc_Version=2023.2%20English&url=ug1448-hls-guidance&resourceid=200-1505.html
+INFO: [HLS 200-1510] Running: config_compile -name_max_length 80 
+INFO: [XFORM 203-1161] The maximum of name length is set to 80.
+INFO: [HLS 200-1510] Running: set_part xcvu13p-flga2577-1-e 
+INFO: [HLS 200-1611] Setting target device to 'xcvu13p-flga2577-1-e'
+INFO: [XFORM 203-1161] The maximum of name length is set to 80.
+INFO: [HLS 200-1510] Running: config_schedule -enable_dsp_full_reg=false 
+INFO: [HLS 200-1510] Running: create_clock -period 5 -name default 
+INFO: [SYN 201-201] Setting up clock 'default' with a period of 5ns.
+INFO: [HLS 200-1510] Running: set_clock_uncertainty 12.5% default 
+INFO: [SYN 201-201] Setting up clock 'default' with an uncertainty of 0.625ns.
+***** C SIMULATION *****
+INFO: [HLS 200-1510] Running: csim_design 
+INFO: [SIM 211-2] *************** CSIM start ***************
+INFO: [SIM 211-4] CSIM will launch GCC as the compiler.
+INFO: [HLS 200-2036] Building debug C Simulation binaries
+   Compiling ../../../../nPELICAN_tb.cpp in debug mode
+   Compiling ../../../../firmware/nPELICAN.cpp in debug mode
+   Generating csim.exe
+Processing input 0
+Predictions
+
+1 71 
+Quantized predictions
+-0.447266 
+Processing input 1000
+Predictions
+
+1 56 
+Quantized predictions
+0.0585938 
+Processing input 2000
+Predictions
+
+1 51 
+Quantized predictions
+-0.654541 
+Processing input 3000
+Predictions
+
+0 60 
+Quantized predictions
+-2.30347 
+Processing input 4000
+Predictions
+
+0 30 
+Quantized predictions
+-2.38721 
+Processing input 5000
+Predictions
+
+0 20 
+Quantized predictions
+-2.771 
+Processing input 6000
+Predictions
+
+0 50 
+Quantized predictions
+-0.546387 
+Processing input 7000
+Predictions
+
+0 30 
+Quantized predictions
+-1.94604 
+Processing input 8000
+Predictions
+
+0 30 
+Quantized predictions
+-1.82275 
+Processing input 9000
+Predictions
+
+0 35 
+Quantized predictions
+-2.51416 
+INFO: Saved inference results to file: tb_data/csim_results.log
+INFO: [SIM 211-1] CSim done with 0 errors.
+INFO: [SIM 211-3] *************** CSIM finish ***************
+INFO: [HLS 200-111] Finished Command csim_design CPU user time: 163.39 seconds. CPU system time: 0.82 seconds. Elapsed time: 165.29 seconds; current allocated memory: 4.078 MB.
+***** C SIMULATION COMPLETED IN 0h2m45s *****
+INFO: [HLS 200-112] Total CPU user time: 165.36 seconds. Total CPU system time: 1.1 seconds. Total elapsed time: 167.65 seconds; peak allocated memory: 279.258 MB.
+INFO: [Common 17-206] Exiting vitis_hls at Thu Jun 11 19:43:20 2026...
