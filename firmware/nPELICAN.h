@@ -3,7 +3,8 @@
 
 #include "ap_fixed.h"
 #include "ap_int.h"
-#include "hls_stream.h"
+// hls_stream.h removed: hls::stream is not used in nPELICAN.h or nPELICAN.cpp.
+// (nnet_helpers.h includes it via its own header for templates unused in this project.)
 
 #include <cmath>
 

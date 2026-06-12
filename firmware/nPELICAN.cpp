@@ -1,7 +1,12 @@
 #include <iostream>
-#include <hls_math.h>
+// <hls_math.h> removed: no hls math functions are called in this file.
 #include "nPELICAN.h"
 #include "weights/weights.h"
+
+#ifndef __SYNTHESIS__
+#include <cstdio>
+FILE* npelican_dump_fp = nullptr;
+#endif
 
 psloglut_t psloglut(int index){
   static psloglut_t _table[N_TABLE_PSLOG];
@@ -25,8 +30,8 @@ void nPELICAN(
 ) {
     #pragma HLS ARRAY_RESHAPE variable=model_input complete dim=0
     #pragma HLS ARRAY_PARTITION variable=model_out complete dim=0
-    #pragma HLS INTERFACE ap_vld port=model_input,model_out 
-//    #pragma HLS DATAFLOW 
+    #pragma HLS INTERFACE ap_vld port=model_input,model_out
+//    #pragma HLS DATAFLOW
     #pragma HLS PIPELINE II=1
 
     //pragmas for model weight arrays
@@ -72,7 +77,7 @@ void nPELICAN(
         p1[(i + (NPARTICLES2 - NPARTICLES))][k] = model_input[i*(4)+k]*nobjmask[i][0];
       }
     }
-    //add beam spurions 
+    //add beam spurions
     p1[0][0]   = 1.; p1[0][1]   = 0.; p1[0][2]   = 0.; p1[0][3]   = 1.;
     p1[1][0] = 1.; p1[1][1] = 0.; p1[1][2] = 0.; p1[1][3] = -1.;
 
@@ -107,7 +112,7 @@ void nPELICAN(
         batch1[i*NPARTICLES2+j] = ((dots[i*NPARTICLES2+j] - batch1_2to2[0]) * batch1_2to2[1] + batch1_2to2[2])*nobjmask[i][j];
       }
     }
-    
+
     internal_t jmass = 0.;
     internal_t jdotp[NPARTICLES2] = {0};
     #pragma HLS ARRAY_PARTITION variable=jdotp complete dim=0
@@ -164,17 +169,17 @@ void nPELICAN(
         LinEq2to2_5: T[i][j][2] = jdotp[j];
       }
     }
-    
+
     for (unsigned int i = 0; i < NPARTICLES2; i++) {
     #pragma HLS unroll
       LinEq2to2_2: T[i][i][5] = jmass*nobjmask[i][i];
       LinEq2to2_3: T[i][i][1] = jdotp[i];
     }
-    
+
     //"dense" summation over aggregators
     internal_t Tp[NPARTICLES2][NPARTICLES2][NHIDDEN];
     #pragma HLS ARRAY_PARTITION variable=Tp complete dim=0
-    
+
     // initialize with bias
     for (unsigned int i = 0; i < NPARTICLES2; i++) {
     #pragma HLS unroll
@@ -186,7 +191,7 @@ void nPELICAN(
           }
         }
       }
-      
+
     for (unsigned int i = 0; i < NPARTICLES2; i++){
     #pragma HLS unroll
       for (unsigned int h = 0; h < NHIDDEN; h++) {
@@ -205,7 +210,7 @@ void nPELICAN(
           for (unsigned int b = 0; b < 6; b++) {
           #pragma HLS unroll
             Mult2to2: Tp[i][j][h] += w1_2to2[(h*6)+b]*T[i][j][b];
-            
+
           }
         }
       }
@@ -238,11 +243,11 @@ void nPELICAN(
         }
       }
     }
-    
+
     // two aggregators for 2to0: total sum and trace
     internal_t R[NHIDDEN][2];
     #pragma HLS ARRAY_PARTITION variable=R complete dim=0
-    
+
     for (unsigned int h = 0; h < NHIDDEN; h++) {
     #pragma HLS unroll
       for (unsigned int a = 0; a < 2; a++) {
@@ -250,7 +255,7 @@ void nPELICAN(
         R[h][a] = 0;
       }
     }
-    
+
     //total sum
     for (unsigned int h = 0; h < NHIDDEN; h++) {
     #pragma HLS unroll
@@ -278,17 +283,17 @@ void nPELICAN(
       }
       R[h][1] = (R[h][1])*invnave;
     }
-    
+
     //Final 1D output
     internal_t Rp[NOUT];
     #pragma HLS ARRAY_PARTITION variable=Rp complete dim=0
-    
+
     // initialize with bias
     for (unsigned int o = 0; o < NOUT; o++) {
     #pragma HLS unroll
       Rp[o] = b2_2to0[o];
     }
-    
+
     // 2->0 weights
     for (unsigned int h = 0; h < NHIDDEN; h++) {
     #pragma HLS unroll
@@ -300,6 +305,72 @@ void nPELICAN(
         }
       }
     }
+
+#ifndef __SYNTHESIS__
+    // Stage dump: written only when npelican_dump_fp is non-null (golden re-run).
+    // Dumps post-normalization values of jmass and jdotp.
+    // T[i][j][b] is dumped per basis index b (T0..T5), each as 484 values row-major.
+    // Tp and Tr are post-ReLU / post-BN2 respectively, order i,j,h with h fastest.
+    if (npelican_dump_fp) {
+        FILE* fp = npelican_dump_fp;
+
+        // dots: 484 values, row-major i*22+j
+        fprintf(fp, "dots:");
+        for (unsigned int i = 0; i < NPARTICLES2; i++)
+            for (unsigned int j = 0; j < NPARTICLES2; j++)
+                fprintf(fp, " %.17g", (double)dots[i*NPARTICLES2+j]);
+        fprintf(fp, "\n");
+
+        // batch1: 484 values, row-major
+        fprintf(fp, "batch1:");
+        for (unsigned int i = 0; i < NPARTICLES2; i++)
+            for (unsigned int j = 0; j < NPARTICLES2; j++)
+                fprintf(fp, " %.17g", (double)batch1[i*NPARTICLES2+j]);
+        fprintf(fp, "\n");
+
+        // jmass: 1 value (post-normalization)
+        fprintf(fp, "jmass: %.17g\n", (double)jmass);
+
+        // jdotp: 22 values (post-normalization)
+        fprintf(fp, "jdotp:");
+        for (unsigned int i = 0; i < NPARTICLES2; i++)
+            fprintf(fp, " %.17g", (double)jdotp[i]);
+        fprintf(fp, "\n");
+
+        // T0..T5: six lines, each 484 values row-major T[i][j][b]
+        for (unsigned int b = 0; b < 6; b++) {
+            fprintf(fp, "T%u:", b);
+            for (unsigned int i = 0; i < NPARTICLES2; i++)
+                for (unsigned int j = 0; j < NPARTICLES2; j++)
+                    fprintf(fp, " %.17g", (double)T[i][j][b]);
+            fprintf(fp, "\n");
+        }
+
+        // Tp: 968 values, order i,j,h with h fastest (post-ReLU)
+        fprintf(fp, "Tp:");
+        for (unsigned int i = 0; i < NPARTICLES2; i++)
+            for (unsigned int j = 0; j < NPARTICLES2; j++)
+                for (unsigned int h = 0; h < NHIDDEN; h++)
+                    fprintf(fp, " %.17g", (double)Tp[i][j][h]);
+        fprintf(fp, "\n");
+
+        // Tr: 968 values, same order
+        fprintf(fp, "Tr:");
+        for (unsigned int i = 0; i < NPARTICLES2; i++)
+            for (unsigned int j = 0; j < NPARTICLES2; j++)
+                for (unsigned int h = 0; h < NHIDDEN; h++)
+                    fprintf(fp, " %.17g", (double)Tr[i][j][h]);
+        fprintf(fp, "\n");
+
+        // R: 4 values, order R[0][0] R[0][1] R[1][0] R[1][1]
+        fprintf(fp, "R: %.17g %.17g %.17g %.17g\n",
+                (double)R[0][0], (double)R[0][1],
+                (double)R[1][0], (double)R[1][1]);
+
+        // Rp: 1 value
+        fprintf(fp, "Rp: %.17g\n", (double)Rp[0]);
+    }
+#endif
 
     model_out[0] = Rp[0];
 }
