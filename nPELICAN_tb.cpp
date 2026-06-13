@@ -21,6 +21,7 @@ size_t trace_type_size = sizeof(double);
 // Stage-dump file pointer: set by TB around the single re-run (Task 3).
 #ifndef __SYNTHESIS__
 extern FILE* npelican_dump_fp;
+extern dot_t* npelican_dots_override;   // DOTS-LEVEL injection hook (see nPELICAN.cpp)
 #endif
 
 int main(int argc, char **argv) {
@@ -104,6 +105,57 @@ int main(int argc, char **argv) {
                n_events, n_exact, n_mismatch, max_abs_delta,
                first_mismatch_idx);
 
+#ifndef __SYNTHESIS__
+        // ---------------------------------------------------------------
+        // DOTS-LEVEL mode (plan D4): when tb_data/golden_dots.dat exists, re-run every
+        // event injecting PyTorch's quantized d_ij in place of the dot4 front-end. This
+        // isolates the retyped NETWORK from the float32 d_ij-cancellation caveat: a
+        // bit-exact result here proves the network itself, leaving dot4 as the only
+        // (documented) source of any momenta-level mismatch.
+        // ---------------------------------------------------------------
+        std::ifstream fdots_check("tb_data/golden_dots.dat");
+        if (fdots_check.good()) {
+            fdots_check.close();
+            std::ifstream fdpmu("tb_data/golden_pmu.dat");
+            std::ifstream fdnobj("tb_data/golden_nobj.dat");
+            std::ifstream fddots("tb_data/golden_dots.dat");
+            std::ifstream fdlogits("tb_data/golden_logits.dat");
+
+            int d_events = 0, d_exact = 0, d_mismatch = 0, d_first = -1;
+            double d_maxdelta = 0.0;
+            std::string dpmu, dnobj, ddots, dlogit;
+            while (std::getline(fdpmu, dpmu) && std::getline(fdnobj, dnobj) &&
+                   std::getline(fddots, ddots) && std::getline(fdlogits, dlogit)) {
+                // momenta (passed through; dot4 result is overwritten by the override)
+                std::vector<float> in;
+                { char *c = const_cast<char*>(dpmu.c_str()); char *t = strtok(c, " ");
+                  while (t) { in.push_back(atof(t)); t = strtok(NULL, " "); } }
+                // injected dots (484 values, row-major)
+                static dot_t dots_inj[NPARTICLES2*NPARTICLES2];
+                { char *c = const_cast<char*>(ddots.c_str()); char *t = strtok(c, " ");
+                  int k = 0; while (t && k < NPARTICLES2*NPARTICLES2) { dots_inj[k++] = (dot_t)atof(t); t = strtok(NULL, " "); } }
+                int nobj_val = std::stoi(dnobj);
+                double golden_logit = std::stod(dlogit);
+
+                input_t model_input[NPARTICLES*4];
+                nnet::copy_data<float, input_t, 0, NPARTICLES*4>(in, model_input);
+                result_t model_out[1];
+                npelican_dots_override = dots_inj;
+                nPELICAN(model_input, nobj_val, model_out);
+                npelican_dots_override = nullptr;
+
+                double fw_logit = double(model_out[0]);
+                double delta = fabs(fw_logit - golden_logit);
+                if (fw_logit == golden_logit) d_exact++;
+                else { d_mismatch++; if (d_first == -1) d_first = d_events; }
+                if (delta > d_maxdelta) d_maxdelta = delta;
+                d_events++;
+            }
+            printf("DOTS-LEVEL SUMMARY: events=%d exact=%d mismatch=%d max_abs_delta=%.17g first_mismatch=%d\n",
+                   d_events, d_exact, d_mismatch, d_maxdelta, d_first);
+        }
+#endif
+
         // Determine the dump event: first mismatch, or event 0 if all match
         int dump_event = (first_mismatch_idx >= 0) ? first_mismatch_idx : 0;
 
@@ -136,11 +188,23 @@ int main(int argc, char **argv) {
             result_t model_out2[1];
 
 #ifndef __SYNTHESIS__
+            // If golden dots exist, dump the DOTS-LEVEL path (network isolated from dot4)
+            // so the stage dump reflects identical inputs to PyTorch.
+            static dot_t dump_dots_inj[NPARTICLES2*NPARTICLES2];
+            std::ifstream fddump("tb_data/golden_dots.dat");
+            if (fddump.good()) {
+                std::string dl;
+                for (int e = 0; e <= dump_event; e++) std::getline(fddump, dl);
+                char *c = const_cast<char*>(dl.c_str()); char *t = strtok(c, " ");
+                int k = 0; while (t && k < NPARTICLES2*NPARTICLES2) { dump_dots_inj[k++] = (dot_t)atof(t); t = strtok(NULL, " "); }
+                npelican_dots_override = dump_dots_inj;
+            }
             // Open dump file and set global pointer
             FILE* dump_fp = fopen("tb_data/fw_stage_dump.txt", "w");
             npelican_dump_fp = dump_fp;
             nPELICAN(model_input2, nobj_val2, model_out2);
             npelican_dump_fp = nullptr;
+            npelican_dots_override = nullptr;
             fclose(dump_fp);
 #else
             nPELICAN(model_input2, nobj_val2, model_out2);

@@ -6,6 +6,11 @@
 #ifndef __SYNTHESIS__
 #include <cstdio>
 FILE* npelican_dump_fp = nullptr;
+// DOTS-LEVEL test hook (csim only, zero synthesis impact): when non-null, the dot4
+// front-end output is overwritten with these 484 externally-supplied dots (row-major
+// i*22+j) so the testbench can feed PyTorch's quantized d_ij directly and isolate the
+// network from the float32 d_ij-cancellation caveat (FIRMWARE_QAT_PLAN D4).
+dot_t* npelican_dots_override = nullptr;
 #endif
 
 // ============================================================================
@@ -106,6 +111,15 @@ void nPELICAN(
       }
     }
 
+#ifndef __SYNTHESIS__
+    // DOTS-LEVEL injection (csim only): replace the dot4 result with the supplied
+    // PyTorch-quantized dots to test the network in isolation from the front-end.
+    if (npelican_dots_override) {
+      for (unsigned int k = 0; k < NPARTICLES2*NPARTICLES2; k++)
+        dots[k] = npelican_dots_override[k];
+    }
+#endif
+
    //psuedolog input encoder
    /*
     for(unsigned int i = 0; i < NPARTICLES2; i++){
@@ -117,19 +131,19 @@ void nPELICAN(
     }
     */
 
-    //Do first batchnorm. PyTorch keeps the BN output (batch1) in float and feeds it
-    //both to the aggregation and, after post_agg_quant, to the basis op T0. The affine
-    //runs in wide bn_t_gen-promoted arithmetic; storing batch1 as t2_t rounds it once
-    //onto the post_agg grid (= PyTorch's T0), and the aggregation sums these t2-grid
-    //values exactly in acc2_t/accrow_t (the sum-vs-rounded-sum gap stays well under the
-    //next quantizer's half-LSB). BN constants are NOT folded (CLAUDE.md invariant).
-    t2_t batch1[(NPARTICLES2)*(NPARTICLES2)];
+    //Do first batchnorm. PyTorch keeps the BN output (batch1) in float and SUMS THE
+    //UNQUANTIZED value in the aggregation; only the basis op T0 sees the post_agg
+    //quantizer. So batch1 is stored WIDE (bn1out_t, AGG_F frac) — NOT t2_t — otherwise
+    //the coarse t2 rounding (F=18) of each summand tips the renormalized jmass/jdotp
+    //onto the wrong t2 grid point. T0 below casts batch1 to t2_t once. BN constants are
+    //NOT folded (CLAUDE.md invariant).
+    bn1out_t batch1[(NPARTICLES2)*(NPARTICLES2)];
     #pragma HLS ARRAY_PARTITION variable=batch1 complete dim=0
     for(unsigned int i = 0; i < NPARTICLES2; i++){
       #pragma HLS unroll
       for(unsigned int j = 0; j < NPARTICLES2; j++){
         #pragma HLS unroll
-        batch1[i*NPARTICLES2+j] = (t2_t)(((dots[i*NPARTICLES2+j] - batch1_2to2[0]) * batch1_2to2[1] + batch1_2to2[2])*nobjmask[i][j]);
+        batch1[i*NPARTICLES2+j] = (bn1out_t)(((dots[i*NPARTICLES2+j] - batch1_2to2[0]) * batch1_2to2[1] + batch1_2to2[2])*nobjmask[i][j]);
       }
     }
 
@@ -185,7 +199,7 @@ void nPELICAN(
     #pragma HLS unroll
       for (unsigned int j = 0; j < NPARTICLES2; j++) {
       #pragma HLS unroll
-        LinEq2to2_0: T[i][j][0] = batch1[i*NPARTICLES2+j];
+        LinEq2to2_0: T[i][j][0] = (t2_t)batch1[i*NPARTICLES2+j];   // post_agg quant of batch1
         LinEq2to2_1: T[i][j][4] = jmass*nobjmask[i][j];
         LinEq2to2_4: T[i][j][3] = jdotp[i];
         LinEq2to2_5: T[i][j][2] = jdotp[j];

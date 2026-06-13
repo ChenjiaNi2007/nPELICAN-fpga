@@ -25,23 +25,21 @@ typedef ap_fixed<24, 3, AP_RND_CONV, AP_SAT> w2_gen_t;  // 2->0 weights (signed)
 // per CLAUDE.md/plan they are WIDENED, not snapped: their fixed-point rounding
 // error must stay below half the LSB of the next real quantizer they feed.
 typedef ap_fixed<28, 4, AP_RND_CONV, AP_SAT> bias_t_gen;  // b1,b1_diag,b2 (float); |bias|max=0.339796<8 (I=4); F=24, err<=2^-25
-typedef ap_fixed<40, 9, AP_RND_CONV, AP_SAT> bn_t_gen;  // BN mean/scale/beta (float); |c|max=130.191<2^8 (I=9); F=31
+typedef ap_fixed<40, 9, AP_RND_CONV, AP_SAT> bn_t_gen;  // BN mean/scale/beta (float); |c|max=126.495<2^8 (I=9); F=31
 typedef ap_fixed<40, 1, AP_RND_CONV, AP_SAT> norm_t;  // 1/N̄, 1/N̄^2 normalize-late multipliers (F=39)
 
-// ---- Accumulators (normalize-late: raw sum first, ONE rescale after; see
-//      CLAUDE.md). Default ap_fixed rounding/overflow ON PURPOSE — accumulation
-//      must be EXACT, so no AP_RND_CONV here; integer headroom = ceil(log2(#terms))
-//      over the summand type. NPARTICLES2 = NPARTICLES+2 = 22.
-//      H2 = ceil(log2(NPARTICLES2^2)) = 9; H1 = ceil(log2(NPARTICLES2)) = 5.
-typedef ap_fixed<33, 15> acc2_t;     // jmass raw sum of t2-range summands (B+H2, I(t2_t)+H2)
-typedef ap_fixed<29, 11> accrow_t;   // jdotp row sums (B+H1, I(t2_t)+H1)
-
-// Tr = BatchNorm2(relu): NOT a quantization point; its range is widened by the BN2
-//      scale (gamma/sigma), so it gets I=10 (|Tr|<=262.6) rather than t0_t's I=1;
-//      keeps the t0 fractional grid so the 2to0 sums stay clean. SAT guards the bound.
-typedef ap_fixed<33, 10, AP_RND_CONV, AP_SAT> tr_t;
-typedef ap_fixed<42, 19> acc0_t;     // R full sum of tr_t summands (I(tr_t)+H2)
-typedef ap_fixed<38, 15> acc0row_t;  // trace, sum of tr_t (I(tr_t)+H1)
+// ---- Aggregation summands (unquantized BatchNorm outputs) + their accumulators.
+//      AGG_F = 24 fractional bits (> the finest post-agg grid t0_F=23) so the
+//      raw-sum-then-renormalize lands bit-exactly on the post-agg quantizer grid;
+//      storing these on the coarse post-agg grid (e.g. t2_F) would tip the rounding.
+//      Each is range-typed by its OWN BN output bound; SAT guards it. Accumulators
+//      add ceil(log2(#terms)) integer headroom (H2=9 full sum, H1=5 row/trace).
+typedef ap_fixed<30, 6, AP_RND_CONV, AP_SAT> bn1out_t;  // batch1 = BN1(dots); |batch1|<=27.4 (I=6), F=24
+typedef ap_fixed<39, 15> acc2_t;     // jmass raw sum of bn1out_t (I(bn1out)+H2)
+typedef ap_fixed<35, 11> accrow_t;   // jdotp row sums of bn1out_t (I(bn1out)+H1)
+typedef ap_fixed<33, 9, AP_RND_CONV, AP_SAT> tr_t;  // Tr = BN2(relu); |Tr|<=255.2 (I=9, vs t0_t I=1 which would saturate), F=24
+typedef ap_fixed<42, 18> acc0_t;     // R full sum of tr_t (I(tr_t)+H2)
+typedef ap_fixed<38, 14> acc0row_t;  // trace, sum of tr_t (I(tr_t)+H1)
 
 // ---- MAC temporaries: I = I(weight)+I(operand)+ceil(log2(#terms)), W = I+B ----
 typedef ap_fixed<51, 11> mac2_t;     // 2->2 dense: 6 w1*t2 products + b1 + b1_diag = 8 terms
