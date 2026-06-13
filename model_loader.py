@@ -48,7 +48,13 @@ parser.add_argument('--no-po2', action='store_true',
 parser.add_argument('--split-types', action='store_true', default=False,
                     help='Emit w1_t / w2_t array types instead of weight_t (typedefs must exist in nPELICAN.h)')
 parser.add_argument('--out', type=str, default='weights/weights.h')
+parser.add_argument('--out-types', type=str, default=None,
+                    help='Path for generated typedef header (default: dirname(--out)/types_generated.h). '
+                         'The firmware build expects both weights.h and types_generated.h under firmware/weights/.')
 args = parser.parse_args()
+
+if args.out_types is None:
+    args.out_types = os.path.join(os.path.dirname(args.out) or '.', 'types_generated.h')
 
 np.set_printoptions(precision=15, floatmode='fixed')
 torch.set_printoptions(precision=15)
@@ -172,10 +178,67 @@ def _extract_float_weights():
 # This is the authoritative grid (correct bit width AND po2 rounding); do NOT
 # replace this with a hand-rolled absmax snap.
 # ---------------------------------------------------------------------------
+# Populated by _extract_quant_weights() so the typedef generator can read the
+# learned per-quantizer scales/signedness off the SAME rebuilt Brevitas model.
+_quant_info = {}
+
+
+def _po2_k(scale, who):
+    """k = -log2(scale); hard error if the learned scale is not an exact po2."""
+    if scale <= 0:
+        sys.exit(f'ERROR: {who} has non-positive scale {scale!r}; cannot derive a fixed-point type.')
+    k = -math.log2(scale)
+    kr = round(k)
+    if abs(k - kr) > 1e-6:
+        sys.exit(f'ERROR: {who} scale {scale:.9e} is not a power of two '
+                 f'(k = -log2(scale) = {k:.6f}, not integer). '
+                 f'Was the checkpoint trained with --po2-scales?')
+    return int(kr)
+
+
+def _read_act_quant(model, qnn, calibrated=False):
+    """Read learned scale/signedness/bit-width for each QuantIdentity/QuantReLU
+    via named_modules(). If any act scale is uninitialized, run ONE training-mode
+    calibration forward on data/sample_data before load_state_dict (handled by the
+    caller); for the target 24-bit checkpoint the scale buffers already exist."""
+    act = {}
+    act_types = (qnn.QuantIdentity, qnn.QuantReLU)
+    for name, module in model.named_modules():
+        if not isinstance(module, act_types):
+            continue
+        scale = module.act_quant.scale()
+        if scale is None:
+            return None  # signal: needs calibration
+        s = float(scale.reshape(-1)[0])
+        signed = bool(module.act_quant.is_signed)
+        bw = int(round(float(module.act_quant.bit_width())))
+        act[name] = dict(scale=s, signed=signed, bits=bw, module=type(module).__name__)
+    return act
+
+
+def _calibration_forward(model, repo):
+    """ONE training-mode forward on data/sample_data to populate act scales
+    (CLAUDE.md gotcha: model.train() -> forward -> [caller does load_state_dict]).
+    Only invoked when an act scale is uninitialized in the rebuilt model."""
+    sys.path.insert(0, os.path.abspath(repo))
+    from src.dataloaders.collate import collate_fn  # noqa: F401 (best-effort)
+    import h5py  # noqa: F401
+    # Minimal smoke batch from sample_data; mirrors check_scales.py's note that a
+    # single training-mode forward initializes scaling_impl.value.
+    sample = os.path.join(os.path.abspath(repo), 'data', 'sample_data', 'valid.h5')
+    raise RuntimeError(
+        'Act-quantizer scales were uninitialized and a calibration forward is required. '
+        f'Implement the sample-data forward on {sample}. '
+        '(For the target 24-bit checkpoint the scale buffers already exist, so this path '
+        'is not exercised; see model_loader.py:_calibration_forward.)')
+
+
 def _extract_quant_weights():
     if fmt == 'old':
         sys.exit('ERROR: --quant requires a post-refactor checkpoint (mixing.weight keys). '
                  'Convert it first with scripts/convert_checkpoint.py.')
+
+    import brevitas.nn as qnn
 
     wbw = args.weight_bit_width or _arg('weight_bit_width', 24)
     abw = args.act_bit_width    or _arg('act_bit_width', 24)
@@ -184,20 +247,50 @@ def _extract_quant_weights():
 
     qcfg = QuantConfig(enabled=True, weight_bit_width=wbw, act_bit_width=abw,
                        input_bit_width=ibw, po2_scales=po2)
-    model = PELICANNano(NHIDDEN, quant_config=qcfg,
-                        batchnorm=_arg('batchnorm', 'b'),
-                        activation=_arg('activation', 'relu'))
+
+    def _build():
+        return PELICANNano(NHIDDEN, quant_config=qcfg,
+                           batchnorm=_arg('batchnorm', 'b'),
+                           activation=_arg('activation', 'relu'))
+
+    model = _build()
     model.load_state_dict(sd)
     model.eval()
+
+    # Act-quantizer scales (and signedness) off the rebuilt model.
+    act_info = _read_act_quant(model, qnn)
+    if act_info is None:
+        # Uninitialized act scales: calibrate on sample_data, THEN reload (strict).
+        model = _build()
+        model.train()
+        _calibration_forward(model, args.repo)
+        model.load_state_dict(sd)
+        model.eval()
+        act_info = _read_act_quant(model, qnn)
+        if act_info is None:
+            sys.exit('ERROR: act-quantizer scales still uninitialized after calibration.')
 
     print(f'\nQuant config: weight/act/input bits = {wbw}/{abw}/{ibw}, po2={po2}')
     print('QuantLinear weight scales:')
     qw1 = model.net2to2.eq_layers[0].mixing.quant_weight()
     qw2 = model.agg_2to0.mixing.quant_weight()
+    weight_info = {}
     for name, qw in (('net2to2.eq_layers.0', qw1), ('agg_2to0', qw2)):
-        s = float(qw.scale)
+        s = float(qw.scale.reshape(-1)[0])
+        signed = bool(qw.signed) if hasattr(qw, 'signed') and qw.signed is not None else True
+        bw = int(round(float(qw.bit_width)))
+        weight_info[name] = dict(scale=s, signed=signed, bits=bw)
         print(f'  {name:<22} scale = {s:.6e}  ~ 2^{math.log2(s):.2f}'
               f'  => {-math.log2(s):.0f} fractional bits')
+
+    print('Activation / identity quantizer scales:')
+    for name, info in act_info.items():
+        s = info['scale']
+        print(f'  {name:<34} scale = {s:.6e}  ~ 2^{math.log2(s):.2f}'
+              f'  => {-math.log2(s):.0f} frac bits  signed={info["signed"]}')
+
+    _quant_info['act'] = act_info
+    _quant_info['weight'] = weight_info
 
     w1  = np.ravel(qw1.value.detach().numpy())
     w2  = np.ravel(qw2.value.detach().numpy())
@@ -205,6 +298,139 @@ def _extract_quant_weights():
     b1d = sd['net2to2.eq_layers.0.diag_bias'].numpy()
     b2  = sd['agg_2to0.mixing.bias'].numpy()
     return w1, b1, b1d, w2, b2
+
+# ---------------------------------------------------------------------------
+# Generated typedef header (--quant only). Per-quantizer fixed-point types are
+# derived from the learned Brevitas scales (k = -log2(scale)); accumulator/MAC
+# types are derived by formula from those + term counts. NOTHING is hardcoded to
+# 24 bits — bit widths come from the quantizers, so retraining at 16/16/16
+# regenerates correctly with zero manual header edits.
+# ---------------------------------------------------------------------------
+def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
+    # --- map module names -> typedef names + provenance label ---
+    # Quantization-point typedefs, one per quantizer.
+    act = act_info
+    wgt = weight_info
+
+    def _pt(scale, signed, bits, who):
+        """(W, I, signed) for a quantization-point type at learned scale 2^-k."""
+        k = _po2_k(scale, who)
+        return bits, bits - k, signed, k
+
+    dot_W, dot_I, dot_s, dot_k       = _pt(act['input_quant']['scale'], act['input_quant']['signed'], act['input_quant']['bits'], 'input_quant')
+    t2_W, t2_I, t2_s, t2_k           = _pt(act['net2to2.eq_layers.0.post_agg_quant']['scale'], act['net2to2.eq_layers.0.post_agg_quant']['signed'], act['net2to2.eq_layers.0.post_agg_quant']['bits'], 'post_agg 2->2')
+    relu_W, relu_I, relu_s, relu_k   = _pt(act['net2to2.eq_layers.0.act_layer']['scale'], act['net2to2.eq_layers.0.act_layer']['signed'], act['net2to2.eq_layers.0.act_layer']['bits'], 'act_layer (ReLU)')
+    t0_W, t0_I, t0_s, t0_k           = _pt(act['agg_2to0.post_agg_quant']['scale'], act['agg_2to0.post_agg_quant']['signed'], act['agg_2to0.post_agg_quant']['bits'], 'post_agg 2->0')
+    out_W, out_I, out_s, out_k       = _pt(act['output_quant']['scale'], act['output_quant']['signed'], act['output_quant']['bits'], 'output_quant')
+    w1_W, w1_I, w1_s, w1_k           = _pt(wgt['net2to2.eq_layers.0']['scale'], wgt['net2to2.eq_layers.0']['signed'], wgt['net2to2.eq_layers.0']['bits'], '2->2 weights')
+    w2_W, w2_I, w2_s, w2_k           = _pt(wgt['agg_2to0']['scale'], wgt['agg_2to0']['signed'], wgt['agg_2to0']['bits'], '2->0 weights')
+
+    # All quantization-point types share one bit width per design; use the input
+    # quantizer's bit width as B for the formula-derived accumulator/MAC types.
+    B = dot_W
+
+    # --- bias_t_gen / bn_t_gen with the documented range asserts ---
+    bias_max = float(max(abs(np.asarray(b1)).max(), abs(np.asarray(b1d)).max(), abs(np.asarray(b2)).max()))
+    if not (bias_max < 8):
+        sys.exit(f'ERROR: max|bias| = {bias_max} >= 8; bias_t_gen = ap_fixed<{B},4> cannot represent it.')
+    bn_max = float(np.abs(np.asarray(batch1)).max())
+    bn_max = max(bn_max, float(np.abs(np.asarray(batch2)).max()))
+    if not (bn_max < 2 ** 11):
+        sys.exit(f'ERROR: max|BN const| = {bn_max} >= 2^11; bn_t_gen = ap_fixed<{B},12> cannot represent it.')
+
+    # --- accumulator headroom from NPARTICLES2 (NPARTICLES + 2 spurions).
+    # NPARTICLES2 is a firmware constant the loader already mirrors (NPELICAN.h:
+    # NPARTICLES2 = NPARTICLES + 2 = 22); accumulators are NOT covered by any
+    # learned scale, so they get explicit integer headroom over the summand type.
+    NPARTICLES = 20
+    NPARTICLES2 = NPARTICLES + 2
+    H2 = math.ceil(math.log2(NPARTICLES2 ** 2))   # full-sum headroom = 9
+    H1 = math.ceil(math.log2(NPARTICLES2))        # row-sum headroom  = 5
+
+    acc2_W, acc2_I       = B + H2, t2_I + H2
+    accrow_W, accrow_I   = B + H1, t2_I + H1
+    acc0_W, acc0_I       = B + H2, t0_I + H2
+    acc0row_W, acc0row_I = B + H1, t0_I + H1
+
+    # --- MAC headroom from term counts ---
+    mac2_terms = 6 + 1 + 1            # 6 products w1*t2 + bias + diag_bias = 8 summands
+    mac0_terms = 2 * NHIDDEN + 1      # 2*NHIDDEN products w2*t0 + bias
+    mac2_I = w1_I + t2_I + math.ceil(math.log2(mac2_terms))
+    mac2_W = mac2_I + B
+    mac0_I = w2_I + t0_I + math.ceil(math.log2(mac0_terms))
+    mac0_W = mac0_I + B
+
+    def _fixed(W, I, signed, rnd='AP_RND_CONV', sat='AP_SAT'):
+        base = 'ap_fixed' if signed else 'ap_ufixed'
+        return f'{base}<{W}, {I}, {rnd}, {sat}>'
+
+    L = []
+    L.append('#ifndef NPELICAN_TYPES_GENERATED_H_')
+    L.append('#define NPELICAN_TYPES_GENERATED_H_')
+    L.append('')
+    L.append('// GENERATED by model_loader.py --quant. Do not hand-edit.')
+    L.append('// Per-quantizer fixed-point types derived from the checkpoint\'s learned')
+    L.append('// Brevitas scales (k = -log2(scale); I = bits - k). Accumulator / MAC types')
+    L.append('// derived by formula from those + term counts. Phase 1: INERT include — not')
+    L.append('// yet wired into the datapath (Phase 2 swaps usage and retires the old types).')
+    L.append('')
+    L.append('#include "ap_fixed.h"')
+    L.append('')
+    L.append('#define NPELICAN_GENERATED_TYPES 1')
+    L.append('')
+    L.append('// ---- Quantization-point types: ap_fixed<B, B-k, AP_RND_CONV, AP_SAT> ----')
+
+    def _pt_line(tname, W, I, signed, scale, k, who):
+        sg = 'signed' if signed else 'unsigned'
+        return (f'typedef {_fixed(W, I, signed)} {tname};'
+                f'  // {who} ({sg}): scale=2^-{k} ({scale:.9e}), bits={W}, k={k}')
+
+    L.append(_pt_line('dot_t',    dot_W,  dot_I,  dot_s,  act['input_quant']['scale'], dot_k, 'input_quant'))
+    L.append(_pt_line('t2_t',     t2_W,   t2_I,   t2_s,   act['net2to2.eq_layers.0.post_agg_quant']['scale'], t2_k, 'post_agg 2->2'))
+    L.append(_pt_line('relu_t',   relu_W, relu_I, relu_s, act['net2to2.eq_layers.0.act_layer']['scale'], relu_k, 'act_layer (QuantReLU)'))
+    L.append(_pt_line('t0_t',     t0_W,   t0_I,   t0_s,   act['agg_2to0.post_agg_quant']['scale'], t0_k, 'post_agg 2->0'))
+    L.append(_pt_line('out_t',    out_W,  out_I,  out_s,  act['output_quant']['scale'], out_k, 'output_quant'))
+    L.append(_pt_line('w1_gen_t', w1_W,   w1_I,   w1_s,   wgt['net2to2.eq_layers.0']['scale'], w1_k, '2->2 weights'))
+    L.append(_pt_line('w2_gen_t', w2_W,   w2_I,   w2_s,   wgt['agg_2to0']['scale'], w2_k, '2->0 weights'))
+    L.append('')
+    L.append('// ---- Float-trained biases and BatchNorm constants ----')
+    L.append(f'typedef {_fixed(B, 4, True)} bias_t_gen;'
+             f'  // b1, b1_diag, b2 (float-trained); asserted max|bias|={bias_max:.6g} < 8')
+    L.append(f'typedef ap_fixed<{B}, 12, AP_TRN_ZERO, AP_SAT> bn_t_gen;'
+             f'  // BN constants (mean O(100)); asserted max|c|={bn_max:.6g} < 2^11')
+    L.append('')
+    L.append('// ---- Accumulators (normalize-late: raw sum first, ONE rescale after; see')
+    L.append('//      CLAUDE.md). Default ap_fixed rounding/overflow ON PURPOSE — accumulation')
+    L.append('//      must be EXACT, so no AP_RND_CONV here; integer headroom = ceil(log2(#terms))')
+    L.append(f'//      over the summand type. NPARTICLES2 = NPARTICLES+2 = {NPARTICLES2}.')
+    L.append(f'//      H2 = ceil(log2(NPARTICLES2^2)) = {H2}; H1 = ceil(log2(NPARTICLES2)) = {H1}.')
+    L.append(f'typedef ap_fixed<{acc2_W}, {acc2_I}> acc2_t;     // jmass raw sum of t2-range summands (B+H2, I(t2_t)+H2)')
+    L.append(f'typedef ap_fixed<{accrow_W}, {accrow_I}> accrow_t;   // jdotp row sums (B+H1, I(t2_t)+H1)')
+    L.append(f'typedef ap_fixed<{acc0_W}, {acc0_I}> acc0_t;     // R full sum (B+H2, I(t0_t)+H2)')
+    L.append(f'typedef ap_fixed<{acc0row_W}, {acc0row_I}> acc0row_t;  // trace (B+H1, I(t0_t)+H1)')
+    L.append('')
+    L.append('// ---- MAC temporaries: I = I(weight)+I(operand)+ceil(log2(#terms)), W = I+B ----')
+    L.append(f'typedef ap_fixed<{mac2_W}, {mac2_I}> mac2_t;     // 2->2 dense: 6 w1*t2 products + b1 + b1_diag = {mac2_terms} terms')
+    L.append(f'typedef ap_fixed<{mac0_W}, {mac0_I}> mac0_t;     // 2->0 dense: 2*NHIDDEN w2*t0 products + b2 = {mac0_terms} terms')
+    L.append('')
+    L.append('#endif  // NPELICAN_TYPES_GENERATED_H_')
+    L.append('')
+
+    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+    with open(path, 'w') as fh:
+        fh.write('\n'.join(L))
+    print(f'Wrote {path}')
+
+    # Return scale comment lines to append to weights.h (D3: scales on the record).
+    cl = ['', '//---- learned QAT scales (k = -log2(scale)); see types_generated.h ----']
+    for nm, info in act.items():
+        kk = _po2_k(info['scale'], nm)
+        cl.append(f'//  {nm:<34} scale=2^-{kk} ({info["scale"]:.9e}) signed={info["signed"]} bits={info["bits"]}')
+    for nm, info in wgt.items():
+        kk = _po2_k(info['scale'], nm)
+        cl.append(f'//  {nm+" (weights)":<34} scale=2^-{kk} ({info["scale"]:.9e}) signed={info["signed"]} bits={info["bits"]}')
+    return cl
+
 
 # ---------------------------------------------------------------------------
 # Dispatch + write weights.h (format unchanged apart from optional types)
@@ -217,6 +443,14 @@ else:
 
 w1_type = 'w1_t' if args.split_types else 'weight_t'
 w2_type = 'w2_t' if args.split_types else 'weight_t'
+
+# Emit the generated typedef header (--quant only) and collect the scale comment
+# lines to append to weights.h for the record (plan D3).
+_scale_comment_lines = []
+if args.quant:
+    _scale_comment_lines = _emit_types_header(
+        args.out_types, _quant_info['act'], _quant_info['weight'],
+        b1_2to2, b1d_2to2, b2_2to0)
 
 os.makedirs(os.path.dirname(args.out) or '.', exist_ok=True)
 with open(args.out, 'w') as f:
@@ -244,5 +478,9 @@ with open(args.out, 'w') as f:
     f.write('//2to1 linear layer\n')
     f.write(f'{w2_type} w2_2to0[NHIDDEN*2*NOUT] = ' + _c(w2_2to0) + ';\n')
     f.write('bias_t b2_2to0[NOUT] = ' + _c(b2_2to0) + ';\n')
+
+    # D3: measured QAT scales appended as comments for the record (quant path only).
+    if _scale_comment_lines:
+        f.write('\n'.join(_scale_comment_lines) + '\n')
 
 print(f'\nWrote {args.out}  (NHIDDEN={NHIDDEN}, NOUT={NOUT})')

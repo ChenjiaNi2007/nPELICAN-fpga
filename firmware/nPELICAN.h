@@ -8,6 +8,12 @@
 
 #include <cmath>
 
+// Generated per-stage fixed-point typedefs (model_loader.py --quant). Phase 1:
+// INERT include — these generated types are NOT yet wired into the datapath
+// (Phase 2 swaps the hand-written typedefs below for the generated ones). The
+// existing typedefs in this header stay byte-identical for now.
+#include "weights/types_generated.h"
+
 #define NPARTICLES  20
 #define NPARTICLES2 22  //Max number of particles plus number of spurions
 #define NHIDDEN 2       //Number of parallel channels

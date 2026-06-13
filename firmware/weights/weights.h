@@ -21,3 +21,12 @@ weight_t batch2_2to0[NHIDDEN][3] = {{ 1.530051697045565e-02,  1.301911010742188e
 //2to1 linear layer
 weight_t w2_2to0[NHIDDEN*2*NOUT] = { 0.008559703826904, -2.889031887054443, -0.383216857910156, -1.464580535888672};
 bias_t b2_2to0[NOUT] = {-0.339796096086502};
+
+//---- learned QAT scales (k = -log2(scale)); see types_generated.h ----
+//  input_quant                        scale=2^-10 (9.765625000e-04) signed=True bits=24
+//  output_quant                       scale=2^-23 (1.192092896e-07) signed=True bits=24
+//  net2to2.eq_layers.0.post_agg_quant scale=2^-18 (3.814697266e-06) signed=True bits=24
+//  net2to2.eq_layers.0.act_layer      scale=2^-22 (2.384185791e-07) signed=True bits=24
+//  agg_2to0.post_agg_quant            scale=2^-23 (1.192092896e-07) signed=True bits=24
+//  net2to2.eq_layers.0 (weights)      scale=2^-22 (2.384185791e-07) signed=True bits=24
+//  agg_2to0 (weights)                 scale=2^-21 (4.768371582e-07) signed=True bits=24
