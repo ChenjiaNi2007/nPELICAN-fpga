@@ -347,10 +347,23 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     H2 = math.ceil(math.log2(NPARTICLES2 ** 2))   # full-sum headroom = 9
     H1 = math.ceil(math.log2(NPARTICLES2))        # row-sum headroom  = 5
 
+    # --- Tr = BatchNorm2(relu) is UNQUANTIZED in PyTorch and its range is blown up by the
+    # BN2 scale gamma/sigma (here ~130x); the post_agg-2to0 quantizer's I (=t0_I) reflects the
+    # NORMALIZED R (|R|<1), NOT Tr, so Tr needs its own width or it saturates. Bound it from the
+    # relu range (relu output in [0, 2^(relu_I-1))) and the BN2 constants, then keep t0's
+    # fractional grid so the 2to0 aggregation sums it cleanly.
+    relu_max = 2.0 ** (relu_I - 1)
+    bn2 = np.asarray(batch2).reshape(-1, 3)   # [channel][mean, scale, beta]
+    tr_bound = float(max((relu_max + abs(m)) * abs(s) + abs(b) for m, s, b in bn2))
+    tr_F = t0_W - t0_I                                   # t0 fractional bits (23)
+    tr_I = int(math.ceil(math.log2(tr_bound))) + 1       # +1 sign bit
+    tr_W = tr_I + tr_F
+
     acc2_W, acc2_I       = B + H2, t2_I + H2
     accrow_W, accrow_I   = B + H1, t2_I + H1
-    acc0_W, acc0_I       = B + H2, t0_I + H2
-    acc0row_W, acc0row_I = B + H1, t0_I + H1
+    # 2to0 accumulators size from the Tr (tr_t) summand, NOT t0_t.
+    acc0_W, acc0_I       = tr_W + H2, tr_I + H2
+    acc0row_W, acc0row_I = tr_W + H1, tr_I + H1
 
     # --- MAC temporaries: EXACT product width + term-count headroom ---
     # The product weight*operand is exact at F = F(weight)+F(operand) fractional bits; keep
@@ -429,8 +442,13 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     L.append(f'//      H2 = ceil(log2(NPARTICLES2^2)) = {H2}; H1 = ceil(log2(NPARTICLES2)) = {H1}.')
     L.append(f'typedef ap_fixed<{acc2_W}, {acc2_I}> acc2_t;     // jmass raw sum of t2-range summands (B+H2, I(t2_t)+H2)')
     L.append(f'typedef ap_fixed<{accrow_W}, {accrow_I}> accrow_t;   // jdotp row sums (B+H1, I(t2_t)+H1)')
-    L.append(f'typedef ap_fixed<{acc0_W}, {acc0_I}> acc0_t;     // R full sum (B+H2, I(t0_t)+H2)')
-    L.append(f'typedef ap_fixed<{acc0row_W}, {acc0row_I}> acc0row_t;  // trace (B+H1, I(t0_t)+H1)')
+    L.append('')
+    L.append('// Tr = BatchNorm2(relu): NOT a quantization point; its range is widened by the BN2')
+    L.append(f'//      scale (gamma/sigma), so it gets I={tr_I} (|Tr|<={tr_bound:.1f}) rather than t0_t\'s I={t0_I};')
+    L.append('//      keeps the t0 fractional grid so the 2to0 sums stay clean. SAT guards the bound.')
+    L.append(f'typedef ap_fixed<{tr_W}, {tr_I}, AP_RND_CONV, AP_SAT> tr_t;')
+    L.append(f'typedef ap_fixed<{acc0_W}, {acc0_I}> acc0_t;     // R full sum of tr_t summands (I(tr_t)+H2)')
+    L.append(f'typedef ap_fixed<{acc0row_W}, {acc0row_I}> acc0row_t;  // trace, sum of tr_t (I(tr_t)+H1)')
     L.append('')
     L.append('// ---- MAC temporaries: I = I(weight)+I(operand)+ceil(log2(#terms)), W = I+B ----')
     L.append(f'typedef ap_fixed<{mac2_W}, {mac2_I}> mac2_t;     // 2->2 dense: 6 w1*t2 products + b1 + b1_diag = {mac2_terms} terms')

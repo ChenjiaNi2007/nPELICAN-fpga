@@ -35,8 +35,13 @@ typedef ap_fixed<40, 1, AP_RND_CONV, AP_SAT> norm_t;  // 1/N̄, 1/N̄^2 normaliz
 //      H2 = ceil(log2(NPARTICLES2^2)) = 9; H1 = ceil(log2(NPARTICLES2)) = 5.
 typedef ap_fixed<33, 15> acc2_t;     // jmass raw sum of t2-range summands (B+H2, I(t2_t)+H2)
 typedef ap_fixed<29, 11> accrow_t;   // jdotp row sums (B+H1, I(t2_t)+H1)
-typedef ap_fixed<33, 10> acc0_t;     // R full sum (B+H2, I(t0_t)+H2)
-typedef ap_fixed<29, 6> acc0row_t;  // trace (B+H1, I(t0_t)+H1)
+
+// Tr = BatchNorm2(relu): NOT a quantization point; its range is widened by the BN2
+//      scale (gamma/sigma), so it gets I=10 (|Tr|<=262.6) rather than t0_t's I=1;
+//      keeps the t0 fractional grid so the 2to0 sums stay clean. SAT guards the bound.
+typedef ap_fixed<33, 10, AP_RND_CONV, AP_SAT> tr_t;
+typedef ap_fixed<42, 19> acc0_t;     // R full sum of tr_t summands (I(tr_t)+H2)
+typedef ap_fixed<38, 15> acc0row_t;  // trace, sum of tr_t (I(tr_t)+H1)
 
 // ---- MAC temporaries: I = I(weight)+I(operand)+ceil(log2(#terms)), W = I+B ----
 typedef ap_fixed<51, 11> mac2_t;     // 2->2 dense: 6 w1*t2 products + b1 + b1_diag = 8 terms

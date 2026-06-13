@@ -257,10 +257,11 @@ void nPELICAN(
       }
     }
 
-    //second batchnorm: float-constant affine on the relu output, then round onto the
-    //post_agg-2to0 grid (t0_t). Tr is the quantity PyTorch aggregates in float for the
-    //2->0 ops; t0-grid storage keeps the row/total sums exact in acc0row_t/acc0_t.
-    t0_t Tr[NPARTICLES2][NPARTICLES2][NHIDDEN];
+    //second batchnorm: float-constant affine on the relu output. Tr is what PyTorch
+    //aggregates in float for the 2->0 ops; it is NOT a quantization point and the BN2
+    //scale widens its range (~130x), so it is stored in tr_t (wide I, t0 fractional grid)
+    //— NOT t0_t, which (I=1) would saturate it. The 2->0 sums stay clean in acc0(row)_t.
+    tr_t Tr[NPARTICLES2][NPARTICLES2][NHIDDEN];
     #pragma HLS ARRAY_PARTITION variable=Tr complete dim=0
     for (unsigned int i = 0; i < NPARTICLES2; i++) {
     #pragma HLS unroll
@@ -268,7 +269,7 @@ void nPELICAN(
       #pragma HLS unroll
         for (unsigned int h = 0; h < NHIDDEN; h++) {
         #pragma HLS unroll
-            Tr[i][j][h] = (t0_t)(((Tp_q[i][j][h] - batch2_2to0[h][0]) * batch2_2to0[h][1] + batch2_2to0[h][2])*nobjmask[i][j]);
+            Tr[i][j][h] = (tr_t)(((Tp_q[i][j][h] - batch2_2to0[h][0]) * batch2_2to0[h][1] + batch2_2to0[h][2])*nobjmask[i][j]);
         }
       }
     }
