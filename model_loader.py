@@ -332,11 +332,11 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     # --- bias_t_gen / bn_t_gen with the documented range asserts ---
     bias_max = float(max(abs(np.asarray(b1)).max(), abs(np.asarray(b1d)).max(), abs(np.asarray(b2)).max()))
     if not (bias_max < 8):
-        sys.exit(f'ERROR: max|bias| = {bias_max} >= 8; bias_t_gen = ap_fixed<{B},4> cannot represent it.')
+        sys.exit(f'ERROR: max|bias| = {bias_max} >= 8; bias_t_gen (I=4) cannot represent it.')
     bn_max = float(np.abs(np.asarray(batch1)).max())
     bn_max = max(bn_max, float(np.abs(np.asarray(batch2)).max()))
-    if not (bn_max < 2 ** 11):
-        sys.exit(f'ERROR: max|BN const| = {bn_max} >= 2^11; bn_t_gen = ap_fixed<{B},12> cannot represent it.')
+    if not (bn_max < 2 ** 8):
+        sys.exit(f'ERROR: max|BN const| = {bn_max} >= 2^8; bn_t_gen (I=9) cannot represent it.')
 
     # --- accumulator headroom from NPARTICLES2 (NPARTICLES + 2 spurions).
     # NPARTICLES2 is a firmware constant the loader already mirrors (NPELICAN.h:
@@ -352,13 +352,19 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     acc0_W, acc0_I       = B + H2, t0_I + H2
     acc0row_W, acc0row_I = B + H1, t0_I + H1
 
-    # --- MAC headroom from term counts ---
+    # --- MAC temporaries: EXACT product width + term-count headroom ---
+    # The product weight*operand is exact at F = F(weight)+F(operand) fractional bits; keep
+    # all of them so the dense sum carries no internal rounding before the relu/out quantizer
+    # (PyTorch does this MAC in float, which is ~exact relative to those 2^-22 / 2^-23 grids).
+    # I = I(weight)+I(operand)+ceil(log2(#terms)) gives integer headroom for the sum.
+    w1_F, t2_F = w1_W - w1_I, t2_W - t2_I
+    w2_F, t0_F = w2_W - w2_I, t0_W - t0_I
     mac2_terms = 6 + 1 + 1            # 6 products w1*t2 + bias + diag_bias = 8 summands
     mac0_terms = 2 * NHIDDEN + 1      # 2*NHIDDEN products w2*t0 + bias
     mac2_I = w1_I + t2_I + math.ceil(math.log2(mac2_terms))
-    mac2_W = mac2_I + B
+    mac2_W = mac2_I + (w1_F + t2_F)
     mac0_I = w2_I + t0_I + math.ceil(math.log2(mac0_terms))
-    mac0_W = mac0_I + B
+    mac0_W = mac0_I + (w2_F + t0_F)
 
     def _fixed(W, I, signed, rnd='AP_RND_CONV', sat='AP_SAT'):
         base = 'ap_fixed' if signed else 'ap_ufixed'
@@ -393,11 +399,28 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     L.append(_pt_line('w1_gen_t', w1_W,   w1_I,   w1_s,   wgt['net2to2.eq_layers.0']['scale'], w1_k, '2->2 weights'))
     L.append(_pt_line('w2_gen_t', w2_W,   w2_I,   w2_s,   wgt['agg_2to0']['scale'], w2_k, '2->0 weights'))
     L.append('')
-    L.append('// ---- Float-trained biases and BatchNorm constants ----')
-    L.append(f'typedef {_fixed(B, 4, True)} bias_t_gen;'
-             f'  // b1, b1_diag, b2 (float-trained); asserted max|bias|={bias_max:.6g} < 8')
-    L.append(f'typedef ap_fixed<{B}, 12, AP_TRN_ZERO, AP_SAT> bn_t_gen;'
-             f'  // BN constants (mean O(100)); asserted max|c|={bn_max:.6g} < 2^11')
+    L.append('// ---- Float-trained biases / BatchNorm constants / normalization constants ----')
+    L.append('// These are NOT PyTorch quantization points (PyTorch keeps them in float), so')
+    L.append('// per CLAUDE.md/plan they are WIDENED, not snapped: their fixed-point rounding')
+    L.append('// error must stay below half the LSB of the next real quantizer they feed.')
+    # bias_t_gen: feeds the dense MAC then the relu/out quantizers (2^-22 / 2^-23). A 20-frac
+    # type (B=24,I=4) rounds some learned biases to ~2^-22, exceeding half the relu LSB; widen
+    # to F=24 frac (W=28) so |err| <= 2^-25.
+    BIAS_W, BIAS_I = 28, 4
+    L.append(f'typedef ap_fixed<{BIAS_W}, {BIAS_I}, AP_RND_CONV, AP_SAT> bias_t_gen;'
+             f'  // b1,b1_diag,b2 (float); |bias|max={bias_max:.6g}<8 (I={BIAS_I}); F={BIAS_W-BIAS_I}, err<=2^-{BIAS_W-BIAS_I+1}')
+    # bn_t_gen: the BN scale gamma/sigma multiplies (dots-mean), |dots-mean| up to ~10^3, so it
+    # needs |err| < 2^-29 (F>=29) to keep batch1 within half the t2 LSB (2^-19); the BN beta adds
+    # straight into batch1 needing F>=21. mean ~O(100) needs I>=9. Use <40,9> (F=31).
+    BN_W, BN_I = 40, 9
+    L.append(f'typedef ap_fixed<{BN_W}, {BN_I}, AP_RND_CONV, AP_SAT> bn_t_gen;'
+             f'  // BN mean/scale/beta (float); |c|max={bn_max:.6g}<2^{BN_I-1} (I={BN_I}); F={BN_W-BN_I}')
+    # norm_t: invnave=1/N̄, invnave2=1/N̄^2 (not po2). A 12-frac internal_t mis-rounds invnave2
+    # by ~40%. They multiply the raw aggregation sums feeding 2^-18/2^-23 grids; F=39 gives
+    # |err|~2^-33, safe even times the widest accumulator (~2^15).
+    NORM_W, NORM_I = 40, 1
+    L.append(f'typedef ap_fixed<{NORM_W}, {NORM_I}, AP_RND_CONV, AP_SAT> norm_t;'
+             f'  // 1/N̄, 1/N̄^2 normalize-late multipliers (F={NORM_W-NORM_I})')
     L.append('')
     L.append('// ---- Accumulators (normalize-late: raw sum first, ONE rescale after; see')
     L.append('//      CLAUDE.md). Default ap_fixed rounding/overflow ON PURPOSE — accumulation')
@@ -441,8 +464,17 @@ if args.quant:
 else:
     w1_2to2, b1_2to2, b1d_2to2, w2_2to0, b2_2to0 = _extract_float_weights()
 
-w1_type = 'w1_t' if args.split_types else 'weight_t'
-w2_type = 'w2_t' if args.split_types else 'weight_t'
+# Element typedefs for the weights.h arrays. Under --quant the firmware datapath
+# (nPELICAN.cpp, Phase 2) uses the GENERATED per-stage types, so the arrays are declared
+# with those; the float path keeps the original hand-written names. Array names, sizes,
+# element order and VALUES are frozen either way — only the element typedef name changes.
+if args.quant:
+    w1_type, w2_type = 'w1_gen_t', 'w2_gen_t'
+    bn_type, bias_type, norm_type = 'bn_t_gen', 'bias_t_gen', 'norm_t'
+else:
+    w1_type = 'w1_t' if args.split_types else 'weight_t'
+    w2_type = 'w2_t' if args.split_types else 'weight_t'
+    bn_type, bias_type, norm_type = 'weight_t', 'bias_t', 'internal_t'
 
 # Emit the generated typedef header (--quant only) and collect the scale comment
 # lines to append to weights.h for the record (plan D3).
@@ -461,23 +493,23 @@ with open(args.out, 'w') as f:
     nobj_avg = _arg('nobj_avg', 49)
     f.write('//normalization constants\n')
     f.write('//nobj avg = {}\n'.format(nobj_avg))
-    f.write('internal_t invnave = {};\n'.format(1 / nobj_avg))
-    f.write('internal_t invnave2 = {};\n\n'.format(1 / nobj_avg ** 2))
+    f.write(f'{norm_type} invnave = {1 / nobj_avg};\n')
+    f.write(f'{norm_type} invnave2 = {1 / nobj_avg ** 2};\n\n')
 
     f.write('//first batchnorm [mean, weight/sqrt(var), bias]\n')
-    f.write('weight_t batch1_2to2[3] = ' + _c(batch1) + ';\n\n')
+    f.write(f'{bn_type} batch1_2to2[3] = ' + _c(batch1) + ';\n\n')
 
     f.write('//2to2 linear layer\n')
     f.write(f'{w1_type} w1_2to2[NHIDDEN*6] = ' + _c(w1_2to2) + ';\n')
-    f.write('bias_t b1_2to2[NHIDDEN] = ' + _c(b1_2to2) + ';\n')
-    f.write('bias_t b1_diag_2to2[NHIDDEN] = ' + _c(b1d_2to2) + ';\n\n')
+    f.write(f'{bias_type} b1_2to2[NHIDDEN] = ' + _c(b1_2to2) + ';\n')
+    f.write(f'{bias_type} b1_diag_2to2[NHIDDEN] = ' + _c(b1d_2to2) + ';\n\n')
 
     f.write('//second batchnorm [channel][mean, weight/sqrt(var), bias]\n')
-    f.write('weight_t batch2_2to0[NHIDDEN][3] = ' + _c(batch2) + ';\n\n')
+    f.write(f'{bn_type} batch2_2to0[NHIDDEN][3] = ' + _c(batch2) + ';\n\n')
 
     f.write('//2to1 linear layer\n')
     f.write(f'{w2_type} w2_2to0[NHIDDEN*2*NOUT] = ' + _c(w2_2to0) + ';\n')
-    f.write('bias_t b2_2to0[NOUT] = ' + _c(b2_2to0) + ';\n')
+    f.write(f'{bias_type} b2_2to0[NOUT] = ' + _c(b2_2to0) + ';\n')
 
     # D3: measured QAT scales appended as comments for the record (quant path only).
     if _scale_comment_lines:

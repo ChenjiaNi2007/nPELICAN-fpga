@@ -20,9 +20,13 @@ typedef ap_fixed<24, 1, AP_RND_CONV, AP_SAT> out_t;  // output_quant (signed): s
 typedef ap_fixed<24, 2, AP_RND_CONV, AP_SAT> w1_gen_t;  // 2->2 weights (signed): scale=2^-22 (2.384185791e-07), bits=24, k=22
 typedef ap_fixed<24, 3, AP_RND_CONV, AP_SAT> w2_gen_t;  // 2->0 weights (signed): scale=2^-21 (4.768371582e-07), bits=24, k=21
 
-// ---- Float-trained biases and BatchNorm constants ----
-typedef ap_fixed<24, 4, AP_RND_CONV, AP_SAT> bias_t_gen;  // b1, b1_diag, b2 (float-trained); asserted max|bias|=0.339796 < 8
-typedef ap_fixed<24, 12, AP_TRN_ZERO, AP_SAT> bn_t_gen;  // BN constants (mean O(100)); asserted max|c|=130.191 < 2^11
+// ---- Float-trained biases / BatchNorm constants / normalization constants ----
+// These are NOT PyTorch quantization points (PyTorch keeps them in float), so
+// per CLAUDE.md/plan they are WIDENED, not snapped: their fixed-point rounding
+// error must stay below half the LSB of the next real quantizer they feed.
+typedef ap_fixed<28, 4, AP_RND_CONV, AP_SAT> bias_t_gen;  // b1,b1_diag,b2 (float); |bias|max=0.339796<8 (I=4); F=24, err<=2^-25
+typedef ap_fixed<40, 9, AP_RND_CONV, AP_SAT> bn_t_gen;  // BN mean/scale/beta (float); |c|max=130.191<2^8 (I=9); F=31
+typedef ap_fixed<40, 1, AP_RND_CONV, AP_SAT> norm_t;  // 1/N̄, 1/N̄^2 normalize-late multipliers (F=39)
 
 // ---- Accumulators (normalize-late: raw sum first, ONE rescale after; see
 //      CLAUDE.md). Default ap_fixed rounding/overflow ON PURPOSE — accumulation
@@ -35,7 +39,7 @@ typedef ap_fixed<33, 10> acc0_t;     // R full sum (B+H2, I(t0_t)+H2)
 typedef ap_fixed<29, 6> acc0row_t;  // trace (B+H1, I(t0_t)+H1)
 
 // ---- MAC temporaries: I = I(weight)+I(operand)+ceil(log2(#terms)), W = I+B ----
-typedef ap_fixed<35, 11> mac2_t;     // 2->2 dense: 6 w1*t2 products + b1 + b1_diag = 8 terms
-typedef ap_fixed<31, 7> mac0_t;     // 2->0 dense: 2*NHIDDEN w2*t0 products + b2 = 5 terms
+typedef ap_fixed<51, 11> mac2_t;     // 2->2 dense: 6 w1*t2 products + b1 + b1_diag = 8 terms
+typedef ap_fixed<51, 7> mac0_t;     // 2->0 dense: 2*NHIDDEN w2*t0 products + b2 = 5 terms
 
 #endif  // NPELICAN_TYPES_GENERATED_H_
