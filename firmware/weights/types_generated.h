@@ -24,8 +24,8 @@ typedef ap_fixed<24, 3, AP_RND_CONV, AP_SAT> w2_gen_t;  // 2->0 weights (signed)
 // These are NOT PyTorch quantization points (PyTorch keeps them in float), so
 // per CLAUDE.md/plan they are WIDENED, not snapped: their fixed-point rounding
 // error must stay below half the LSB of the next real quantizer they feed.
-typedef ap_fixed<28, 4, AP_RND_CONV, AP_SAT> bias_t_gen;  // b1,b1_diag,b2 (float); |bias|max=0.339796<8 (I=4); F=24, err<=2^-25
-typedef ap_fixed<40, 9, AP_RND_CONV, AP_SAT> bn_t_gen;  // BN mean/scale/beta (float); |c|max=126.495<2^8 (I=9); F=31
+typedef ap_fixed<26, 2, AP_RND_CONV, AP_SAT> bias_t_gen;  // b1,b1_diag,b2 (float); |bias|max=0.339796 (I=2), F=24
+typedef ap_fixed<41, 8, AP_RND_CONV, AP_SAT> bn_t_gen;  // BN mean/scale/beta (float); |c|max=126.495 (I=8), F=33
 typedef ap_fixed<40, 1, AP_RND_CONV, AP_SAT> norm_t;  // 1/N̄, 1/N̄^2 normalize-late multipliers (F=39)
 
 // ---- Aggregation summands (unquantized BatchNorm outputs) + their accumulators.

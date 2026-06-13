@@ -338,14 +338,30 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     # quantizer's bit width as B for the formula-derived accumulator/MAC types.
     B = dot_W
 
-    # --- bias_t_gen / bn_t_gen with the documented range asserts ---
+    # --- bias_t_gen / bn_t_gen widths DERIVED from the actual constant magnitudes ---
+    # (not hardcoded — the int width must grow with the checkpoint, e.g. BN running_mean
+    # scales with jet energy and can exceed a few hundred). _int_bits returns a signed
+    # integer-bit count I whose ap_fixed range +/-2^(I-1) strictly exceeds the magnitude.
+    def _int_bits(maxabs, floor_bits=2):
+        if maxabs <= 0:
+            return floor_bits
+        return max(floor_bits, int(math.floor(math.log2(maxabs))) + 2)
+
+    t2_F = t2_W - t2_I                       # post_agg-2to2 grid fractional bits
+
     bias_max = float(max(abs(np.asarray(b1)).max(), abs(np.asarray(b1d)).max(), abs(np.asarray(b2)).max()))
-    if not (bias_max < 8):
-        sys.exit(f'ERROR: max|bias| = {bias_max} >= 8; bias_t_gen (I=4) cannot represent it.')
+    BIAS_F = 24                              # fine enough vs the relu/out grids (2^-22 / 2^-23)
+    BIAS_I = _int_bits(bias_max)
+    BIAS_W = BIAS_I + BIAS_F
+
     bn_max = float(np.abs(np.asarray(batch1)).max())
     bn_max = max(bn_max, float(np.abs(np.asarray(batch2)).max()))
-    if not (bn_max < 2 ** 8):
-        sys.exit(f'ERROR: max|BN const| = {bn_max} >= 2^8; bn_t_gen (I=9) cannot represent it.')
+    # The BN scale multiplies (dots - mean); size its fractional part so the scale-rounding
+    # error stays under half the t2 LSB even for dots spanning the full dot_t range
+    # (data-independent / robust to the learned mean). +2 is margin.
+    BN_I = _int_bits(bn_max)
+    BN_F = t2_F + (dot_I - 1) + 2
+    BN_W = BN_I + BN_F
 
     # --- accumulator headroom from NPARTICLES2 (NPARTICLES + 2 spurions).
     # NPARTICLES2 is a firmware constant the loader already mirrors (NPELICAN.h:
@@ -437,18 +453,15 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     L.append('// These are NOT PyTorch quantization points (PyTorch keeps them in float), so')
     L.append('// per CLAUDE.md/plan they are WIDENED, not snapped: their fixed-point rounding')
     L.append('// error must stay below half the LSB of the next real quantizer they feed.')
-    # bias_t_gen: feeds the dense MAC then the relu/out quantizers (2^-22 / 2^-23). A 20-frac
-    # type (B=24,I=4) rounds some learned biases to ~2^-22, exceeding half the relu LSB; widen
-    # to F=24 frac (W=28) so |err| <= 2^-25.
-    BIAS_W, BIAS_I = 28, 4
+    # bias_t_gen: biases feed the dense MAC then the relu/out quantizers (2^-22 / 2^-23);
+    # F=24 keeps |err|<=2^-25, and the integer width is derived from |bias|max (above).
     L.append(f'typedef ap_fixed<{BIAS_W}, {BIAS_I}, AP_RND_CONV, AP_SAT> bias_t_gen;'
-             f'  // b1,b1_diag,b2 (float); |bias|max={bias_max:.6g}<8 (I={BIAS_I}); F={BIAS_W-BIAS_I}, err<=2^-{BIAS_W-BIAS_I+1}')
-    # bn_t_gen: the BN scale gamma/sigma multiplies (dots-mean), |dots-mean| up to ~10^3, so it
-    # needs |err| < 2^-29 (F>=29) to keep batch1 within half the t2 LSB (2^-19); the BN beta adds
-    # straight into batch1 needing F>=21. mean ~O(100) needs I>=9. Use <40,9> (F=31).
-    BN_W, BN_I = 40, 9
+             f'  // b1,b1_diag,b2 (float); |bias|max={bias_max:.6g} (I={BIAS_I}), F={BIAS_F}')
+    # bn_t_gen: BN mean/scale/beta. The scale gamma/sigma multiplies (dots-mean), so F is sized
+    # to keep scale-rounding under half the t2 LSB across the full dot_t range; I is derived
+    # from |c|max (the running_mean grows with jet energy and is the usual driver).
     L.append(f'typedef ap_fixed<{BN_W}, {BN_I}, AP_RND_CONV, AP_SAT> bn_t_gen;'
-             f'  // BN mean/scale/beta (float); |c|max={bn_max:.6g}<2^{BN_I-1} (I={BN_I}); F={BN_W-BN_I}')
+             f'  // BN mean/scale/beta (float); |c|max={bn_max:.6g} (I={BN_I}), F={BN_F}')
     # norm_t: invnave=1/N̄, invnave2=1/N̄^2 (not po2). A 12-frac internal_t mis-rounds invnave2
     # by ~40%. They multiply the raw aggregation sums feeding 2^-18/2^-23 grids; F=39 gives
     # |err|~2^-33, safe even times the widest accumulator (~2^15).
