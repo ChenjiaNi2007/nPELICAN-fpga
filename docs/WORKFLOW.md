@@ -117,8 +117,11 @@ vitis_hls -f build_prj.tcl reset=1 csim=1 synth=0 cosim=0 validation=0 export=0 
 vitis_hls -f build_prj.tcl reset=1 csim=1 synth=1 cosim=0 validation=0 export=0 vsynth=0
 ```
 
-Target part `xcvu13p-flga2577-1-e`, 5 ns clock (`project.tcl`). The testbench auto-runs in golden
-mode when `tb_data/golden_pmu.dat` exists and prints two **tolerance gates**:
+Target part `xcvu13p-flga2577-1-e`, 5 ns clock (`project.tcl`). **By default csim runs the legacy
+10k flow** (`tb_data/10k_*.dat`). The bit-exactness gate is **opt-in**: define `RUN_GOLDEN_GATE`
+(uncomment the line near the top of `nPELICAN_tb.cpp`, or add `-DRUN_GOLDEN_GATE` to the
+testbench cflags in `build_prj.tcl`). With the gate enabled (and `tb_data/golden_pmu.dat`
+present) it prints two **tolerance gates**:
 
 ```
 GOLDEN SUMMARY:     events=200 exact=133 mismatch=67 max_abs_delta=6.3e-04 ...

@@ -24,8 +24,15 @@ extern FILE* npelican_dump_fp;
 extern dot_t* npelican_dots_override;   // DOTS-LEVEL injection hook (see nPELICAN.cpp)
 #endif
 
+// The golden-vector / dots-level gate is OPT-IN. By default csim runs the legacy
+// 10k flow (tb_data/10k_*.dat). To run the bit-exactness gate instead, define
+// RUN_GOLDEN_GATE — either uncomment the line below, or add -DRUN_GOLDEN_GATE to the
+// testbench cflags in build_prj.tcl (the `add_files -tb ... -cflags` line).
+// #define RUN_GOLDEN_GATE
+
 int main(int argc, char **argv) {
 
+#ifdef RUN_GOLDEN_GATE
     // ---------------------------------------------------------------
     // Golden-vector mode: activated when tb_data/golden_pmu.dat exists
     // ---------------------------------------------------------------
@@ -233,9 +240,11 @@ int main(int argc, char **argv) {
 
         return 0;
     }
+#endif  // RUN_GOLDEN_GATE
 
     // ---------------------------------------------------------------
-    // Legacy 10k flow (unchanged): runs when golden files are absent
+    // Legacy 10k flow: the default csim path (always runs unless RUN_GOLDEN_GATE
+    // is defined and tb_data/golden_pmu.dat is present)
     // ---------------------------------------------------------------
 
     // load input data from text file

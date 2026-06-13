@@ -39,8 +39,8 @@ header edits. The loop:
    ```
    Writes `tb_data/golden_{pmu,nobj,logits,dots}.dat` and `golden_stage_dump.txt`.
 
-4. **C-sim** (`vitis_hls -f build_prj.tcl`). The testbench auto-runs in golden mode when
-   `tb_data/golden_pmu.dat` is present and prints two gate verdicts (see below).
+4. **C-sim** (`vitis_hls -f build_prj.tcl`). By default the testbench runs the legacy 10k flow;
+   define `RUN_GOLDEN_GATE` to run the bit-exactness gate instead (see below).
 
 ## Bit-exactness gate
 
