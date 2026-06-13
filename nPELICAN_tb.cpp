@@ -100,10 +100,22 @@ int main(int argc, char **argv) {
         fgnobj.close();
         fglogits.close();
 
+        // Tolerance gate. Zero-tolerance bit-exactness is not achievable against a float
+        // reference because the model keeps BatchNorm in float (an architecture invariant):
+        // float-vs-fixed rounding in the unquantized BN/aggregation segments tips a quantizer
+        // boundary on a minority of events, cascading to <=~1e-5 on the logit (network), plus
+        // the documented dot4 front-end caveat (PyTorch computes d_ij in lossy float32) on the
+        // momenta path. PASS = max|delta| under tolerance; the exact count is reported too.
+        const double TOL_GOLDEN = 1e-3;   // momenta path: includes the dot4 front-end residual
+        const double TOL_NET    = 1e-4;   // dots-level (network isolated): float-BN tipping only
+
         // Print summary
         printf("GOLDEN SUMMARY: events=%d exact=%d mismatch=%d max_abs_delta=%.17g first_mismatch=%d\n",
                n_events, n_exact, n_mismatch, max_abs_delta,
                first_mismatch_idx);
+        printf("GOLDEN GATE: %s (max_abs_delta=%.3g vs tol=%.3g; %d/%d zero-tolerance exact)\n",
+               (max_abs_delta < TOL_GOLDEN ? "PASS" : "FAIL"), max_abs_delta, TOL_GOLDEN,
+               n_exact, n_events);
 
 #ifndef __SYNTHESIS__
         // ---------------------------------------------------------------
@@ -153,6 +165,8 @@ int main(int argc, char **argv) {
             }
             printf("DOTS-LEVEL SUMMARY: events=%d exact=%d mismatch=%d max_abs_delta=%.17g first_mismatch=%d\n",
                    d_events, d_exact, d_mismatch, d_maxdelta, d_first);
+            printf("DOTS-LEVEL GATE: %s (max_abs_delta=%.3g vs tol=%.3g; %d/%d zero-tolerance exact)\n",
+                   (d_maxdelta < TOL_NET ? "PASS" : "FAIL"), d_maxdelta, TOL_NET, d_exact, d_events);
         }
 #endif
 
