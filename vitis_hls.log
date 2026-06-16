@@ -172,3 +172,11 @@ INFO: [HLS 200-111] Finished Checking Synthesizability: CPU user time: 8.78 seco
 INFO: [XFORM 203-401] Performing if-conversion on hyperblock to (firmware/nPELICAN.cpp:426:1) in function 'nPELICAN'... converting 4887 basic blocks.
 INFO: [XFORM 203-11] Balancing expressions in function 'nPELICAN' (firmware/nPELICAN.cpp:65:27)...3742 expression(s) balanced.
 INFO: [HLS 200-111] Finished Loop, function and other optimizations: CPU user time: 138.86 seconds. CPU system time: 0.75 seconds. Elapsed time: 139.63 seconds; current allocated memory: 1.670 GB.
+INFO: [HLS 200-111] Finished Architecture Synthesis: CPU user time: 1245.29 seconds. CPU system time: 0.72 seconds. Elapsed time: 1246.08 seconds; current allocated memory: 1.670 GB.
+INFO: [HLS 200-10] Starting hardware synthesis ...
+INFO: [HLS 200-10] Synthesizing 'nPELICAN' ...
+INFO: [HLS 200-10] ----------------------------------------------------------------
+INFO: [HLS 200-42] -- Implementing module 'nPELICAN' 
+INFO: [HLS 200-10] ----------------------------------------------------------------
+INFO: [SCHED 204-11] Starting scheduling ...
+INFO: [SCHED 204-61] Pipelining function 'nPELICAN'.
