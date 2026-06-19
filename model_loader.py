@@ -348,9 +348,16 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
         return max(floor_bits, int(math.floor(math.log2(maxabs))) + 2)
 
     t2_F = t2_W - t2_I                       # post_agg-2to2 grid fractional bits
+    relu_F = relu_W - relu_I                  # act_layer (ReLU) grid fractional bits
+    out_F = out_W - out_I                     # output_quant grid fractional bits
 
     bias_max = float(max(abs(np.asarray(b1)).max(), abs(np.asarray(b1d)).max(), abs(np.asarray(b2)).max()))
-    BIAS_F = 24                              # fine enough vs the relu/out grids (2^-22 / 2^-23)
+    # b1,b1_diag are added in the 2->2 MAC then quantized to the relu grid; b2 in the 2->0
+    # MAC then quantized to the out grid. Size F to the FINER of those two learned grids so
+    # the bias-rounding error (2^-(BIAS_F+1)) stays <= 1/4 LSB of whichever grid it feeds;
+    # +1 = guard bit. Derived from the learned scales so it tracks the QAT bit-width flags
+    # (was a hardcoded 24, sized for the old 24-bit grids).
+    BIAS_F = max(relu_F, out_F) + 1
     BIAS_I = _int_bits(bias_max)
     BIAS_W = BIAS_I + BIAS_F
 
@@ -463,9 +470,18 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     L.append(f'typedef ap_fixed<{BN_W}, {BN_I}, AP_RND_CONV, AP_SAT> bn_t_gen;'
              f'  // BN mean/scale/beta (float); |c|max={bn_max:.6g} (I={BN_I}), F={BN_F}')
     # norm_t: invnave=1/N̄, invnave2=1/N̄^2 (not po2). A 12-frac internal_t mis-rounds invnave2
-    # by ~40%. They multiply the raw aggregation sums feeding 2^-18/2^-23 grids; F=39 gives
-    # |err|~2^-33, safe even times the widest accumulator (~2^15).
-    NORM_W, NORM_I = 40, 1
+    # by ~40%. They multiply the raw aggregation sums (mag ~ 2^acc_I) and the normalized result
+    # lands on the post-agg grids: the 2->2 accumulator (acc2_I) renormalizes onto the t2 grid,
+    # the 2->0 accumulator (acc0_I) onto the t0 grid. For each path the norm-rounding error
+    # 2^-(NORM_F+1) scaled by the accumulator must stay <= 1/4 LSB of that path's grid:
+    #   2^acc_I * 2^-(NORM_F+1) <= 2^-(postF+2)  =>  NORM_F >= acc_I + postF + 1.
+    # One shared norm_t covers both, so take the max over the two paths (full-sum accumulators
+    # dominate their row-sum counterparts, H2>H1). Derived from the learned scales + accumulator
+    # widths so it tracks the QAT bit-width flags (was a hardcoded <40,1> sized for the old
+    # grids, which was in fact 2 bits short at t0_F=23). NORM_I=1: 1/N̄,1/N̄^2 are in [0,1).
+    NORM_I = 1
+    NORM_F = max(acc2_I + t2_F, acc0_I + t0_F) + 1
+    NORM_W = NORM_I + NORM_F
     L.append(f'typedef ap_fixed<{NORM_W}, {NORM_I}, AP_RND_CONV, AP_SAT> norm_t;'
              f'  // 1/N̄, 1/N̄^2 normalize-late multipliers (F={NORM_W-NORM_I})')
     L.append('')
