@@ -26,12 +26,16 @@
 #define TABLE_FRACS 10
 
 // Raw-momentum / IO interface type (NOT a learned quantizer; the input_quant grid
-// lives on the dots, typed dot_t). I=12 covers |p| up to 2048 GeV (data max ~865);
-// F=24 so the momentum LSB (2^-24) keeps the dot4 product error (~|p|*2^-24 ~ 2^-14)
-// well under half the dot_t LSB (2^-11) — without this the 12-frac input made dots
-// wrong by ~0.2 and broke bit-exactness at the front end. AP_RND_CONV: the float->
-// input_t cast lands on the nearest grid point (closest to PyTorch's float momenta).
+// lives on the dots, typed dot_t). Under --quant this is GENERATED in
+// types_generated.h (I from |p|max, F = ceil(log2|p|max)+dot_F+3 so it tracks the dot
+// grid and shrinks the 36x36 dot4 multipliers as QAT bits drop). The hand fallback
+// below is used only by the float-export path (no --quant), where the generator's
+// NPELICAN_INPUT_T_GENERATED guard is absent: I=12 covers |p| up to 2048 GeV; F=24
+// keeps the dot4 product error well under half the dot_t LSB. AP_RND_CONV: the
+// float->input_t cast lands on the nearest grid point (closest to PyTorch's momenta).
+#ifndef NPELICAN_INPUT_T_GENERATED
 typedef ap_fixed<36,12,AP_RND_CONV,AP_SAT> input_t;
+#endif
 // Final logit carries the output_quant grid (2^-23). Matches out_t in
 // types_generated.h so model_out[0] = (result_t)Rp rounds exactly once (RND_CONV).
 typedef ap_fixed<24, 1,AP_RND_CONV,AP_SAT> result_t;

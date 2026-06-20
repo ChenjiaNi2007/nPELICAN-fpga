@@ -315,6 +315,23 @@ def _extract_quant_weights():
 # 24 bits — bit widths come from the quantizers, so retraining at 16/16/16
 # regenerates correctly with zero manual header edits.
 # ---------------------------------------------------------------------------
+def _momentum_absmax(repo, default=2048.0):
+    """|p|max over the sample 4-momenta, used to size input_t's INTEGER width.
+    This is a physics quantity (the momentum dynamic range) and is independent of
+    the QAT bit-width flags. Falls back to `default` (the historical 2048 GeV
+    assumption -> I=12) if the sample data is unavailable, so the loader never
+    fails just because the dataset isn't checked out."""
+    try:
+        import h5py
+        path = os.path.join(os.path.abspath(repo), 'data', 'sample_data', 'valid.h5')
+        with h5py.File(path, 'r') as f:
+            return float(np.abs(f['Pmu'][:]).max())
+    except Exception as e:  # noqa: BLE001 - any I/O / key error -> documented fallback
+        print(f'  (input_t: sample 4-momenta unavailable [{e}]); '
+              f'using |p|max default {default}')
+        return float(default)
+
+
 def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     # --- map module names -> typedef names + provenance label ---
     # Quantization-point typedefs, one per quantizer.
@@ -350,6 +367,24 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     t2_F = t2_W - t2_I                       # post_agg-2to2 grid fractional bits
     relu_F = relu_W - relu_I                  # act_layer (ReLU) grid fractional bits
     out_F = out_W - out_I                     # output_quant grid fractional bits
+    dot_F = dot_W - dot_I                      # input_quant (dots) grid fractional bits
+
+    # --- input_t: raw-momentum / IO type feeding dot4 (the 36x36 multipliers that
+    # dominate DSP). NOT a learned quantizer (input_quant grids the DOTS, dot_t), so it
+    # is widened analytically. Two independent parts:
+    #   I = _int_bits(|p|max): physics dynamic range of the momenta (flag-independent).
+    #   F: dot4 sums 4 products p1[k]*p2[k]; each operand rounds at 2^-(F+1), so the dot
+    #      error is <= 4*|p|max*2^-F. For the firmware dot to round onto the SAME dot_t
+    #      grid point as PyTorch's float dot we need that < 1/2 dot_t LSB = 2^-(dot_F+1):
+    #        4*|p|max*2^-F <= 2^-(dot_F+1)  =>  F >= ceil(log2|p|max) + dot_F + 3.
+    #      F therefore tracks the dot_t grid: coarser dots (lower QAT bits) -> smaller F
+    #      -> narrower input_t -> each 36x36 dot multiply shrinks (4 DSP -> fewer/1 DSP).
+    pmax = _momentum_absmax(args.repo)
+    INPUT_I = _int_bits(pmax)
+    # Floor at 0: a very coarse dot grid (dot_F <= -(Pbits+3)) genuinely needs no
+    # fractional momentum bits, but ap_fixed requires F >= 0 (W >= I).
+    INPUT_F = max(0, int(math.ceil(math.log2(pmax))) + dot_F + 3)
+    INPUT_W = INPUT_I + INPUT_F
 
     bias_max = float(max(abs(np.asarray(b1)).max(), abs(np.asarray(b1d)).max(), abs(np.asarray(b2)).max()))
     # b1,b1_diag are added in the 2->2 MAC then quantized to the relu grid; b2 in the 2->0
@@ -455,6 +490,17 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     L.append(_pt_line('out_t',    out_W,  out_I,  out_s,  act['output_quant']['scale'], out_k, 'output_quant'))
     L.append(_pt_line('w1_gen_t', w1_W,   w1_I,   w1_s,   wgt['net2to2.eq_layers.0']['scale'], w1_k, '2->2 weights'))
     L.append(_pt_line('w2_gen_t', w2_W,   w2_I,   w2_s,   wgt['agg_2to0']['scale'], w2_k, '2->0 weights'))
+    L.append('')
+    L.append('// ---- Raw-momentum / IO interface type (input_t): operand of the dot4')
+    L.append('//      multipliers (36x36 today) that dominate DSP. NOT a learned quantizer;')
+    L.append('//      input_quant grids the DOTS (dot_t). I = physics |p| range (flag-')
+    L.append('//      independent); F = ceil(log2|p|max) + dot_F + 3 so the dot4 product error')
+    L.append('//      stays < 1/2 dot_t LSB (bit-exact dots). F tracks the dot grid, so lower')
+    L.append('//      QAT bits -> smaller F -> narrower input_t -> cheaper dot multipliers.')
+    L.append('//      Guard macro lets nPELICAN.h keep a hand fallback for the float path.')
+    L.append('#define NPELICAN_INPUT_T_GENERATED 1')
+    L.append(f'typedef ap_fixed<{INPUT_W}, {INPUT_I}, AP_RND_CONV, AP_SAT> input_t;'
+             f'  // raw momenta; |p|max={pmax:.1f} (I={INPUT_I}), F={INPUT_F} (dot_F={dot_F})')
     L.append('')
     L.append('// ---- Float-trained biases / BatchNorm constants / normalization constants ----')
     L.append('// These are NOT PyTorch quantization points (PyTorch keeps them in float), so')
