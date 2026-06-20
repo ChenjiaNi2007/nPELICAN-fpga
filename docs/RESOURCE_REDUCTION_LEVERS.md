@@ -40,11 +40,13 @@ sed -n '76,1100p' <report>.txt | grep -E "\|mul_" \
 
 ## Current state (6/6/6, 20 particles → 22 with spurions; `secondnew6_6_6_20p.txt`)
 
+Current operating point: **`--max-input-bits 18`** (Lever 2 applied).
+
 | metric | value | notes |
 |--------|-------|-------|
-| DSP | **2990** | 97% of one SLR (3072). 1680 = dot products (840 × `mul_24s_24s` × 2 DSP); ~1310 = inferred BN1/normalize/MAC multiplies. |
-| FF  | 118,236 | 13% SLR |
-| LUT | 403,219 | **93% of one SLR (432000).** 357,515 (89%) is "Expression" = adder trees from the full unroll. Barely moved across fixes → now co-binding. |
+| DSP | **2150** | 70% of one SLR (3072). ~840 dots (`mul_18s_18s` × 1 DSP, floor for this mult count) + ~1310 inferred BN1/normalize/MAC. |
+| FF  | 122,241 | 14% SLR |
+| LUT | 332,609 | 77% of one SLR (432000). −17% vs the 24-bit-input build. Expression (adder trees) still the bulk. |
 | Latency | 18 cycles / 90 ns, II=1 | fully pipelined |
 
 Progress so far (all 6/6/6, 20p):
@@ -54,6 +56,8 @@ Progress so far (all 6/6/6, 20p):
 | `new6_6_6_20p` | 4670 | 167,277 | 411,487 | `mul_36s_36s_72` ×4 DSP |
 | `secondnew6_6_6_20p` (input_t fix) | 2990 | 118,236 | 403,219 | `mul_24s_24s_48` ×2 DSP |
 | `symmetry6_6_6report` (Lever 1) | 2990 | 116,488 | 400,543 | `mul_24s_24s_48` ×2 DSP (still 840) |
+| `18inputwidthnPELICAN_report` (Lever 2, **operating point**) | **2150** | 122,241 | 332,609 | `mul_18s_18s` ×1 DSP |
+| `16inputwidthnPELICAN_report` (Lever 2 @16) | 2150 | 118,521 | 331,231 | `mul_16s_16s` ×1 DSP (DSP-identical to 18) |
 
 Key empirical facts established:
 - **Particle count dominates and scales as (N+2)².** From the reports:
@@ -65,6 +69,10 @@ Key empirical facts established:
   change. Lever 1 (manual upper-triangle) left DSP at 2990 — see Lever 1 section.
 - **The dot multiplier is `input_t × input_t`.** Cutting its WIDTH (Lever 2) is the
   only thing left that reduces dot DSP short of relaxing II=1 (Lever 3).
+- **DSP48 packing threshold = 18 bits.** A DSP48E2 mult is 27×18; both operands ≤18
+  → 1 DSP. So `input_t` 18 and 16 both give 1 DSP/mult — identical DSP (2150). Below
+  18 there's no further DSP boundary; you only shave peripheral LUT/FF marginally
+  (16 vs 18: −0.4% LUT, ~3% FF) while losing more dot4 precision. **18 is the knee.**
 
 ## Already done (committed to `nPELICAN-fpga` main)
 
@@ -99,11 +107,16 @@ moves DSP.** The symmetry edit is a marginal-but-harmless FF/LUT win; keeping it
 
 ## Remaining levers (priority order)
 
-### Lever 2 — Cap `input_t` width (precision tradeoff)  ★ next; the real DSP lever
+### Lever 2 — Cap `input_t` width (precision tradeoff)  ✓ DONE; operating point = 18
 Each dot product is `input_t × input_t` = `mul_24s_24s` = **2 DSP** at 6/6/6.
-Drop `input_t` to ≤18 bits → `mul_18s_18s` = **1 DSP** → **840 × 2 → 840 × 1 ≈ 840
-DSP saved (2990 → ~2150)**, and it narrows the BN1/normalize multiplies in the 1310
-"inferred" DSP too. Width reduction is real (CSE can't undo it, unlike Lever 1).
+Drop `input_t` to ≤18 bits → `mul_18s_18s` = **1 DSP**. **MEASURED** (commit
+`f93d819`, `--max-input-bits 18`, `18inputwidthnPELICAN_report`): DSP **2990 → 2150
+(−840, exactly as predicted)** AND LUT **400,543 → 332,609 (−17%)** — the narrower
+momenta also shrink the dot4 adder trees. At 16 (`16inputwidthnPELICAN_report`): DSP
+identical (2150) — both ≤18 fit one DSP48 — so **16 buys nothing over 18 on DSP**
+(only −0.4% LUT / ~3% FF) while losing more precision. **18 is the knee; use it.**
+Width reduction is real (CSE can't undo it, unlike Lever 1). ⚠ Re-confirm the online
+golden gate at 18 (csynth reports don't show it) — log result in `resource_log.md`.
 
 **RESCALING DOES NOT WORK (proven, was a wrong earlier framing).** Scaling momenta
 by 1/S drops `INPUT_I` by log2 S but Brevitas relearns an `input_quant` scale ~S²
@@ -157,8 +170,9 @@ has room. This is a deliberate user decision, not a silent refactor.
 
 ## Suggested sequence
 1. ~~Lever 1~~ done (`a7b5b06`), DSP-neutral — see the Lever 1 section.
-2. **Lever 2 next** — no retrain: re-export with `--max-input-bits N`, sweep N down
-   (24→20→18→16), run the online golden gate + csynth each step, log to
-   `resource_log.md`. Target ≤18 → 1 DSP/mul → ~840 DSP saved (2990 → ~2150). Stop
-   at the narrowest N with acceptable gate accuracy.
-3. Then Lever 3 (if throughput can be spent) for the structural LUT+DSP cut.
+2. ~~Lever 2~~ done (`f93d819`) — **operating point `--max-input-bits 18`**: DSP
+   2990→2150 (−840), LUT −17%. 16 gives no extra DSP (packing threshold). **Still
+   owed: confirm the online golden gate at 18 and log it in `resource_log.md`.**
+3. **Next, if more is needed:** Lever 3 (relax II=1, ~throughput cost) or fewer
+   particles (N² scaling). Width-narrowing is exhausted — DSP floor is ~840 dots
+   (1 DSP each) + ~1310 BN1/normalize/MAC at the current particle count.
