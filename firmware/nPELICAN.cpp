@@ -101,13 +101,17 @@ void nPELICAN(
     p1[0][0]   = 1.; p1[0][1]   = 0.; p1[0][2]   = 0.; p1[0][3]   = 1.;
     p1[1][0] = 1.; p1[1][1] = 0.; p1[1][2] = 0.; p1[1][3] = -1.;
 
-    //fill input array (each dot rounded into dot_t = input_quant grid)
-    //TODO: could run over only the upper triangle and copy since the array is symmetric
+    //fill input array (each dot rounded into dot_t = input_quant grid).
+    //dot4 is symmetric (p_i·p_j == p_j·p_i), so compute only the upper triangle
+    //(j>=i, incl. diagonal) and mirror the result into the lower triangle. The
+    //mirror is pure wiring (no hardware), so this halves the dot4 multipliers —
+    //the dominant DSP cost — while producing byte-identical dots (bit-exact).
     for(unsigned int i = 0; i < NPARTICLES2; i++){
       #pragma HLS unroll
-      for(unsigned int j = 0; j < NPARTICLES2; j++){
+      for(unsigned int j = i; j < NPARTICLES2; j++){
         #pragma HLS unroll
         Dot: dot4(p1[i], p1[j], dots[i*NPARTICLES2+j]);
+        if (j != i) dots[j*NPARTICLES2+i] = dots[i*NPARTICLES2+j];
       }
     }
 
@@ -137,13 +141,19 @@ void nPELICAN(
     //the coarse t2 rounding (F=18) of each summand tips the renormalized jmass/jdotp
     //onto the wrong t2 grid point. T0 below casts batch1 to t2_t once. BN constants are
     //NOT folded (CLAUDE.md invariant).
+    //batch1 = BN1(dots) is symmetric too: dots is symmetric, the BN constants
+    //(mean/scale/beta) are scalar, and nobjmask[i][j]==nobjmask[j][i]. So compute
+    //the upper triangle and mirror — halves the BN1 multiplies (part of the
+    //inferred-DSP cost). Bit-exact for the same reason as the dot loop above.
     bn1out_t batch1[(NPARTICLES2)*(NPARTICLES2)];
     #pragma HLS ARRAY_PARTITION variable=batch1 complete dim=0
     for(unsigned int i = 0; i < NPARTICLES2; i++){
       #pragma HLS unroll
-      for(unsigned int j = 0; j < NPARTICLES2; j++){
+      for(unsigned int j = i; j < NPARTICLES2; j++){
         #pragma HLS unroll
-        batch1[i*NPARTICLES2+j] = (bn1out_t)(((dots[i*NPARTICLES2+j] - batch1_2to2[0]) * batch1_2to2[1] + batch1_2to2[2])*nobjmask[i][j]);
+        bn1out_t v = (bn1out_t)(((dots[i*NPARTICLES2+j] - batch1_2to2[0]) * batch1_2to2[1] + batch1_2to2[2])*nobjmask[i][j]);
+        batch1[i*NPARTICLES2+j] = v;
+        if (j != i) batch1[j*NPARTICLES2+i] = v;
       }
     }
 
