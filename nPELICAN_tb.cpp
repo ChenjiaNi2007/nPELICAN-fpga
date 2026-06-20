@@ -248,10 +248,10 @@ int main(int argc, char **argv) {
     // ---------------------------------------------------------------
 
     // load input data from text file
-    std::ifstream fin("tb_data/10k_pmu_test.dat");
-    std::ifstream fnobj("tb_data/10k_nobj.dat");//get nobj per event
+    std::ifstream fin("tb_data/full_pmu_test.dat");
+    std::ifstream fnobj("tb_data/full_nobj.dat");//get nobj per event
     // load predictions from text file
-    std::ifstream fpr("tb_data/10k_signal.dat");
+    std::ifstream fpr("tb_data/full_signal.dat");
 
 #ifdef RTL_SIM
     std::string RESULTS_LOG = "tb_data/rtl_cosim_results.log";

@@ -20,5 +20,6 @@ obj/nPELICAN_tb.o: ../../../../nPELICAN_tb.cpp \
  /tools/Xilinx/Vitis_HLS/2023.2/include/etc/ap_int_special.h \
  /tools/Xilinx/Vitis_HLS/2023.2/include/etc/ap_fixed_ref.h \
  /tools/Xilinx/Vitis_HLS/2023.2/include/etc/ap_fixed_special.h \
- /tools/Xilinx/Vitis_HLS/2023.2/include/hls_stream.h \
- ../../../../firmware/nnet_utils/nnet_helpers.h
+ ../../../../firmware/weights/types_generated.h \
+ ../../../../firmware/nnet_utils/nnet_helpers.h \
+ /tools/Xilinx/Vitis_HLS/2023.2/include/hls_stream.h

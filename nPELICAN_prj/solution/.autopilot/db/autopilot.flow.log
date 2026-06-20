@@ -1,7 +1,7 @@
-INFO-FLOW: Workspace /home/jovyan/PTQWorkflow/nPELICAN-fpga/nPELICAN_prj/solution opened at Thu Jun 11 19:40:33 UTC 2026
+INFO-FLOW: Workspace /home/jovyan/ClaudeInProgress/nPELICAN-fpga/nPELICAN_prj/solution opened at Sat Jun 20 04:38:51 UTC 2026
 Execute       send_msg_by_id INFO @200-1505@%s%s default  vivado 
 INFO: [HLS 200-1505] Using default flow_target 'vivado'
-Command     open_solution done; 0.21 sec.
+Command     open_solution done; 0.54 sec.
 Execute     config_compile -name_max_length 80 
 INFO: [HLS 200-1510] Running: config_compile -name_max_length 80 
 INFO: [XFORM 203-1161] The maximum of name length is set to 80.
@@ -12,7 +12,7 @@ DBG:HLSDevice: Trying to load device library: /tools/Xilinx/Vitis_HLS/2023.2/lib
 DBG:HLSDevice: first parts/arch.xml in RDI_DATADIR: /tools/Xilinx/Vivado/2023.2/data/parts/arch.xml
 DBG:HLSDevice: init success
 INFO: [HLS 200-1611] Setting target device to 'xcvu13p-flga2577-1-e'
-Command       create_platform done; 1.25 sec.
+Command       create_platform done; 1.9 sec.
 Execute       source /tools/Xilinx/Vitis_HLS/2023.2/common/technology/xilinx/common/xilinx.gen 
 Execute         source /tools/Xilinx/Vitis_HLS/2023.2/common/technology/xilinx/interface/plb46.gen 
 Execute         source /tools/Xilinx/Vitis_HLS/2023.2/common/technology/xilinx/interface/axi4.gen 
@@ -28,7 +28,7 @@ Execute         source /tools/Xilinx/Vitis_HLS/2023.2/common/technology/xilinx/D
 Execute       ap_part_info -name xcvu13p-flga2577-1-e -data info 
 Execute       config_compile -quiet -complex-mul-dsp=0 
 INFO: [XFORM 203-1161] The maximum of name length is set to 80.
-Command     set_part done; 1.39 sec.
+Command     set_part done; 2.16 sec.
 Execute     config_schedule -enable_dsp_full_reg=false 
 INFO: [HLS 200-1510] Running: config_schedule -enable_dsp_full_reg=false 
 Execute     create_clock -period 5 -name default 
@@ -48,9 +48,3 @@ Execute       send_msg_by_id INFO @200-2036@%s debug
 INFO: [HLS 200-2036] Building debug C Simulation binaries
 Execute       ap_part_info -name xcvu13p-flga2577-1-e -data info 
 Execute       source run_sim.tcl 
-Command       ap_source done; 153.77 sec.
-INFO: [SIM 211-1] CSim done with 0 errors.
-INFO: [SIM 211-3] *************** CSIM finish ***************
-Command     csim_design done; 165.29 sec.
-INFO: [HLS 200-111] Finished Command csim_design CPU user time: 163.39 seconds. CPU system time: 0.82 seconds. Elapsed time: 165.29 seconds; current allocated memory: 4.078 MB.
-Execute     cleanup_all 
