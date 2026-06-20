@@ -99,21 +99,33 @@ moves DSP.** The symmetry edit is a marginal-but-harmless FF/LUT win; keeping it
 
 ## Remaining levers (priority order)
 
-### Lever 2 — Rescale input momenta  ★ next; the real DSP lever, needs retraining
-`INPUT_I=12` is fixed by the physical |p| range (~2000 GeV) → `input_t` 24-bit →
-each dot product is `mul_24s_24s` = **2 DSP**. Pre-scaling momenta to O(1) (e.g.
-÷~1024, a unit change PELICAN tolerates) drops `INPUT_I` to ~2–3 → `input_t` ≤18
-bits → `mul_18s_18s` = **1 DSP**. This is width reduction, which CSE *cannot*
-optimize away (unlike Lever 1), so it is real: **840 × 2 → 840 × 1 ≈ 840 DSP
-saved (2990 → ~2150)**, and it also narrows the BN1/normalize multiplies in the
-1310 "inferred" DSP (they descend from dot_t).
+### Lever 2 — Cap `input_t` width (precision tradeoff)  ★ next; the real DSP lever
+Each dot product is `input_t × input_t` = `mul_24s_24s` = **2 DSP** at 6/6/6.
+Drop `input_t` to ≤18 bits → `mul_18s_18s` = **1 DSP** → **840 × 2 → 840 × 1 ≈ 840
+DSP saved (2990 → ~2150)**, and it narrows the BN1/normalize multiplies in the 1310
+"inferred" DSP too. Width reduction is real (CSE can't undo it, unlike Lever 1).
 
-**Cost/risk:** medium. Requires retraining on scaled inputs (or a scale at the
-input port + matching the dot grid) in `PELICAN-nano`, then re-export and a fresh
-bit-exactness check. Touches the training repo, not just firmware. Confirm the
-input_quant scale still lands the dots on a representable grid. The loader already
-derives `INPUT_I` from `|p|max` (commit `06eb3b5`), so scaling the data is enough —
-no loader change needed.
+**RESCALING DOES NOT WORK (proven, was a wrong earlier framing).** Scaling momenta
+by 1/S drops `INPUT_I` by log2 S but Brevitas relearns an `input_quant` scale ~S²
+smaller, so `dot_F` (hence `INPUT_F`) *grows* by the same amount: `INPUT_W` is
+invariant. The multiplier width is set by the dot's **dynamic range / relative
+precision**, which is scale-invariant — you can't shrink a multiplier by changing
+units. See the "dead ends" list.
+
+**What actually works:** the un-capped width exists only to make the fixed-point
+dot round to the **same `dot_t` (6-bit) grid point as PyTorch** near rounding
+boundaries (`INPUT_F = ceil(log2|p|max) + dot_F + 3`). The dots are *only* dot_t-bit;
+the extra width buys bit-exact agreement, not physics. So **cap the width and accept
+that some events round one dot_t LSB off from PyTorch** — the same currency the
+tolerance gate already spends (the dot4 front-end "caveat D4" is already the dominant
+residual). Implemented as loader flag **`--max-input-bits N`** (commit adds it):
+shaves `INPUT_F` only (`INPUT_I`/range preserved so momenta never saturate); no-op if
+N ≥ the bit-exact width; errors if N ≤ `INPUT_I`.
+
+**Cost/risk:** medium. No retrain needed — works on the current model. **Sweep N
+down (e.g. 24→20→18→16) and re-run the online golden gate each time**; pick the
+narrowest width with acceptable accuracy. It is a deliberate accuracy tradeoff, not
+a free derivation; re-validate the gate whenever the model or dataset changes.
 
 ### Lever 3 — Relax `PIPELINE II=1` / partial roll  (biggest possible cut; breaks an invariant)
 Root cause of the magnitude: the whole 22×22 datapath is replicated 484× because
@@ -139,10 +151,14 @@ has room. This is a deliberate user decision, not a silent refactor.
 - **Algebraic/structural redundancy (symmetric or commutative recompute)** — HLS
   CSE already removes it in the fully-unrolled design (proven by Lever 1). Don't
   chase it; it won't move DSP.
+- **Global rescaling of input momenta** — width-invariant (INPUT_I saved = INPUT_F
+  paid back; dynamic range / relative dot precision is scale-invariant). Does NOT
+  shrink the dot multiplier. Use the `--max-input-bits` cap (Lever 2) instead.
 
 ## Suggested sequence
 1. ~~Lever 1~~ done (`a7b5b06`), DSP-neutral — see the Lever 1 section.
-2. **Lever 2 next** (if retraining is acceptable): scale input momenta to O(1) in
-   `PELICAN-nano`, retrain/re-export, online csim + csynth, log to `resource_log.md`.
-   Expected ~840 DSP saved (2990 → ~2150). This is the real DSP lever.
+2. **Lever 2 next** — no retrain: re-export with `--max-input-bits N`, sweep N down
+   (24→20→18→16), run the online golden gate + csynth each step, log to
+   `resource_log.md`. Target ≤18 → 1 DSP/mul → ~840 DSP saved (2990 → ~2150). Stop
+   at the narrowest N with acceptable gate accuracy.
 3. Then Lever 3 (if throughput can be spent) for the structural LUT+DSP cut.

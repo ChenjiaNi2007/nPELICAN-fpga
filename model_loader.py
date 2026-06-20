@@ -54,6 +54,14 @@ parser.add_argument('--bn-eps', type=float, default=1e-5,
 parser.add_argument('--out-types', type=str, default=None,
                     help='Path for generated typedef header (default: dirname(--out)/types_generated.h). '
                          'The firmware build expects both weights.h and types_generated.h under firmware/weights/.')
+parser.add_argument('--max-input-bits', type=int, default=None,
+                    help='Cap input_t total width to N bits (Lever 2): trades dot4 front-end '
+                         'precision for DSP. The dots are only dot_t-bit; the un-capped width '
+                         'buys bit-exact agreement with PyTorch near rounding boundaries. '
+                         'Capping below that shrinks the dot multiplier (e.g. 18 -> mul_18s_18s '
+                         '= 1 DSP instead of 2). NOT free: re-check the online golden gate after '
+                         'lowering it. Only INPUT_F is reduced; INPUT_I (range) is preserved so '
+                         'momenta never saturate. No effect if N >= the derived bit-exact width.')
 args = parser.parse_args()
 
 if args.out_types is None:
@@ -385,6 +393,23 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     # fractional momentum bits, but ap_fixed requires F >= 0 (W >= I).
     INPUT_F = max(0, int(math.ceil(math.log2(pmax))) + dot_F + 3)
     INPUT_W = INPUT_I + INPUT_F
+
+    # --- Lever 2: optional cap on input_t width (--max-input-bits). Trades dot4
+    # front-end precision for DSP (a narrower mul_NsNs, e.g. <=18 -> 1 DSP). Only
+    # INPUT_F is shaved (INPUT_I/range preserved so momenta never saturate); the
+    # dots then round to dot_t slightly differently from PyTorch on some events,
+    # which the online golden tolerance gate must re-validate. No-op if the cap is
+    # >= the bit-exact width.
+    if args.max_input_bits is not None and args.max_input_bits < INPUT_W:
+        if args.max_input_bits <= INPUT_I:
+            sys.exit(f'ERROR: --max-input-bits={args.max_input_bits} <= INPUT_I={INPUT_I} '
+                     f'(integer bits needed for |p|max={pmax:.1f}); momenta would saturate. '
+                     f'Choose a cap > {INPUT_I}.')
+        capped_F = args.max_input_bits - INPUT_I
+        print(f'  (input_t Lever-2 cap: width {INPUT_W} -> {args.max_input_bits}, '
+              f'F {INPUT_F} -> {capped_F}; bit-exact dots NOT guaranteed — re-check gate)')
+        INPUT_F = capped_F
+        INPUT_W = args.max_input_bits
 
     bias_max = float(max(abs(np.asarray(b1)).max(), abs(np.asarray(b1d)).max(), abs(np.asarray(b2)).max()))
     # b1,b1_diag are added in the 2->2 MAC then quantized to the relu grid; b2 in the 2->0
