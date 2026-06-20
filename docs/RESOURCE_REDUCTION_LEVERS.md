@@ -52,13 +52,19 @@ Progress so far (all 6/6/6, 20p):
 |--------|-----|----|----|----------------|
 | `6_6_6_20p` (original) | 4677 | 170,899 | 415,830 | `mul_36s_36s_72` ×4 DSP |
 | `new6_6_6_20p` | 4670 | 167,277 | 411,487 | `mul_36s_36s_72` ×4 DSP |
-| `secondnew6_6_6_20p` | 2990 | 118,236 | 403,219 | `mul_24s_24s_48` ×2 DSP |
+| `secondnew6_6_6_20p` (input_t fix) | 2990 | 118,236 | 403,219 | `mul_24s_24s_48` ×2 DSP |
+| `symmetry6_6_6report` (Lever 1) | 2990 | 116,488 | 400,543 | `mul_24s_24s_48` ×2 DSP (still 840) |
 
 Key empirical facts established:
 - **Particle count dominates and scales as (N+2)².** From the reports:
   12p→1794, 14p→2383, 20p→4677 DSP; ratios track `(N+2)²` (12p/20p=0.38 vs (14/22)²=0.41).
 - **Bit-width flags barely touch DSP**: 6/6/6 → 6/6/**8** at 20p moved DSP 4677→4694 (noise).
   The DSPs live in the dot products, which the flags don't size.
+- **HLS CSE already exploits dot symmetry.** `840 = 210·4` (210 = upper triangle of
+  20 particles): the dot multiplier count is the *symmetric* count before any manual
+  change. Lever 1 (manual upper-triangle) left DSP at 2990 — see Lever 1 section.
+- **The dot multiplier is `input_t × input_t`.** Cutting its WIDTH (Lever 2) is the
+  only thing left that reduces dot DSP short of relaxing II=1 (Lever 3).
 
 ## Already done (committed to `nPELICAN-fpga` main)
 
@@ -77,35 +83,37 @@ Key empirical facts established:
    `<36,12>`→`<24,12>`, dot mult 4→2 DSP). Verified bit-identical to the old
    value on the 24-bit checkpoint.
 
+## Lever 1 — Exploit dot symmetry  ✗ DONE, INEFFECTIVE (HLS already did it)
+Committed `a7b5b06` (dot loop `nPELICAN.cpp:~106`, BN1 loop `:~142` rewritten to
+compute the upper triangle j≥i and mirror). **Result: DSP unchanged (2990); only
+~1.7k FF / ~2.7k LUT saved** (`symmetry6_6_6report.txt` vs `secondnew6_6_6_20p.txt`).
+
+**Why it didn't help:** the report shows `840 × mul_24s_24s` both before AND after.
+`840 = 210 × 4` where 210 = 20·21/2 = the upper triangle of the 20 real particles
+(spurion dots fold to constants). **Vitis's common-subexpression elimination already
+merged `dot4(p_i,p_j)` and `dot4(p_j,p_i)`** (commutative products) before the change.
+Lesson for a fully-unrolled design: **HLS already removes algebraic redundancy like
+symmetric/commutative recomputation — manually choosing *what* to compute won't cut
+DSP. Only changing operand *width* (Lever 2) or *time-sharing* hardware (Lever 3)
+moves DSP.** The symmetry edit is a marginal-but-harmless FF/LUT win; keeping it.
+
 ## Remaining levers (priority order)
 
-### Lever 1 — Exploit dot symmetry  ★ next, safe, bit-exact
-`dot4(p_i, p_j) == dot4(p_j, p_i)`, so `dots[i][j] == dots[j][i]`. `nobjmask`,
-BN1 (mean/scale/beta scalars) are elementwise, so **`batch1[i][j]` is symmetric too.**
-The dot loop (`nPELICAN.cpp:106-112`, see the existing TODO at line 105) and the
-BN1 loop (`:142-148`) both compute the full 22×22.
-
-**Change:** compute the upper triangle (i ≤ j, 253 of 484, incl. diagonal once)
-and mirror `dots[j*N+i] = dots[i*N+j]` (and likewise batch1).
-
-**Expected:** dot multipliers 1680 → ~880 DSP (~800 saved); BN1 multiplies and
-dot4/BN1 adder LUTs roughly halve. Estimate **DSP ~2990 → ~2050, LUT down
-meaningfully** → off the SLR ceiling. No II change, no accuracy change.
-
-**Risk:** low. Values identical by symmetry; the tolerance gate cannot regress.
-Watch: keep `PIPELINE II=1` (synthesis report), keep masking/zero exactness.
-The 2→2/2→0 paths are NOT touched.
-
-### Lever 2 — Rescale input momenta  (high impact on dot DSP; needs retraining)
+### Lever 2 — Rescale input momenta  ★ next; the real DSP lever, needs retraining
 `INPUT_I=12` is fixed by the physical |p| range (~2000 GeV) → `input_t` 24-bit →
-2 DSP/multiply. Pre-scaling momenta to O(1) (e.g. ÷~1024, a unit change PELICAN
-tolerates) drops `INPUT_I` to ~2–3 → `input_t` ≤18 bits → **1 DSP/multiply**.
-Combined with Lever 1: dots → ~440 DSP (from 1680).
+each dot product is `mul_24s_24s` = **2 DSP**. Pre-scaling momenta to O(1) (e.g.
+÷~1024, a unit change PELICAN tolerates) drops `INPUT_I` to ~2–3 → `input_t` ≤18
+bits → `mul_18s_18s` = **1 DSP**. This is width reduction, which CSE *cannot*
+optimize away (unlike Lever 1), so it is real: **840 × 2 → 840 × 1 ≈ 840 DSP
+saved (2990 → ~2150)**, and it also narrows the BN1/normalize multiplies in the
+1310 "inferred" DSP (they descend from dot_t).
 
 **Cost/risk:** medium. Requires retraining on scaled inputs (or a scale at the
 input port + matching the dot grid) in `PELICAN-nano`, then re-export and a fresh
 bit-exactness check. Touches the training repo, not just firmware. Confirm the
-input_quant scale still lands the dots on a representable grid.
+input_quant scale still lands the dots on a representable grid. The loader already
+derives `INPUT_I` from `|p|max` (commit `06eb3b5`), so scaling the data is enough —
+no loader change needed.
 
 ### Lever 3 — Relax `PIPELINE II=1` / partial roll  (biggest possible cut; breaks an invariant)
 Root cause of the magnitude: the whole 22×22 datapath is replicated 484× because
@@ -128,9 +136,13 @@ has room. This is a deliberate user decision, not a silent refactor.
   resource picture; ignore unless re-enabled.
 - **Flags below the DSP-packing threshold** save LUT but not DSP (a multiply that
   already fits one DSP48 costs 1 DSP at 6 or 16 bits).
+- **Algebraic/structural redundancy (symmetric or commutative recompute)** — HLS
+  CSE already removes it in the fully-unrolled design (proven by Lever 1). Don't
+  chase it; it won't move DSP.
 
 ## Suggested sequence
-1. Lever 1 now → re-export (`model_loader.py`), user runs online csim + csynth,
-   log to `resource_log.md`. Should clear the SLR ceiling.
-2. Then choose Lever 2 (if retraining is acceptable) and/or Lever 3 (if throughput
-   can be spent) for the next major cut.
+1. ~~Lever 1~~ done (`a7b5b06`), DSP-neutral — see the Lever 1 section.
+2. **Lever 2 next** (if retraining is acceptable): scale input momenta to O(1) in
+   `PELICAN-nano`, retrain/re-export, online csim + csynth, log to `resource_log.md`.
+   Expected ~840 DSP saved (2990 → ~2150). This is the real DSP lever.
+3. Then Lever 3 (if throughput can be spent) for the structural LUT+DSP cut.
