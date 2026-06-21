@@ -1,0 +1,67 @@
+# =============================================================================
+# Equivariance sweep — single source of truth.
+#
+# Measures how reducing QAT bit-width breaks the firmware's Lorentz invariance,
+# as a curve of equivariance-violation vs boost magnitude |beta|, one curve per
+# bit-width (SEAL arXiv:2511.01982, GSEAL / Fig. 2 methodology).
+#
+# The engine of truth is the C++ HLS firmware run in csim. Vitis is not required:
+# the harness uses the local g++ build (build_local.sh path), which docs/WORKFLOW.md
+# certifies as bit-identical to remote Vitis csim. Python owns boost sampling,
+# encoding, metrics and plots only.
+#
+# ALL relative paths below are resolved against the nPELICAN-fpga REPO ROOT
+# (the parent of this equivariance/ directory).
+# =============================================================================
+
+pelican_nano_repo: ../PELICAN-nano
+data_file:         ../PELICAN-nano/data/sample_data/test.h5
+
+n_jets: 2000        # test jets to use (balanced across signal/background, seeded)
+seed:   1234        # determinism: the SAME physical boosted set is reused across all builds
+
+# ---- Boost protocol (SEAL eq.7) ---------------------------------------------
+beta_grid: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95]
+n_dir:     8         # random isotropic directions per magnitude (averaged in metrics)
+
+# IMPORTANT — beams cannot be boosted through csim.
+# The firmware (firmware/nPELICAN.cpp) HARDCODES the two beam spurions (1,0,0,+/-1)
+# and takes ONLY the 20 real particles as input. So boosted beams cannot be fed
+# through the csim datapath without changing the firmware signature (which would
+# break "csim path == firmware path"). Therefore:
+#   * boost_beams MUST be false for the csim-faithful measurement.
+#   * with beams fixed, the beam-particle dots d(beam, Lambda*p) are NOT invariant
+#     even in exact float64, so the highest-bit / float reference curve is a NON-ZERO
+#     "fixed-beam floor" by design (NOT a bug). Lower-bit curves rising above that
+#     floor are the precision artifact this sweep isolates.
+#   * the float64 boost unit test in gen_boosted_inputs.py therefore checks only the
+#     real-real 20x20 dot block (the genuine Lorentz scalars).
+# boost_beams: true is reserved for a hypothetical future firmware that accepts the
+# beams as inputs; it is not runnable against the current build.
+boost_beams: false
+
+# ---- Constituent set (must match the trained checkpoint's collate settings) --
+nobj:      20        # real-particle cap (test.h5 Pmu is already 20-wide)
+add_beams: true      # firmware always adds 2 beam spurions internally
+beam_mass: 0.0
+nobj_avg:  49        # N-bar normalization constant (informational; baked into weights)
+
+# ---- Models to sweep: one entry == one curve. -------------------------------
+# Add one block per trained QAT checkpoint. `bit_width` is only a label for the
+# plots/CSV; the ACTUAL fixed-point grids come from each checkpoint's learned
+# Brevitas scales via model_loader.py. Mark exactly one model `reference: true`
+# (the invariance floor drawn on every plot — conventionally the highest bit width).
+models:
+  - bit_width: 24
+    checkpoint: ../PELICAN-nano/model/fpga_model_qat_best.pt
+    qat: true
+    reference: true
+
+  # --- Add more checkpoints here as you train them (one curve each): ---
+  # - {bit_width: 16, checkpoint: ../PELICAN-nano/model/<prefix16>_best.pt, qat: true, reference: false}
+  # - {bit_width: 12, checkpoint: ../PELICAN-nano/model/<prefix12>_best.pt, qat: true, reference: false}
+  # - {bit_width:  8, checkpoint: ../PELICAN-nano/model/<prefix8>_best.pt,  qat: true, reference: false}
+  # - {bit_width:  6, checkpoint: ../PELICAN-nano/model/<prefix6>_best.pt,  qat: true, reference: false}
+
+# ---- Golden gate tolerance (matches nPELICAN_tb.cpp TOL_GOLDEN, momenta path) -
+golden_tol: 1.0e-3

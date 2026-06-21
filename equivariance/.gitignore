@@ -1,0 +1,14 @@
+# Large, regenerable intermediates (kept locally, not committed).
+# Regenerate with: gen_boosted_inputs.py (canonical/*), run_sweep.py (logits),
+# compute_metrics.py (results.csv).
+canonical/equiv_pmu.dat
+canonical/equiv_nobj.dat
+canonical/manifest.csv
+results/logits_bit*.dat
+results/results.csv
+
+# Committed deliverables of a real run:
+#   canonical/meta.json          (seed, directions, selected jets — reproducibility)
+#   results/aggregates.csv       (compact per-(bit_width, beta) metrics)
+#   results/plots/*.png          (the curves)
+__pycache__/

@@ -32,6 +32,61 @@ extern dot_t* npelican_dots_override;   // DOTS-LEVEL injection hook (see nPELIC
 
 int main(int argc, char **argv) {
 
+#ifdef RUN_EQUIVARIANCE
+    // ---------------------------------------------------------------
+    // Equivariance mode (equivariance/ harness): read momenta from
+    // tb_data/equiv_in_pmu.dat (one event/line, NPARTICLES*4 = 80 floats,
+    // beams added INSIDE the firmware exactly as in the golden path) and the
+    // per-event RAW Nobj from tb_data/equiv_in_nobj.dat, run dot4+net, and
+    // write the logit to tb_data/equiv_out_logits.dat (%.17g, one per line).
+    // No comparison: this is a batch oracle for f_b(x). Mirrors the
+    // RUN_GOLDEN_GATE reader/writer so the path is byte-identical to the
+    // validated golden path (the harness proves this via a golden-gate check
+    // before the sweep). Returns immediately after; never falls through to
+    // the legacy 10k flow.
+    // ---------------------------------------------------------------
+    {
+        std::ifstream fepmu("tb_data/equiv_in_pmu.dat");
+        std::ifstream fenobj("tb_data/equiv_in_nobj.dat");
+        if (!fepmu.good() || !fenobj.good()) {
+            std::cerr << "EQUIVARIANCE: cannot open tb_data/equiv_in_pmu.dat or "
+                         "tb_data/equiv_in_nobj.dat" << std::endl;
+            return 1;
+        }
+        std::ofstream feout("tb_data/equiv_out_logits.dat");
+
+        int n_events = 0;
+        std::string pmu_line, nobj_line;
+        while (std::getline(fepmu, pmu_line) && std::getline(fenobj, nobj_line)) {
+            // Parse NPARTICLES*4 = 80 floats from pmu_line
+            char *cstr = const_cast<char *>(pmu_line.c_str());
+            char *current;
+            std::vector<float> in;
+            current = strtok(cstr, " ");
+            while (current != NULL) {
+                in.push_back(atof(current));
+                current = strtok(NULL, " ");
+            }
+            int nobj_val = std::stoi(nobj_line);
+
+            input_t model_input[NPARTICLES*4];
+            nnet::copy_data<float, input_t, 0, NPARTICLES*4>(in, model_input);
+            result_t model_out[1];
+            nPELICAN(model_input, nobj_val, model_out);
+
+            char buf[64];
+            snprintf(buf, sizeof(buf), "%.17g\n", double(model_out[0]));
+            feout << buf;
+            n_events++;
+        }
+        feout.close();
+        fepmu.close();
+        fenobj.close();
+        printf("EQUIVARIANCE: wrote %d logits to tb_data/equiv_out_logits.dat\n", n_events);
+        return 0;
+    }
+#endif  // RUN_EQUIVARIANCE
+
 #ifdef RUN_GOLDEN_GATE
     // ---------------------------------------------------------------
     // Golden-vector mode: activated when tb_data/golden_pmu.dat exists
