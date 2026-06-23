@@ -24,6 +24,16 @@ extern FILE* npelican_dump_fp;
 extern dot_t* npelican_dots_override;   // DOTS-LEVEL injection hook (see nPELICAN.cpp)
 #endif
 
+// Constant beam spurions (1,0,0,+1)/(1,0,0,-1). The firmware now takes the two
+// beams as a top-level input (beam_input[2*4]); everywhere the harness is NOT
+// Lorentz-boosting the beams (golden gate, dots-level, legacy 10k, zero-input),
+// drive them with these constants. At |beta|=0 they quantize into input_t
+// identically to the firmware's old hardcoded constants -> bit-exact (gate G1).
+static void fill_const_beams(input_t b[8]) {
+    static const double c[8] = {1, 0, 0, 1, 1, 0, 0, -1};
+    for (int k = 0; k < 8; k++) b[k] = c[k];
+}
+
 // The golden-vector / dots-level gate is OPT-IN. By default csim runs the legacy
 // 10k flow (tb_data/10k_*.dat). To run the bit-exactness gate instead, define
 // RUN_GOLDEN_GATE — either uncomment the line below, or add -DRUN_GOLDEN_GATE to the
@@ -53,10 +63,15 @@ int main(int argc, char **argv) {
                          "tb_data/equiv_in_nobj.dat" << std::endl;
             return 1;
         }
+        // Per-event beams (8 floats/line, aligned row-for-row with the momenta) written
+        // by gen_boosted_inputs.py. If absent, fall back to the constant beams so the
+        // fixed-beam path stays available against the same binary.
+        std::ifstream febeams("tb_data/equiv_in_beams.dat");
+        bool have_beams = febeams.good();
         std::ofstream feout("tb_data/equiv_out_logits.dat");
 
         int n_events = 0;
-        std::string pmu_line, nobj_line;
+        std::string pmu_line, nobj_line, beams_line;
         while (std::getline(fepmu, pmu_line) && std::getline(fenobj, nobj_line)) {
             // Parse NPARTICLES*4 = 80 floats from pmu_line
             char *cstr = const_cast<char *>(pmu_line.c_str());
@@ -71,8 +86,21 @@ int main(int argc, char **argv) {
 
             input_t model_input[NPARTICLES*4];
             nnet::copy_data<float, input_t, 0, NPARTICLES*4>(in, model_input);
+
+            // Beams for this event: parse the matching beams line, else constant.
+            input_t beam_input[8];
+            if (have_beams && std::getline(febeams, beams_line)) {
+                std::vector<float> bin;
+                char *bc = const_cast<char *>(beams_line.c_str());
+                char *bt = strtok(bc, " ");
+                while (bt != NULL) { bin.push_back(atof(bt)); bt = strtok(NULL, " "); }
+                nnet::copy_data<float, input_t, 0, 8>(bin, beam_input);
+            } else {
+                fill_const_beams(beam_input);
+            }
+
             result_t model_out[1];
-            nPELICAN(model_input, nobj_val, model_out);
+            nPELICAN(model_input, beam_input, nobj_val, model_out);
 
             char buf[64];
             snprintf(buf, sizeof(buf), "%.17g\n", double(model_out[0]));
@@ -82,6 +110,7 @@ int main(int argc, char **argv) {
         feout.close();
         fepmu.close();
         fenobj.close();
+        if (have_beams) febeams.close();
         printf("EQUIVARIANCE: wrote %d logits to tb_data/equiv_out_logits.dat\n", n_events);
         return 0;
     }
@@ -130,8 +159,10 @@ int main(int argc, char **argv) {
             // Run firmware
             input_t model_input[NPARTICLES*4];
             nnet::copy_data<float, input_t, 0, NPARTICLES*4>(in, model_input);
+            input_t beam_input[8];
+            fill_const_beams(beam_input);
             result_t model_out[1];
-            nPELICAN(model_input, nobj_val, model_out);
+            nPELICAN(model_input, beam_input, nobj_val, model_out);
 
             double fw_logit = double(model_out[0]);
 
@@ -213,9 +244,11 @@ int main(int argc, char **argv) {
 
                 input_t model_input[NPARTICLES*4];
                 nnet::copy_data<float, input_t, 0, NPARTICLES*4>(in, model_input);
+                input_t beam_input[8];
+                fill_const_beams(beam_input);
                 result_t model_out[1];
                 npelican_dots_override = dots_inj;
-                nPELICAN(model_input, nobj_val, model_out);
+                nPELICAN(model_input, beam_input, nobj_val, model_out);
                 npelican_dots_override = nullptr;
 
                 double fw_logit = double(model_out[0]);
@@ -261,6 +294,8 @@ int main(int argc, char **argv) {
 
             input_t model_input2[NPARTICLES*4];
             nnet::copy_data<float, input_t, 0, NPARTICLES*4>(in2, model_input2);
+            input_t beam_input2[8];
+            fill_const_beams(beam_input2);
             result_t model_out2[1];
 
 #ifndef __SYNTHESIS__
@@ -278,12 +313,12 @@ int main(int argc, char **argv) {
             // Open dump file and set global pointer
             FILE* dump_fp = fopen("tb_data/fw_stage_dump.txt", "w");
             npelican_dump_fp = dump_fp;
-            nPELICAN(model_input2, nobj_val2, model_out2);
+            nPELICAN(model_input2, beam_input2, nobj_val2, model_out2);
             npelican_dump_fp = nullptr;
             npelican_dots_override = nullptr;
             fclose(dump_fp);
 #else
-            nPELICAN(model_input2, nobj_val2, model_out2);
+            nPELICAN(model_input2, beam_input2, nobj_val2, model_out2);
 #endif
 
             fgpmu2.close();
@@ -353,11 +388,13 @@ int main(int argc, char **argv) {
             // hls-fpga-machine-learning insert data
       input_t model_input[NPARTICLES*4];
       nnet::copy_data<float, input_t, 0, NPARTICLES*4>(in, model_input);
+      input_t beam_input[8];
+      fill_const_beams(beam_input);
       result_t model_out[1];
 
             // hls-fpga-machine-learning insert top-level-function
             //input_t nobj = vnobj[0];
-            nPELICAN(model_input,vnobj[0],model_out);
+            nPELICAN(model_input,beam_input,vnobj[0],model_out);
 
             if (e % CHECKPOINT == 0) {
                 std::cout << "Predictions" << std::endl;
@@ -385,10 +422,12 @@ int main(int argc, char **argv) {
         // hls-fpga-machine-learning insert zero
     input_t model_input[NPARTICLES*4];
     nnet::fill_zero<input_t, NPARTICLES*4>(model_input);
+    input_t beam_input[8];
+    fill_const_beams(beam_input);
     result_t model_out[1];
 
         // hls-fpga-machine-learning insert top-level-function
-        nPELICAN(model_input,1,model_out);
+        nPELICAN(model_input,beam_input,1,model_out);
 
         // hls-fpga-machine-learning insert output
         nnet::print_result<result_t, 1>(model_out, std::cout, true);

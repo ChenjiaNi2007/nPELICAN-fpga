@@ -1,5 +1,12 @@
 # Findings — equivariance & performance vs bit-width (nPELICAN firmware csim)
 
+> **⮕ Option A update:** the firmware now takes the beams as a top-level input, so they can
+> be Lorentz-boosted with the particles. This document is the **`fixedbeams`** record (beams
+> held at `(1,0,0,±1)`); its reference curve is the *fixed-beam floor*. The new
+> **`FINDINGS_optionA.md`** adds the **`boostedbeams`** mode — where the float-exact output is
+> exactly invariant, so the reference collapses to the numerical floor and 100% of the residual
+> is a fixed-point artifact — and the boosted-vs-fixed overlay that quantifies the floor.
+
 **Run:** 7 QAT checkpoints, labelled `W:A:I` = weight:act:input bit-widths. Two controlled
 sub-sweeps sharing one architecture (nhid=2, config s, BN b, beams, scale 1):
   * **input-bit** sweep (W=A=6 fixed): `6:6:6`, `6:6:8`, `6:6:12`

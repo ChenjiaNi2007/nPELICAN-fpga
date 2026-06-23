@@ -69,10 +69,19 @@ def build_tb(define: str, out: str) -> str:
     return os.path.join(FPGA_ROOT, out)
 
 
-def run_tb_on(pmu_src: str, nobj_src: str) -> np.ndarray:
-    """Copy (pmu_src, nobj_src) into tb_data/equiv_in_*, run tb_equiv, return logits."""
+def run_tb_on(pmu_src: str, nobj_src: str, beams_src: str | None = None) -> np.ndarray:
+    """Copy (pmu_src, nobj_src[, beams_src]) into tb_data/equiv_in_*, run tb_equiv.
+
+    beams_src=None drives the firmware with the constant beams (1,0,0,+/-1) — the TB
+    falls back to constant beams when tb_data/equiv_in_beams.dat is absent, so we delete
+    any stale copy. This is the path used by the golden gate (no boost)."""
     shutil.copyfile(pmu_src, os.path.join(TB_DATA, "equiv_in_pmu.dat"))
     shutil.copyfile(nobj_src, os.path.join(TB_DATA, "equiv_in_nobj.dat"))
+    beams_dst = os.path.join(TB_DATA, "equiv_in_beams.dat")
+    if beams_src is not None:
+        shutil.copyfile(beams_src, beams_dst)
+    elif os.path.exists(beams_dst):
+        os.remove(beams_dst)                 # fall back to constant beams in the TB
     run([os.path.join(FPGA_ROOT, "tb_equiv")], cwd=FPGA_ROOT)
     out = os.path.join(TB_DATA, "equiv_out_logits.dat")
     return np.loadtxt(out, dtype=np.float64).reshape(-1)
@@ -104,9 +113,10 @@ def gate(pelican_repo: str, warn_tol: float):
         stdout=subprocess.DEVNULL)
     fw = np.loadtxt(gfw, dtype=np.float64).reshape(-1)
 
-    # equiv path on the same golden inputs (also leaves tb_equiv built for the sweep)
+    # equiv path on the same golden inputs (also leaves tb_equiv built for the sweep).
+    # beams_src=None -> constant beams, matching the firmware golden path (no boost).
     build_tb("RUN_EQUIVARIANCE", "tb_equiv")
-    got = run_tb_on(gpmu, gnobj)
+    got = run_tb_on(gpmu, gnobj, beams_src=None)
 
     m = min(len(got), len(fw))
     gate_delta = float(np.max(np.abs(got[:m] - fw[:m]))) if m else float("inf")
@@ -125,22 +135,41 @@ def gate(pelican_repo: str, warn_tol: float):
     print(f"  bit-faithfulness (firmware vs PyTorch): max|delta|={fw_vs_pyt:.3g}{flag}")
 
 
+# Mode -> canonical beams file. "boostedbeams": beams transform with the particles
+# (Option-A invariance); "fixedbeams": beams held at (1,0,0,+/-1) (the fixed-beam floor).
+BEAMS_FILE = {
+    "boostedbeams": "equiv_beams_boostedbeams.dat",
+    "fixedbeams":   "equiv_beams_fixedbeams.dat",
+}
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--config", default=None)
     p.add_argument("--only-gate", action="store_true",
                    help="regen weights + golden and run the gate for each model; skip the sweep")
+    p.add_argument("--mode", choices=["boostedbeams", "fixedbeams", "both"], default="both",
+                   help="which beam convention(s) to sweep. 'both' (default) produces the "
+                        "overlay inputs in one run. Outputs are mode-tagged: "
+                        "results/logits_<mode>_<label>.dat (legacy un-tagged files untouched).")
     a = p.parse_args()
 
     cfg = load_config(a.config)
     pelican_repo = repo_path(cfg["pelican_nano_repo"])
     warn_tol = float(cfg.get("golden_tol", 1e-3))   # threshold for the fw-vs-PyTorch warning
     models = cfg["models"]
+    modes = ["boostedbeams", "fixedbeams"] if a.mode == "both" else [a.mode]
 
     canon_pmu = os.path.join(CANON_DIR, "equiv_pmu.dat")
     canon_nobj = os.path.join(CANON_DIR, "equiv_nobj.dat")
-    if not a.only_gate and not os.path.exists(canon_pmu):
-        sys.exit(f"Missing {canon_pmu}. Run gen_boosted_inputs.py first.")
+    if not a.only_gate:
+        if not os.path.exists(canon_pmu):
+            sys.exit(f"Missing {canon_pmu}. Run gen_boosted_inputs.py first.")
+        for m in modes:
+            bf = os.path.join(CANON_DIR, BEAMS_FILE[m])
+            if not os.path.exists(bf):
+                sys.exit(f"Missing {bf}. Re-run gen_boosted_inputs.py (it now emits both "
+                         f"beams files).")
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
@@ -152,6 +181,8 @@ def main():
         if not os.path.exists(ckpt_abs):
             sys.exit(f"  checkpoint not found: {ckpt_abs}")
 
+        # Weights + golden + gate are mode-independent (gate runs at beta=0 constant
+        # beams), so do them ONCE per model, then sweep each requested mode.
         regen_weights(ckpt_abs, pelican_repo)
         regen_golden(ckpt_abs, pelican_repo)
         gate(pelican_repo, warn_tol)   # builds tb_golden + tb_equiv, validates the oracle
@@ -159,11 +190,13 @@ def main():
         if a.only_gate:
             continue
 
-        print(f"  [sweep] running canonical boosted set through {label} build")
-        logits = run_tb_on(canon_pmu, canon_nobj)
-        out = os.path.join(RESULTS_DIR, f"logits_{safe_name(label)}.dat")
-        np.savetxt(out, logits, fmt="%.17g")
-        print(f"  [sweep] wrote {len(logits)} logits -> {out}")
+        for mode in modes:
+            beams_src = os.path.join(CANON_DIR, BEAMS_FILE[mode])
+            print(f"  [sweep:{mode}] running canonical boosted set through {label} build")
+            logits = run_tb_on(canon_pmu, canon_nobj, beams_src=beams_src)
+            out = os.path.join(RESULTS_DIR, f"logits_{mode}_{safe_name(label)}.dat")
+            np.savetxt(out, logits, fmt="%.17g")
+            print(f"  [sweep:{mode}] wrote {len(logits)} logits -> {out}")
 
     print("\nDone. Next: python compute_metrics.py")
 

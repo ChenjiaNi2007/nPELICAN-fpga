@@ -71,6 +71,7 @@ void dot4(input_t p1[4], input_t p2[4], dot_t& dot);
 
 void nPELICAN(
     input_t model_input[(NPARTICLES)*4],
+    input_t beam_input[2*4],            // 2 beam spurions as a top-level input
     input_t nobj,
     result_t model_out[1]
 );

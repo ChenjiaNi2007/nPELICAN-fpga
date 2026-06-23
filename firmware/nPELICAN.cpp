@@ -43,12 +43,14 @@ dot = p1[0]*p2[0]-p1[1]*p2[1]-p1[2]*p2[2]-p1[3]*p2[3];
 
 void nPELICAN(
     input_t model_input[(NPARTICLES)*4],
+    input_t beam_input[2*4],            // 2 beam spurions as a top-level input
     input_t nobj,
     result_t model_out[1]
 ) {
     #pragma HLS ARRAY_RESHAPE variable=model_input complete dim=0
+    #pragma HLS ARRAY_RESHAPE variable=beam_input complete dim=0
     #pragma HLS ARRAY_PARTITION variable=model_out complete dim=0
-    #pragma HLS INTERFACE ap_vld port=model_input,model_out
+    #pragma HLS INTERFACE ap_vld port=model_input,beam_input,model_out
 //    #pragma HLS DATAFLOW
     #pragma HLS PIPELINE II=1
 
@@ -97,9 +99,16 @@ void nPELICAN(
         p1[(i + (NPARTICLES2 - NPARTICLES))][k] = model_input[i*(4)+k]*nobjmask[i][0];
       }
     }
-    //add beam spurions
-    p1[0][0]   = 1.; p1[0][1]   = 0.; p1[0][2]   = 0.; p1[0][3]   = 1.;
-    p1[1][0] = 1.; p1[1][1] = 0.; p1[1][2] = 0.; p1[1][3] = -1.;
+    //beam spurions are now inputs so the test harness can Lorentz-boost them.
+    //At |beta|=0 these are driven with (1,0,0,+1)/(1,0,0,-1), which quantize into
+    //input_t identically to the previous constants -> beta=0 stays bit-exact.
+    BeamPrep: for (unsigned int i = 0; i < 2; i++) {
+      #pragma HLS unroll
+      for (unsigned int k = 0; k < 4; k++) {
+        #pragma HLS unroll
+        p1[i][k] = beam_input[i*4+k];
+      }
+    }
 
     //fill input array (each dot rounded into dot_t = input_quant grid).
     //dot4 is symmetric (p_i·p_j == p_j·p_i), so compute only the upper triangle

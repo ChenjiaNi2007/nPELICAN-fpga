@@ -3,13 +3,16 @@
 # compute_metrics.py (results.csv).
 canonical/equiv_pmu.dat
 canonical/equiv_nobj.dat
+canonical/equiv_beams_fixedbeams.dat
+canonical/equiv_beams_boostedbeams.dat
 canonical/manifest.csv
 results/logits_*.dat
 results/results.csv
-sweep_run.log
+results/results_*.csv
+*.log
 
 # Committed deliverables of a real run:
-#   canonical/meta.json          (seed, directions, selected jets — reproducibility)
-#   results/aggregates.csv       (compact per-(bit_width, beta) metrics)
-#   results/plots/*.png          (the curves)
+#   canonical/meta.json              (seed, directions, selected jets — reproducibility)
+#   results/aggregates*.csv          (compact per-(config, beta) metrics; per-mode too)
+#   results/plots*/*.png             (the curves, per-mode + boosted-vs-fixed overlay)
 __pycache__/

@@ -1,4 +1,11 @@
 third_party/
 tb_local
+tb_golden
+tb_equiv
 tb_data/fw_stage_dump.txt
 tb_data/golden_fw_results.log
+# equivariance harness scratch (run_sweep.py copies the canonical set in here per build)
+tb_data/equiv_in_pmu.dat
+tb_data/equiv_in_nobj.dat
+tb_data/equiv_in_beams.dat
+tb_data/equiv_out_logits.dat

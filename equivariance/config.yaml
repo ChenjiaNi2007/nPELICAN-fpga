@@ -24,21 +24,24 @@ seed:   1234        # determinism: the SAME physical boosted set is reused acros
 beta_grid: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95]
 n_dir:     8         # random isotropic directions per magnitude (averaged in metrics)
 
-# IMPORTANT — beams cannot be boosted through csim.
-# The firmware (firmware/nPELICAN.cpp) HARDCODES the two beam spurions (1,0,0,+/-1)
-# and takes ONLY the 20 real particles as input. So boosted beams cannot be fed
-# through the csim datapath without changing the firmware signature (which would
-# break "csim path == firmware path"). Therefore:
-#   * boost_beams MUST be false for the csim-faithful measurement.
-#   * with beams fixed, the beam-particle dots d(beam, Lambda*p) are NOT invariant
-#     even in exact float64, so the highest-bit / float reference curve is a NON-ZERO
-#     "fixed-beam floor" by design (NOT a bug). Lower-bit curves rising above that
-#     floor are the precision artifact this sweep isolates.
-#   * the float64 boost unit test in gen_boosted_inputs.py therefore checks only the
-#     real-real 20x20 dot block (the genuine Lorentz scalars).
-# boost_beams: true is reserved for a hypothetical future firmware that accepts the
-# beams as inputs; it is not runnable against the current build.
-boost_beams: false
+# Beams are now a top-level firmware input (Option A).
+# firmware/nPELICAN.cpp takes beam_input[2*4] alongside model_input, so the two beam
+# spurions can be Lorentz-boosted through csim exactly like the particles. boost_beams
+# is therefore a REAL runtime toggle (same firmware build for both):
+#   * boost_beams: true  — beams transform WITH the particles. The full 22x22 Gram is
+#     then an exact Lorentz invariant, so the high-bit/reference curve collapses to the
+#     pure fixed-point floor: 100% of the residual violation is a precision artifact.
+#     (gen_boosted_inputs.py proves this with a float64 full-22x22 invariance gate, G2.)
+#   * boost_beams: false — beams stay (1,0,0,+/-1). The beam-particle dots d(beam,Lambda*p)
+#     are NOT invariant even in exact float64, so the reference curve is a NON-ZERO
+#     "fixed-beam floor" by design. The GAP between the two reference curves quantifies
+#     how much of the original violation was intended frame-dependence vs precision loss.
+# gen_boosted_inputs.py always emits BOTH beams conventions (the momenta are mode-
+# independent), and run_sweep.py --mode {boostedbeams,fixedbeams,both} sweeps either or
+# both. This flag only records the DEFAULT sweep mode; both files are always available.
+# At |beta|=0 the boosted and fixed beams coincide ((1,0,0,+/-1)) -> identical firmware
+# output, functionally identical to the deployed firmware (gate G1).
+boost_beams: true
 
 # ---- Constituent set (must match the trained checkpoint's collate settings) --
 nobj:      20        # real-particle cap (test.h5 Pmu is already 20-wide)

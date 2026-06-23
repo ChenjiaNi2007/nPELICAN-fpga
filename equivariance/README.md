@@ -12,25 +12,37 @@ is never reimplemented in Python.
 
 ---
 
-## ⚠️ Two facts that shape the measurement (read first)
+## Option A — beams are a firmware input, so they can be boosted (read first)
 
-**1. The firmware hardcodes the beam spurions, so beams cannot be boosted.**
-`firmware/nPELICAN.cpp` injects the two beam vectors `(1,0,0,±1)` internally and takes only
-the **20 real particles** as its top-level input. So the SEAL "boost every four-vector
-including the beams" protocol is *not runnable* through csim without changing the firmware
-signature (which would break "csim path == firmware path"). We therefore boost **only the
-real particles** (`boost_beams: false`, the only csim-faithful option).
+The firmware now takes the two beam spurions as a **top-level input** (`beam_input[2*4]`)
+alongside the 20 real particles, so the harness can Lorentz-boost the beams *with* the
+particles. This lets us run the measurement in **two modes against the same firmware build**:
 
-**2. Because the beams stay fixed, the high-bit reference curve is NOT zero — by design.**
-With fixed beams, the beam–particle dots `d(beam, Λp) = beam·Λp ≠ beam·p` even in exact
-float64, so PELICAN-with-beams is invariant only under the beam-axis-preserving subgroup,
-not full Lorentz. The highest-bit-width curve is thus a non-zero **"fixed-beam floor."**
-Lower-bit curves rising *above* that floor are the precision artifact this sweep isolates.
-(The float64 boost unit test in `gen_boosted_inputs.py` therefore validates only the
-**real–real 20×20 dot block** — the genuine Lorentz scalars.)
+**1. `boostedbeams` — the well-posed precision question.**
+Boost the beams alongside the particles. PELICAN's `d_ij = p_i·p_j` are then Lorentz scalars
+over the **full 22-vector set**, so the float-exact output is *exactly invariant*. Therefore
+**100% of the residual violation at reduced bit-width is a fixed-point artifact** — nothing is
+contaminated by intended frame-dependence. `gen_boosted_inputs.py` proves the float64
+invariance with a **full 22×22 Gram gate (G2)** before any sweep runs.
 
-This reinterprets the task spec's §2/§7 expectation (which assumed boosted beams ⇒ flat
-zero floor); it is a property of this firmware, not a bug.
+**2. `fixedbeams` — the old "fixed-beam floor", kept as the baseline.**
+Hold the beams at `(1,0,0,±1)`. The beam–particle dots `d(beam, Λp) ≠ d(beam, p)` even in
+exact float64, so the reference curve is a **non-zero floor by design** (the network is only
+invariant under the beam-axis subgroup). This is the curve the pre-Option-A sweep measured.
+
+**The headline result is the overlay.** The **gap between the two `24:24:24` reference curves
+IS the fixed-beam symmetry-breaking floor** — it quantifies how much of the original
+"violation" was intended frame-dependence (fixed beams) versus genuine precision loss
+(everything left under boosted beams). See `FINDINGS_optionA.md`.
+
+**At `|β|=0` the two modes coincide** (boosted beams = fixed beams = `(1,0,0,±1)`), and the
+widened firmware is byte-identical to the old hardcoded-beam firmware (**gate G1**, verified
+200/200 bit-exact). For real deployment, drive `beam_input` with the two constant vectors.
+
+> **Honest caveat (large `|β|`):** the boosted-beam reference need *not* reach zero at large
+> `|β|`. Boosting inflates all energies; once they exceed the `input_t` integer range the
+> encoding **saturates**. That residual is a real precision effect (dynamic range, not just
+> rounding) — now correctly isolated, not conflated with symmetry breaking. See §7 / FINDINGS.
 
 ---
 
@@ -40,11 +52,11 @@ zero floor); it is a property of this firmware, not a bug.
 |---|---|
 | `config.yaml` | single source of truth (paths, boost grid, model list) |
 | `equiv_common.py` | shared helpers (boost matrix, paths, AUC, `1/ε_B`) |
-| `gen_boosted_inputs.py` | build the **canonical, build-independent** boosted dataset + float64 unit test |
-| `run_sweep.py` | per model: regen weights/types → gate → run csim → stash logits |
-| `compute_metrics.py` | pair `f_b(Λx)` vs `f_b(x)`, write `results.csv`, aggregates, plots |
-| `canonical/` | generated: `equiv_pmu.dat`, `equiv_nobj.dat`, `manifest.csv`, `meta.json` |
-| `results/` | generated: `logits_bit{bw}.dat`, `results.csv`, `aggregates.csv`, `plots/` |
+| `gen_boosted_inputs.py` | build the **canonical, build-independent** boosted dataset + float64 unit tests (incl. full-22×22 G2); emits **both** beams files |
+| `run_sweep.py` | per model: regen weights/types → gate → run csim → stash logits, for `--mode {boostedbeams,fixedbeams,both}` |
+| `compute_metrics.py` | pair `f_b(Λx)` vs `f_b(x)`, write per-mode `results_<mode>.csv`/`aggregates_<mode>.csv`/`plots_<mode>/`, and the **boosted-vs-fixed overlay** |
+| `canonical/` | generated: `equiv_pmu.dat`, `equiv_nobj.dat`, `equiv_beams_fixedbeams.dat`, `equiv_beams_boostedbeams.dat`, `manifest.csv`, `meta.json` |
+| `results/` | generated: `logits_<mode>_<label>.dat`, `results_<mode>.csv`, `aggregates_<mode>.csv`, `plots_<mode>/`, `plots_overlay/` |
 
 The input `.dat` is **float text**; the cast onto each build's `input_t` happens in C++
 (`copy_data`), so the canonical set is build-independent and reused verbatim across all
@@ -60,15 +72,20 @@ All commands use the PELICAN-nano virtualenv (brevitas/torch/yaml/matplotlib liv
 cd nPELICAN-fpga/equivariance
 PY=../../PELICAN-nano/.venv/bin/python
 
-# 1. Build the canonical boosted set once (reused by every build).
+# 1. Build the canonical boosted set once (reused by every build). Emits BOTH beams
+#    files (fixed + boosted) and runs the float64 G2 full-22x22 invariance gate.
 $PY gen_boosted_inputs.py                 # uses config.yaml (n_jets=2000, n_dir=8)
 
-# 2. Sweep every model in config.yaml (regen weights → golden gate → csim → stash).
-$PY run_sweep.py
+# 2. Sweep every model in config.yaml, BOTH beam conventions (regen weights → golden
+#    gate → csim → stash mode-tagged logits). --mode {boostedbeams,fixedbeams,both}.
+$PY run_sweep.py --mode both
 
-# 3. Metrics + plots (re-derivable from results/results.csv alone).
-$PY compute_metrics.py
+# 3. Per-mode metrics + the boosted-vs-fixed overlay (the headline / fixed-beam floor).
+$PY compute_metrics.py --mode both
 ```
+
+> Legacy un-tagged `logits_<label>.dat` from a pre-Option-A run are left untouched;
+> `compute_metrics.py --mode legacy` still reads them.
 
 ### Smoke test first (validate the loop in ~10 s)
 
@@ -163,11 +180,17 @@ Everything below is read off `results/aggregates.csv` (one row per `bit_width ×
 plots. Read the curves **relative to the reference (highest-bit) model**, which is drawn on
 every plot as the **invariance floor**.
 
-**The floor is not zero — and that's correct here.** Because the firmware holds the beam
-spurions fixed (see the warnings at the top), even the float-exact network is only invariant
-under the beam-axis subgroup, so the reference curve *rises* with `|β|`. Treat it as the
-baseline. **The precision story is the GAP between a low-bit curve and the reference**, not the
-absolute height of any single curve.
+**Under `boostedbeams` the reference collapses to the numerical floor.** With the beams
+boosted alongside the particles the float-exact network is *exactly* invariant, so the
+`24:24:24` reference `score_drift` drops to ~1e-8 (orders of magnitude below the fixed-beam
+curve) at small/moderate `|β|`. **The precision story is then the GAP between a low-bit curve
+and this near-zero reference** — pure fixed-point artifact. (Under `fixedbeams` the reference
+is the non-zero *fixed-beam floor*; the overlay's gap between the two reference curves
+quantifies that floor — see `plots_overlay/` and `FINDINGS_optionA.md`.)
+
+**Large-`|β|` is range, not rounding.** The boosted-beam reference rises again at `|β|≳0.8`:
+boosting inflates energies past the `input_t` integer range and the encoding saturates. That
+is a genuine dynamic-range precision effect, now isolated — not symmetry breaking.
 
 What each curve tells you, and what "bad" looks like:
 
