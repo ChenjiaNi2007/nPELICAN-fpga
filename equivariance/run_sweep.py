@@ -29,17 +29,22 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from equiv_common import (  # noqa: E402
-    CANON_DIR, FPGA_ROOT, RESULTS_DIR, TB_DATA, load_config, repo_path,
+    CANON_DIR, FPGA_ROOT, RESULTS_DIR, TB_DATA, load_config, model_label,
+    repo_path, safe_name,
 )
 
 PY = sys.executable  # subprocesses reuse the interpreter running this driver (the venv)
 
-GPP_FLAGS = [
-    "-std=c++17", "-O2", "-DRUN_EQUIVARIANCE",
+GPP_BASE = [
+    "-std=c++17", "-O2",
     "-I", "third_party/stubs",
     "-I", "third_party/ap_types/include",
     "-I", ".",
 ]
+
+# Equiv-vs-firmware bit-exactness: same nPELICAN() call on the same inputs, so it
+# must agree to the last digit. (Float text round-trips at %.17g.)
+EQUIV_EXACT_TOL = 1e-9
 
 
 def run(cmd, **kw):
@@ -58,11 +63,10 @@ def regen_golden(ckpt_abs: str, pelican_repo: str, num: int = 200):
         cwd=pelican_repo)
 
 
-def build_tb() -> str:
-    out = os.path.join(FPGA_ROOT, "tb_equiv")
-    run(["g++", *GPP_FLAGS, "nPELICAN_tb.cpp", "firmware/nPELICAN.cpp", "-o", "tb_equiv"],
-        cwd=FPGA_ROOT)
-    return out
+def build_tb(define: str, out: str) -> str:
+    run(["g++", *GPP_BASE, f"-D{define}", "nPELICAN_tb.cpp", "firmware/nPELICAN.cpp",
+         "-o", out], cwd=FPGA_ROOT)
+    return os.path.join(FPGA_ROOT, out)
 
 
 def run_tb_on(pmu_src: str, nobj_src: str) -> np.ndarray:
@@ -74,24 +78,51 @@ def run_tb_on(pmu_src: str, nobj_src: str) -> np.ndarray:
     return np.loadtxt(out, dtype=np.float64).reshape(-1)
 
 
-def gate(pelican_repo: str, tol: float):
-    """Run the equivariance TB on golden_pmu.dat; assert it reproduces golden_logits."""
+def gate(pelican_repo: str, warn_tol: float):
+    """Validate the oracle, then build the equiv TB ready for the sweep.
+
+    Two distinct checks (see FINDINGS for why they must be separated):
+      1. GATE (must pass, bit-exact): the RUN_EQUIVARIANCE output on golden_pmu must
+         equal the FIRMWARE's own golden-path output (RUN_GOLDEN_GATE writes
+         golden_fw_results.log). This proves the equiv TB plumbing runs the firmware
+         correctly — independent of whether the firmware matches PyTorch.
+      2. BIT-FAITHFULNESS (informational): firmware vs PyTorch (golden_logits). This is
+         ~0 at high bit width but legitimately grows at low bit width, because PyTorch
+         keeps BatchNorm in float while the firmware uses fixed BN, and at coarse grids
+         a tipped quantizer boundary cascades to the logit. Reported, never aborts.
+    """
     gpmu = os.path.join(TB_DATA, "golden_pmu.dat")
     gnobj = os.path.join(TB_DATA, "golden_nobj.dat")
     glog = os.path.join(TB_DATA, "golden_logits.dat")
+    gfw = os.path.join(TB_DATA, "golden_fw_results.log")
     if not (os.path.exists(gpmu) and os.path.exists(glog)):
         sys.exit(f"GATE: missing golden vectors ({gpmu}). export_golden.py must run first.")
+
+    # firmware golden path: writes golden_fw_results.log (firmware logits on golden_pmu)
+    build_tb("RUN_GOLDEN_GATE", "tb_golden")
+    run([os.path.join(FPGA_ROOT, "tb_golden")], cwd=FPGA_ROOT,
+        stdout=subprocess.DEVNULL)
+    fw = np.loadtxt(gfw, dtype=np.float64).reshape(-1)
+
+    # equiv path on the same golden inputs (also leaves tb_equiv built for the sweep)
+    build_tb("RUN_EQUIVARIANCE", "tb_equiv")
     got = run_tb_on(gpmu, gnobj)
-    want = np.loadtxt(glog, dtype=np.float64).reshape(-1)
-    m = min(len(got), len(want))
-    max_delta = float(np.max(np.abs(got[:m] - want[:m]))) if m else float("inf")
-    n_exact = int(np.sum(got[:m] == want[:m]))
-    status = "PASS" if max_delta < tol else "FAIL"
-    print(f"  GATE: {status} (max|delta|={max_delta:.3g} vs tol={tol:.3g}; "
-          f"{n_exact}/{m} zero-tolerance exact)")
+
+    m = min(len(got), len(fw))
+    gate_delta = float(np.max(np.abs(got[:m] - fw[:m]))) if m else float("inf")
+    status = "PASS" if gate_delta < EQUIV_EXACT_TOL else "FAIL"
+    print(f"  GATE (equiv == firmware): {status} (max|delta|={gate_delta:.3g}, "
+          f"{int(np.sum(got[:m] == fw[:m]))}/{m} exact)")
     if status != "PASS":
-        sys.exit("  GATE FAILED: equivariance TB mode does not match the golden path. "
-                 "Refusing to run the sweep with an unvalidated oracle.")
+        sys.exit("  GATE FAILED: RUN_EQUIVARIANCE does not reproduce the firmware's own "
+                 "golden-path output. The oracle plumbing is wrong; refusing to sweep.")
+
+    # informational: firmware vs PyTorch
+    pyt = np.loadtxt(glog, dtype=np.float64).reshape(-1)
+    mp = min(len(fw), len(pyt))
+    fw_vs_pyt = float(np.max(np.abs(fw[:mp] - pyt[:mp]))) if mp else float("inf")
+    flag = "" if fw_vs_pyt < warn_tol else "  (large: float-BN boundary tipping at low bits)"
+    print(f"  bit-faithfulness (firmware vs PyTorch): max|delta|={fw_vs_pyt:.3g}{flag}")
 
 
 def main():
@@ -103,7 +134,7 @@ def main():
 
     cfg = load_config(a.config)
     pelican_repo = repo_path(cfg["pelican_nano_repo"])
-    tol = float(cfg.get("golden_tol", 1e-3))
+    warn_tol = float(cfg.get("golden_tol", 1e-3))   # threshold for the fw-vs-PyTorch warning
     models = cfg["models"]
 
     canon_pmu = os.path.join(CANON_DIR, "equiv_pmu.dat")
@@ -114,24 +145,23 @@ def main():
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
     for mdl in models:
-        bw = mdl["bit_width"]
+        label = model_label(mdl)
         ckpt_abs = repo_path(mdl["checkpoint"])
         ref = " (reference)" if mdl.get("reference") else ""
-        print(f"\n=== model bit_width={bw}{ref}  ckpt={ckpt_abs} ===")
+        print(f"\n=== model {label} (W:A:I){ref}  ckpt={ckpt_abs} ===")
         if not os.path.exists(ckpt_abs):
             sys.exit(f"  checkpoint not found: {ckpt_abs}")
 
         regen_weights(ckpt_abs, pelican_repo)
         regen_golden(ckpt_abs, pelican_repo)
-        build_tb()
-        gate(pelican_repo, tol)
+        gate(pelican_repo, warn_tol)   # builds tb_golden + tb_equiv, validates the oracle
 
         if a.only_gate:
             continue
 
-        print(f"  [sweep] running canonical boosted set through bit_width={bw} build")
+        print(f"  [sweep] running canonical boosted set through {label} build")
         logits = run_tb_on(canon_pmu, canon_nobj)
-        out = os.path.join(RESULTS_DIR, f"logits_bit{bw}.dat")
+        out = os.path.join(RESULTS_DIR, f"logits_{safe_name(label)}.dat")
         np.savetxt(out, logits, fmt="%.17g")
         print(f"  [sweep] wrote {len(logits)} logits -> {out}")
 

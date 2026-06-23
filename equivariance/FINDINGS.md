@@ -1,68 +1,136 @@
-# Findings — equivariance vs boost (nPELICAN firmware csim)
+# Findings — equivariance & performance vs bit-width (nPELICAN firmware csim)
 
-**Run config:** `n_jets=2000` (balanced signal/background), `n_dir=8` isotropic directions,
-`|β| ∈ {0, 0.1, …, 0.9, 0.95}`, seed 1234. Oracle: local g++ csim (bit-identical to Vitis).
-Golden gate: **PASS** (`max|Δlogit| = 6.3e-4 < 1e-3`; 133/200 zero-tolerance exact) — the
-equivariance TB mode is the validated firmware path.
+**Run:** 7 QAT checkpoints, labelled `W:A:I` = weight:act:input bit-widths. Two controlled
+sub-sweeps sharing one architecture (nhid=2, config s, BN b, beams, scale 1):
+  * **input-bit** sweep (W=A=6 fixed): `6:6:6`, `6:6:8`, `6:6:12`
+  * **weight/act** sweep (I=16 fixed): `8:8:16`, `12:12:16`, `16:16:16`
+  * **reference** `24:24:24` (highest precision).
 
-> **Scope.** Only one QAT checkpoint exists on disk today (`fpga_model_qat_best.pt`,
-> **24-bit**). So this is a **single-curve baseline + harness validation**, not yet the
-> multi-bit-width comparison. The headline claim (*fewer bits → larger violation, with a
-> cliff*) needs the lower-bit checkpoints; drop them into `config.yaml` and re-run. The
-> 24-bit curve here is the **reference floor** every future curve is measured against.
+`n_jets=2000` (balanced), `n_dir=8`, `|β| ∈ {0,…,0.95}`, seed 1234. Oracle: local g++ csim
+(bit-identical to Vitis). Every model passed the **equiv == firmware gate bit-exactly
+(max|Δ|=0, 200/200)**, so the oracle plumbing is verified for all builds. Boost protocol:
+real particles only, beams fixed (see README) → the curves carry the by-design fixed-beam
+floor; read them *relative to each other*, not against zero.
 
-## What the 24-bit curve shows
+---
 
-| `|β|` | score-drift `⟨Δσ²⟩` | flip rate | AUC | `1/ε_B@0.3` |
-|------:|--------------------:|----------:|------:|------------:|
-| 0.00  | 0          | 0.000 | 0.852 | 9.90 |
-| 0.10  | 4.2e-05    | 0.009 | 0.852 | 9.95 |
-| 0.20  | 1.8e-04    | 0.015 | 0.851 | 9.96 |
-| 0.30  | 4.3e-04    | 0.022 | 0.849 | 9.78 |
-| 0.40  | 8.6e-04    | 0.030 | 0.847 | 9.59 |
-| 0.50  | 1.6e-03    | 0.038 | 0.843 | 9.26 |
-| 0.60  | 2.8e-03    | 0.055 | 0.835 | 8.66 |
-| 0.70  | 5.0e-03    | 0.075 | 0.823 | 7.87 |
-| 0.80  | 9.1e-03    | 0.101 | 0.802 | 6.75 |
-| 0.90  | 1.9e-02    | 0.160 | 0.750 | 5.11 |
-| 0.95  | 3.2e-02    | 0.229 | 0.675 | 3.98 |
+## 0. A firmware bug this sweep found and fixed (read first)
 
-(AUC at `|β|=0` = 0.852 matches the model's true test discrimination — confirms the csim
-oracle faithfully reproduces the trained network.)
+The final-logit type `result_t` was **hardcoded** in `firmware/nPELICAN.h` to `ap_fixed<24,1>`
+(range [−1,1)). But each checkpoint's `output_quant` grid (`out_t`) differs — e.g. `16:16:16`
+has `out_t = ap_fixed<16,3>` (range [−4,4)). So the firmware silently **clamped every logit to
+[−1,1)**, collapsing all out-of-range scores onto ±1 and destroying the score ranking. Effect
+before the fix: `16:16:16` firmware AUC = **0.30** (sub-random) vs its PyTorch model's 0.76;
+`6:6:6` = 0.36. The clamp masqueraded as "low-bit models are broken."
 
-### 1. The violation-vs-`|β|` trend
-Monotone and smooth on log-y: score drift grows from `4e-5` at `|β|=0.1` to `3.2e-2` at
-`|β|=0.95` — roughly `∝ |β|^4` at small boosts (each 0.1 step ~doubles the drift), steepening
-above `|β|≈0.7`. Decision flips climb from <1% to 23%.
+Fix: `model_loader.py` now generates `result_t == out_t` (guarded, like `input_t`); `nPELICAN.h`
+keeps the `<24,1>` value only as the float-export fallback. After the fix, firmware-vs-PyTorch
+for `16:16:16` dropped from **max|Δ|=2.02 → 0.0011**, and all AUCs recovered to 0.70–0.85.
+All numbers below are post-fix. (The 24:24:24 reference was unaffected — its `out_t` already
+was `<24,1>`.)
 
-**This entire curve is the by-design "fixed-beam floor," not a precision artifact.** At 24
-bits the network is essentially exact, so the violation is dominated by the firmware holding
-the beam spurions fixed while the event is boosted (`d(beam, Λp) ≠ d(beam, p)`). The float64
-unit test confirms the *real–real* dots are invariant to machine precision; the drift enters
-through the beam rows. Lower-bit curves are expected to sit **above** this floor — that gap
-is the precision effect of interest.
+---
 
-### 2. Where is the cliff?
-At 24 bits there is a **soft knee around `|β|≈0.8–0.9`**: below it AUC barely moves (0.852→0.802,
-a 6% relative drop over `|β|=0→0.8`) while above it AUC falls off fast (0.802→0.675, a 16%
-drop over `|β|=0.8→0.95`). Whether a *hard* precision cliff appears — and at which `|β|` — is
-exactly what the lower-bit checkpoints will reveal: the expectation is that the knee moves to
-smaller `|β|` as bits drop, eventually colliding with input saturation in `input_t`/`dot4`.
+## 1. Bit-faithfulness: does the firmware compute the trained model? (cleanest bit-width law)
 
-### 3. Does `1/ε_B@0.3` degrade before or after the per-jet score?
-**After.** Per-jet score drift is non-zero immediately (`|β|=0.1`) and rises smoothly,
-whereas `1/ε_B@0.3` is *flat-to-slightly-improving* through `|β|≤0.2` (9.90→9.96) and only
-starts a clear decline past `|β|≈0.3`, reaching 3.98 at `|β|=0.95`. AUC behaves the same way
-(essentially flat to `|β|≈0.5`, then falls). So per-event score drift is the **most sensitive**
-probe; aggregate discrimination (AUC, background rejection) is a **lagging** indicator that
-only registers once a non-trivial fraction of jets have drifted across the threshold (cf. the
-flip-rate column). Report all three: drift catches the effect earliest, flip-rate marks where
-scores pile up at `w=0`, and `1/ε_B@0.3` tells you when it actually costs physics.
+Firmware vs PyTorch on 200 golden events, max|Δlogit| — this is *not* an equivariance metric;
+it measures whether the deployed fixed-point firmware reproduces the float-trained model:
+
+| config | 6:6:6 | 6:6:8 | 6:6:12 | 8:8:16 | 12:12:16 | 16:16:16 | 24:24:24 |
+|---|---|---|---|---|---|---|---|
+| max\|Δ\| | 0.375 | 0.25 | 0.25 | 0.188 | 0.047 | 0.0011 | 0.0006 |
+
+Monotonic ↓ with bits. The residual is **float-BN boundary tipping**: PyTorch keeps BatchNorm
+in float while the firmware uses fixed BN, and on coarse grids a tiny BN difference tips a
+quantizer boundary and cascades to the logit. It shrinks as grids refine. **Takeaway:** below
+~12 bits the FPGA computes a meaningfully *different* function than the trained checkpoint
+(a deployment gap independent of equivariance) — worth closing (e.g. revisit fixed-BN
+precision) if low-bit deployment is the goal.
+
+---
+
+## 2. Equivariance violation vs bit-width — two regimes, NO cliff
+
+The naive hypothesis "fewer bits → larger violation, with a cliff" is **only half right, and
+there is no cliff.** Two regimes (clearest in logit-space drift `⟨|w₀−w_β|⟩`, which — unlike
+the σ-based score drift — is independent of where each model sits on the sigmoid):
+
+**Small/moderate boost (|β| ≲ 0.3): fewer bits → MORE violation.** A quantization-noise floor:
+coarse grids tip on the tiny perturbations a small boost induces, so the low-bit models sit
+*above* the high-bit reference. Near-monotonic in total bit budget:
+
+| config (W+A+I bits) | logit drift @ β=0.1 | score drift @ β=0.1 |
+|---|---|---|
+| 6:6:6 (18)   | 0.047 | 2.2e-4 |
+| 6:6:8 (20)   | 0.033 | 2.3e-4 |
+| 6:6:12 (24)  | 0.027 | 2.6e-4 |
+| 8:8:16 (32)  | 0.034 | 1.7e-4 |
+| 12:12:16 (40)| 0.022 | 4.4e-5 |
+| 16:16:16 (48)| 0.012 | 1.1e-5 |
+| 24:24:24 (72)| 0.013 | 4.2e-5 |
+
+**Large boost (|β| ≳ 0.6): the genuine fixed-beam symmetry breaking dominates** and scales with
+each model's *responsiveness* (its learned weight/BN magnitudes), so the bit-width ordering
+washes out. The high-precision reference, which tracks the perturbation faithfully, rises
+fastest and ends with the **largest** drift (score drift @ β=0.95: 24:24:24 = 3.2e-2, the top
+curve; logit drift there is led by 8:8:16 = 0.62, with 24:24:24 = 0.47 — non-monotonic, set by
+per-checkpoint weight scale, not bit budget). The curves cross around |β| ≈ 0.3–0.5.
+
+**Score-drift vs logit-drift caveat.** The SEAL-style σ-drift over-weights `24:24:24`: its
+logits straddle 0 (steep sigmoid) so a given Δw makes a larger Δσ, while the reduced-precision
+models park in the sigmoid tail. Report both; logit-drift is the fairer cross-bit comparison.
+
+**No cliff** in either axis: degradation is smooth in |β| (a soft knee ~0.8 for every config)
+and smooth in bit-width. Nothing falls off a precision edge in 6→24 bits.
+
+---
+
+## 3. Tagging performance under boost (AUC, 1/ε_B@0.3)
+
+AUC at β=0 (firmware, 2000 balanced jets), and how it survives the largest boost:
+
+| config | AUC @ β=0 | AUC @ β=0.95 | 1/ε_B@0.3 (β=0) | flip-rate @ β=0.95 |
+|---|---|---|---|---|
+| 6:6:6    | 0.703 | 0.697 | 18.9 | 0.056 |
+| 6:6:8    | 0.779 | 0.760 | 28.6 | 0.139 |
+| 6:6:12   | 0.766 | 0.739 | 28.6 | 0.185 |
+| 8:8:16   | 0.815 | 0.766 | 25.0 | 0.111 |
+| 12:12:16 | 0.768 | 0.749 | 28.6 | 0.086 |
+| 16:16:16 | 0.732 | 0.731 | 21.7 | 0.045 |
+| 24:24:24 | 0.852 | 0.675 |  9.9 | 0.229 |
+
+- **Full precision tags best** (0.852) — clearly above all reduced configs (0.70–0.82).
+- Among reduced configs the AUC scatter is **dominated by run-to-run training variance**, not a
+  clean bit-width law (8:8:16 at 0.815 beats 12:12:16 and 16:16:16, which were trained
+  independently). The one clean single-knob effect is the **input-bit sweep at W=A=6: I=6→8
+  lifts AUC 0.70→0.78** — 6-bit *inputs* are the binding constraint at that weight precision.
+- **AUC robustness under boost mirrors §2:** the high-precision tagger loses the *most* AUC
+  under boost (0.852→0.675, and 1/ε_B@0.3 collapses 9.9→4.0, flip-rate 23%) precisely because
+  it is the most responsive; the blunt low-bit models barely move (16:16:16: 0.732→0.731,
+  flips 4.5%). Quantization buys boost-stability at the cost of peak discrimination.
+- `1/ε_B@0.3` is **larger for the reduced models** — an artifact: their logits are discretized
+  with heavy ties, which inflates the rank-threshold rejection. Trust AUC over `1/ε_B` here.
+
+---
+
+## 4. Bottom line
+
+1. **No equivariance cliff** across 6→24 bits, and the effect is *not* monotonic "fewer bits →
+   more violation." It is two regimes: a **quantization-noise floor that raises small-boost
+   violation as bits drop**, crossing over to **large-boost fixed-beam breaking that scales with
+   model responsiveness** (so the full-precision model is *least* invariant at large |β|).
+2. The dominant precision risk for this firmware is **not invariance but the float-BN deployment
+   gap** (§1): below ~12 bits the FPGA function drifts from the trained model.
+3. Full precision (24:24:24) is the best tagger but the *least* boost-stable; the reduced models
+   trade discrimination for boost-stability. If small detector-frame boosts are the concern,
+   higher precision is better (lower noise floor); if robustness to large boosts is the concern,
+   the picture inverts.
+4. **Fixed a real firmware bug** (`result_t` clamp) that the multi-bit sweep exposed.
 
 ## Caveats
-- Single bit-width ⇒ no cross-bit cliff yet; the trend claim is pending more checkpoints.
-- `sample_data/test.h5` (≈40k jets) is the small bundled sample; final numbers should use the
-  full test set if available (set `data_file` in `config.yaml`).
-- The floor is firmware-specific (fixed beams). If the firmware is ever changed to accept the
-  beams as boostable inputs, set `boost_beams: true` and the floor should collapse toward zero
-  at high bit-width — a clean cross-check of this interpretation.
+- Reduced-precision checkpoints are independently trained, so cross-config AUC/large-β-drift
+  differences mix the bit-width effect with training scatter. The *within-config* β-trends and
+  the *small-β* bit ordering are the robust signals.
+- Beams are held fixed (firmware constraint) → the violation includes the by-design fixed-beam
+  floor; this is a relative comparison across bit-widths, not an absolute symmetry measurement.
+- `sample_data/test.h5` (~40k jets) is the bundled sample; final numbers could use the full set.

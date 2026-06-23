@@ -36,9 +36,15 @@
 #ifndef NPELICAN_INPUT_T_GENERATED
 typedef ap_fixed<36,12,AP_RND_CONV,AP_SAT> input_t;
 #endif
-// Final logit carries the output_quant grid (2^-23). Matches out_t in
-// types_generated.h so model_out[0] = (result_t)Rp rounds exactly once (RND_CONV).
+// Final logit carries the output_quant grid. Under --quant this is GENERATED in
+// types_generated.h as result_t == out_t (the per-checkpoint output_quant grid), so
+// model_out[0] = (result_t)Rp rounds exactly once (RND_CONV) and never clamps the
+// logit. The hand fallback below (range [-1,1)) is used ONLY by the float-export path
+// (no --quant); for a quant checkpoint whose output_quant range exceeds [-1,1) it would
+// saturate the logit and corrupt the score ranking, hence the generated override.
+#ifndef NPELICAN_RESULT_T_GENERATED
 typedef ap_fixed<24, 1,AP_RND_CONV,AP_SAT> result_t;
+#endif
 // --- legacy hand types: used ONLY by the float-export weights.h (no --quant) ---
 typedef ap_fixed<24,12,AP_TRN_ZERO,AP_SAT> internal_t;
 typedef ap_fixed<24,12,AP_TRN_ZERO,AP_SAT> weight_t;

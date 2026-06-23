@@ -47,21 +47,23 @@ beam_mass: 0.0
 nobj_avg:  49        # N-bar normalization constant (informational; baked into weights)
 
 # ---- Models to sweep: one entry == one curve. -------------------------------
-# Add one block per trained QAT checkpoint. `bit_width` is only a label for the
-# plots/CSV; the ACTUAL fixed-point grids come from each checkpoint's learned
-# Brevitas scales via model_loader.py. Mark exactly one model `reference: true`
-# (the invariance floor drawn on every plot — conventionally the highest bit width).
+# `label` is the W:A:I bit-width triple (weight:act:input) — display + file key
+# only; the ACTUAL fixed-point grids come from each checkpoint's learned Brevitas
+# scales via model_loader.py. Mark exactly one model `reference: true` (the
+# invariance floor drawn on every plot — the highest-precision 24:24:24 model).
+#
+# These checkpoints form two controlled sub-sweeps sharing the same architecture:
+#   * INPUT-bit sweep  (W=A=6 fixed, I varies): 6:6:6, 6:6:8, 6:6:12
+#   * WEIGHT/ACT sweep (I=16 fixed, W=A vary):   8:8:16, 12:12:16, 16:16:16
+# plus the 24:24:24 reference.
 models:
-  - bit_width: 24
-    checkpoint: ../PELICAN-nano/model/fpga_model_qat_best.pt
-    qat: true
-    reference: true
-
-  # --- Add more checkpoints here as you train them (one curve each): ---
-  # - {bit_width: 16, checkpoint: ../PELICAN-nano/model/<prefix16>_best.pt, qat: true, reference: false}
-  # - {bit_width: 12, checkpoint: ../PELICAN-nano/model/<prefix12>_best.pt, qat: true, reference: false}
-  # - {bit_width:  8, checkpoint: ../PELICAN-nano/model/<prefix8>_best.pt,  qat: true, reference: false}
-  # - {bit_width:  6, checkpoint: ../PELICAN-nano/model/<prefix6>_best.pt,  qat: true, reference: false}
+  - {label: "6:6:6",    checkpoint: ../PELICAN-nano/model/fpga_model_qat_w6a6i6_best.pt,    qat: true, reference: false}
+  - {label: "6:6:8",    checkpoint: ../PELICAN-nano/model/fpga_model_qat_w6a6i8_best.pt,    qat: true, reference: false}
+  - {label: "6:6:12",   checkpoint: ../PELICAN-nano/model/fpga_model_qat_w6a6i12_best.pt,   qat: true, reference: false}
+  - {label: "8:8:16",   checkpoint: ../PELICAN-nano/model/fpga_model_qat_w8a8i16_best.pt,   qat: true, reference: false}
+  - {label: "12:12:16", checkpoint: ../PELICAN-nano/model/fpga_model_qat_w12a12i16_best.pt, qat: true, reference: false}
+  - {label: "16:16:16", checkpoint: ../PELICAN-nano/model/fpga_model_qat_w16a16i16_best.pt, qat: true, reference: false}
+  - {label: "24:24:24", checkpoint: ../PELICAN-nano/model/fpga_model_qat_best.pt,           qat: true, reference: true}
 
 # ---- Golden gate tolerance (matches nPELICAN_tb.cpp TOL_GOLDEN, momenta path) -
 golden_tol: 1.0e-3

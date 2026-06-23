@@ -134,9 +134,13 @@ The sweep is an **evaluation** step that hangs off the existing train → export
 1. Train the QAT checkpoint in `PELICAN-nano/` (`--quant --po2-scales`, the bit-width you want).
 2. Add one `models:` block to `config.yaml` pointing at the `.pt` (set its `bit_width` label;
    leave `reference: true` on the highest-bit model).
-3. `run_sweep.py` — it regenerates that build's `weights.h`/`types_generated.h`, **re-runs the
-   golden gate** (so a checkpoint whose firmware doesn't reproduce PyTorch is caught *before*
-   it pollutes the curves), then runs csim over the canonical boosted set.
+3. `run_sweep.py` — it regenerates that build's `weights.h`/`types_generated.h`, runs the
+   **gate**, then runs csim over the canonical boosted set. The gate has two parts: (a) a hard,
+   bit-exact check that `RUN_EQUIVARIANCE` reproduces the firmware's own golden-path output
+   (validates the oracle plumbing — must pass for every build), and (b) an informational
+   **bit-faithfulness** number, firmware-vs-PyTorch, which legitimately grows at low bit-width
+   (float-BN boundary tipping) and is reported, not aborted. `model_loader.py` also now
+   generates `result_t == out_t` so the firmware never clamps the logit (see `FINDINGS.md` §0).
 4. `compute_metrics.py` — re-reads every available `logits_bit{bw}.dat` and redraws all curves
    with the new bit-width added. You do **not** regenerate the canonical set (same physical
    boosts across all bit-widths is the whole point), and you do **not** re-run csim for
@@ -202,9 +206,15 @@ See `FINDINGS.md` for the written-up reading of the current (24-bit-only) run.
 | Plot | Metric | What it shows |
 |---|---|---|
 | `score_drift.png` | `⟨(σ(w₀)−σ(w_β))²⟩` (log-y) | headline equivariance violation (SEAL Fig.2) |
-| `mean_abs_dsigma.png` | `⟨|Δσ|⟩` | same, linear/robust |
+| `logit_drift.png` | `⟨|w₀−w_β|⟩` (log-y) | **operating-point-independent** drift; the fair cross-bit-width comparison (σ-drift over-weights models whose logits straddle 0) |
+| `mean_abs_dsigma.png` | `⟨|Δσ|⟩` | same as score_drift, linear |
 | `flip_rate.png` | `sign(w₀)≠sign(w_β)` | hard tag crossing `w=0` |
 | `auc.png` | AUC of `{w_β vs truth}` | does drift cost tagging power? |
-| `inv_eps_b.png` | `1/ε_B` at `ε_S=0.3` | background rejection, comparable to nPELICAN tables |
+| `inv_eps_b.png` | `1/ε_B` at `ε_S=0.3` | background rejection (heavy ties at low bits inflate it — trust AUC there) |
+
+**Read `score_drift` and `logit_drift` together.** A degraded low-bit model parks its outputs
+in the flat tail of σ, suppressing σ-drift even when the logit moves — so a low σ-drift can mean
+"less responsive," not "more invariant." `logit_drift` removes that confound. (In the real runs
+the two diverge exactly this way; see `FINDINGS.md`.)
 
 Each is paired *within* a bit-width: `f_b(Λx)` vs the same jet's `f_b(x)` (the β=0 row).

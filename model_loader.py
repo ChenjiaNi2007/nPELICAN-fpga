@@ -513,6 +513,14 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     L.append(_pt_line('relu_t',   relu_W, relu_I, relu_s, act['net2to2.eq_layers.0.act_layer']['scale'], relu_k, 'act_layer (QuantReLU)'))
     L.append(_pt_line('t0_t',     t0_W,   t0_I,   t0_s,   act['agg_2to0.post_agg_quant']['scale'], t0_k, 'post_agg 2->0'))
     L.append(_pt_line('out_t',    out_W,  out_I,  out_s,  act['output_quant']['scale'], out_k, 'output_quant'))
+    # result_t (the firmware's final-logit output type) MUST equal out_t (the
+    # output_quant grid). It was hand-fixed to ap_fixed<24,1> in nPELICAN.h, which
+    # silently CLAMPS the logit to [-1,1) for any checkpoint whose output_quant range
+    # is wider (e.g. out_t=ap_fixed<W,3> -> [-4,4)); that compresses the score ranking
+    # and wrecks AUC. Generate it = out_t (guarded, like input_t) so the firmware
+    # preserves the model's full logit range for every bit width.
+    L.append('#define NPELICAN_RESULT_T_GENERATED 1')
+    L.append(f'typedef {_fixed(out_W, out_I, out_s)} result_t;  // == out_t (output_quant grid)')
     L.append(_pt_line('w1_gen_t', w1_W,   w1_I,   w1_s,   wgt['net2to2.eq_layers.0']['scale'], w1_k, '2->2 weights'))
     L.append(_pt_line('w2_gen_t', w2_W,   w2_I,   w2_s,   wgt['agg_2to0']['scale'], w2_k, '2->0 weights'))
     L.append('')

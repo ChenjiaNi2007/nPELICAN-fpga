@@ -4,8 +4,9 @@
 canonical/equiv_pmu.dat
 canonical/equiv_nobj.dat
 canonical/manifest.csv
-results/logits_bit*.dat
+results/logits_*.dat
 results/results.csv
+sweep_run.log
 
 # Committed deliverables of a real run:
 #   canonical/meta.json          (seed, directions, selected jets — reproducibility)

@@ -35,6 +35,37 @@ def repo_path(rel: str) -> str:
     return os.path.normpath(os.path.join(FPGA_ROOT, rel))
 
 
+# Model labels ----------------------------------------------------------------
+# A model is identified by a string label. For these checkpoints the natural
+# label is the "W:A:I" bit-width triple (weight:act:input), e.g. "6:6:12". Older
+# configs used a single integer `bit_width`; we still accept that.
+def model_label(mdl: dict) -> str:
+    return str(mdl.get("label", mdl.get("bit_width")))
+
+
+def safe_name(label: str) -> str:
+    """Filesystem-safe form of a label (':' -> '_')."""
+    return str(label).replace(":", "_").replace(" ", "")
+
+
+def label_sort_key(label: str):
+    """Order labels by total bit budget (sum of W,A,I), then componentwise.
+
+    Puts e.g. 6:6:6 (18) < 6:6:8 (20) < 6:6:12 (24) < 8:8:16 (32) < ... < 24:24:24 (72).
+    Falls back gracefully for plain-integer or non-numeric labels.
+    """
+    s = str(label)
+    try:
+        parts = [int(x) for x in s.split(":")]
+        return (sum(parts), parts)
+    except ValueError:
+        try:
+            v = int(s)
+            return (v, [v])
+        except ValueError:
+            return (10**9, [s])
+
+
 # Lorentz boost (SEAL eq.7) ---------------------------------------------------
 def boost_matrix(beta_vec: np.ndarray) -> np.ndarray:
     """4x4 Lorentz boost acting on (E, px, py, pz) for velocity beta_vec.
