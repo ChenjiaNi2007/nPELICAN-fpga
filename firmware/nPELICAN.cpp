@@ -156,11 +156,17 @@ void nPELICAN(
     //inferred-DSP cost). Bit-exact for the same reason as the dot loop above.
     bn1out_t batch1[(NPARTICLES2)*(NPARTICLES2)];
     #pragma HLS ARRAY_PARTITION variable=batch1 complete dim=0
+    //#4: fold BN1's mean into the bias ONCE (compile-time constant), dropping the wide
+    //(bn_t_gen) per-element subtract: (dots-μ)·s+β == dots·s + (β-μ·s). Mathematically the
+    //same affine, still applied elementwise BEFORE aggregation (NOT folded into the dense
+    //weights), so the "additive BN term is N-dependent" invariant is untouched. β' rounds at
+    //bn_t_gen F (>> bn1out_t F), so the cast to bn1out_t is the same single rounding as before.
+    const bn_t_gen bn1_beta = batch1_2to2[2] - batch1_2to2[0]*batch1_2to2[1];
     for(unsigned int i = 0; i < NPARTICLES2; i++){
       #pragma HLS unroll
       for(unsigned int j = i; j < NPARTICLES2; j++){
         #pragma HLS unroll
-        bn1out_t v = (bn1out_t)(((dots[i*NPARTICLES2+j] - batch1_2to2[0]) * batch1_2to2[1] + batch1_2to2[2])*nobjmask[i][j]);
+        bn1out_t v = (bn1out_t)((dots[i*NPARTICLES2+j] * batch1_2to2[1] + bn1_beta)*nobjmask[i][j]);
         batch1[i*NPARTICLES2+j] = v;
         if (j != i) batch1[j*NPARTICLES2+i] = v;
       }
@@ -290,64 +296,74 @@ void nPELICAN(
       }
     }
 
-    //second batchnorm: float-constant affine on the relu output. Tr is what PyTorch
-    //aggregates in float for the 2->0 ops; it is NOT a quantization point and the BN2
-    //scale widens its range (~130x), so it is stored in tr_t (wide I, t0 fractional grid)
-    //— NOT t0_t, which (I=1) would saturate it. The 2->0 sums stay clean in acc0(row)_t.
-    tr_t Tr[NPARTICLES2][NPARTICLES2][NHIDDEN];
-    #pragma HLS ARRAY_PARTITION variable=Tr complete dim=0
-    for (unsigned int i = 0; i < NPARTICLES2; i++) {
-    #pragma HLS unroll
-      for (unsigned int j = 0; j < NPARTICLES2; j++) {
-      #pragma HLS unroll
-        for (unsigned int h = 0; h < NHIDDEN; h++) {
-        #pragma HLS unroll
-            Tr[i][j][h] = (tr_t)(((Tp_q[i][j][h] - batch2_2to0[h][0]) * batch2_2to0[h][1] + batch2_2to0[h][2])*nobjmask[i][j]);
-        }
-      }
-    }
+    //#2: BN2 + 2->0 aggregation COLLAPSED. PyTorch keeps Tr=BN2(relu) in float and the
+    //2->0 ops only SUM it (full sum and trace); Tr is never read per-element (it is NOT a
+    //quantization point). BN2 is affine and the aggregation linear, so push the per-channel
+    //affine PAST the sum (exact identity):
+    //   R_sum[h]   = Σ_ij BN2_h(Tp_q) = s_h·(Σ_ij Tp_q)      + β'_h·nobj²
+    //   R_trace[h] = Σ_i  BN2_h(Tp_q) = s_h·(Σ_i Tp_q[i][i]) + β'_h·nobj
+    //with β'_h = β_h − μ_h·s_h (BN2 mean folded into bias, #4). This replaces 22·22·NHIDDEN
+    //wide bn_t_gen multiplies with NHIDDEN, keeps normalize-late, and is MORE faithful to
+    //PyTorch (the per-element tr_t rounding is gone — ONE rounding at the t0 cast).
+    //  - Tp_q is masked here with nobjmask (ap_uint<1> → a select, 0 DSP): off-diagonal
+    //    entries with one masked index are NOT zero (e.g. T3=jdotp[i] is masked by [i] only,
+    //    not [i][j]), and the old code zeroed them via BN2's ·mask. The additive β'·count
+    //    terms count only unmasked entries (nobj² full / nobj trace), so BN2's N-dependent
+    //    bias contribution is preserved.
 
-    // two aggregators for 2to0: total sum (acc0_t) and trace (acc0row_t)
-    acc0_t    R_sum[NHIDDEN];
-    acc0row_t R_trace[NHIDDEN];
-    #pragma HLS ARRAY_PARTITION variable=R_sum complete dim=0
-    #pragma HLS ARRAY_PARTITION variable=R_trace complete dim=0
-
+    //folded BN2 bias β'_h = β_h − μ_h·s_h (compile-time constant per channel).
+    bn_t_gen bn2_beta[NHIDDEN];
+    #pragma HLS ARRAY_PARTITION variable=bn2_beta complete dim=0
     for (unsigned int h = 0; h < NHIDDEN; h++) {
     #pragma HLS unroll
-      R_sum[h]   = 0;
-      R_trace[h] = 0;
+      bn2_beta[h] = batch2_2to0[h][2] - batch2_2to0[h][0]*batch2_2to0[h][1];
     }
 
-    //total sum
+    // raw 2->0 aggregators of the ReLU output: total sum (accrelu_t) and trace (accrelurow_t)
+    accrelu_t    A_sum[NHIDDEN];
+    accrelurow_t A_trace[NHIDDEN];
+    #pragma HLS ARRAY_PARTITION variable=A_sum complete dim=0
+    #pragma HLS ARRAY_PARTITION variable=A_trace complete dim=0
+    for (unsigned int h = 0; h < NHIDDEN; h++) {
+    #pragma HLS unroll
+      A_sum[h]   = 0;
+      A_trace[h] = 0;
+    }
+
+    //total sum (Σ_ij Tp_q)
     for (unsigned int h = 0; h < NHIDDEN; h++) {
     #pragma HLS unroll
       for (unsigned int i = 0; i < NPARTICLES2; i++) {
       #pragma HLS unroll
         for (unsigned int j = 0; j < NPARTICLES2; j++) {
         #pragma HLS unroll
-            LinEq2to0: R_sum[h] += Tr[i][j][h];
+            LinEq2to0: A_sum[h] += Tp_q[i][j][h] * nobjmask[i][j];
         }
       }
     }
 
-    //trace
+    //trace (Σ_i Tp_q[i][i])
     for (unsigned int h = 0; h < NHIDDEN; h++) {
     #pragma HLS unroll
       for (unsigned int i = 0; i < NPARTICLES2; i++) {
       #pragma HLS unroll
-        R_trace[h] += Tr[i][i][h];
+        A_trace[h] += Tp_q[i][i][h] * nobjmask[i][i];
       }
     }
 
-    //normalize-late: rescale once and round onto the post_agg-2to0 grid (t0_t).
-    //R[h][0] = normalized total sum; R[h][1] = normalized trace.
+    //unmasked-entry counts (nobj already remapped to the active row/col count incl. spurions).
+    ap_uint<5> ncount  = (ap_uint<5>)nobj;     // active rows/cols, 0..22
+    ap_uint<9> ncount2 = ncount * ncount;      // unmasked (i,j) pairs, 0..484
+
+    //apply the per-channel BN2 affine to the raw aggregate, then normalize-late: ONE rescale
+    //rounding onto the post_agg-2to0 grid (t0_t). R[h][0]=normalized sum; R[h][1]=trace. The
+    //s·A and β'·count products are exact (HLS), so only the t0 cast rounds.
     t0_t R[NHIDDEN][2];
     #pragma HLS ARRAY_PARTITION variable=R complete dim=0
     for (unsigned int h = 0; h < NHIDDEN; h++) {
     #pragma HLS unroll
-      R[h][0] = (t0_t)(R_sum[h]   * invnave2);
-      R[h][1] = (t0_t)(R_trace[h] * invnave);
+      R[h][0] = (t0_t)((batch2_2to0[h][1]*A_sum[h]   + bn2_beta[h]*ncount2) * invnave2);
+      R[h][1] = (t0_t)((batch2_2to0[h][1]*A_trace[h] + bn2_beta[h]*ncount ) * invnave);
     }
 
     //Final 1D output: 2->0 dense MAC in mac0_t (exact product width), then round onto
@@ -423,12 +439,16 @@ void nPELICAN(
                     fprintf(fp, " %.17g", (double)Tp_q[i][j][h]);
         fprintf(fp, "\n");
 
-        // Tr: 968 values, same order (t0-grid; approx)
+        // Tr: 968 values, same order (t0-grid; approx). Reconstructed for the dump ONLY —
+        // the datapath now folds BN2 past the aggregation (#2), so Tr is never materialized.
+        // Uses the same folded affine (Tp_q·s + β') the collapsed path is derived from.
         fprintf(fp, "Tr:");
         for (unsigned int i = 0; i < NPARTICLES2; i++)
             for (unsigned int j = 0; j < NPARTICLES2; j++)
-                for (unsigned int h = 0; h < NHIDDEN; h++)
-                    fprintf(fp, " %.17g", (double)Tr[i][j][h]);
+                for (unsigned int h = 0; h < NHIDDEN; h++) {
+                    tr_t trv = (tr_t)((Tp_q[i][j][h]*batch2_2to0[h][1] + bn2_beta[h])*nobjmask[i][j]);
+                    fprintf(fp, " %.17g", (double)trv);
+                }
         fprintf(fp, "\n");
 
         // R: 4 values, order R[0][0] R[0][1] R[1][0] R[1][1] (exact)

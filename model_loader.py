@@ -463,11 +463,14 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     tr_I = int(math.ceil(math.log2(tr_bound))) + 1       # +1 sign bit
     tr_W = tr_I + AGG_F
 
-    # Accumulators size from their actual summand type (bn1out_t / tr_t), NOT t2_t / t0_t.
-    acc2_W, acc2_I       = bn1_W + H2, bn1_I + H2
-    accrow_W, accrow_I   = bn1_W + H1, bn1_I + H1
-    acc0_W, acc0_I       = tr_W + H2, tr_I + H2
-    acc0row_W, acc0row_I = tr_W + H1, tr_I + H1
+    # Accumulators size from their actual summand type, NOT t2_t / t0_t.
+    # 2->2 path sums bn1out_t (batch1). 2->0 path: BN2 is collapsed PAST the aggregation
+    # (firmware #2), so the 2->0 accumulators now sum the ReLU output relu_t (Tp_q) raw —
+    # NOT tr_t. The per-channel BN2 affine (s·A + β'·count) is applied once to the aggregate.
+    acc2_W, acc2_I             = bn1_W + H2, bn1_I + H2
+    accrow_W, accrow_I         = bn1_W + H1, bn1_I + H1
+    accrelu_W, accrelu_I       = relu_W + H2, relu_I + H2   # R full sum of relu_t Tp_q
+    accrelurow_W, accrelurow_I = relu_W + H1, relu_I + H1   # R trace, sum of relu_t Tp_q
 
     # --- MAC temporaries: EXACT product width + term-count headroom ---
     # The product weight*operand is exact at F = F(weight)+F(operand) fractional bits; keep
@@ -575,9 +578,10 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     L.append(f'typedef ap_fixed<{acc2_W}, {acc2_I}> acc2_t;     // jmass raw sum of bn1out_t (I(bn1out)+H2)')
     L.append(f'typedef ap_fixed<{accrow_W}, {accrow_I}> accrow_t;   // jdotp row sums of bn1out_t (I(bn1out)+H1)')
     L.append(f'typedef ap_fixed<{tr_W}, {tr_I}, AP_RND_CONV, AP_SAT> tr_t;'
-             f'  // Tr = BN2(relu); |Tr|<={tr_bound:.1f} (I={tr_I}, vs t0_t I={t0_I} which would saturate), F={AGG_F}')
-    L.append(f'typedef ap_fixed<{acc0_W}, {acc0_I}> acc0_t;     // R full sum of tr_t (I(tr_t)+H2)')
-    L.append(f'typedef ap_fixed<{acc0row_W}, {acc0row_I}> acc0row_t;  // trace, sum of tr_t (I(tr_t)+H1)')
+             f'  // Tr = BN2(relu); |Tr|<={tr_bound:.1f} (I={tr_I}); dump-only after #2 (BN2 folded past the 2->0 aggregation)')
+    relu_sg = 'ap_fixed' if relu_s else 'ap_ufixed'
+    L.append(f'typedef {relu_sg}<{accrelu_W}, {accrelu_I}> accrelu_t;     // R full sum of relu_t Tp_q (I(relu)+H2)')
+    L.append(f'typedef {relu_sg}<{accrelurow_W}, {accrelurow_I}> accrelurow_t;  // R trace, sum of relu_t Tp_q (I(relu)+H1)')
     L.append('')
     L.append('// ---- MAC temporaries: I = I(weight)+I(operand)+ceil(log2(#terms)), W = I+B ----')
     L.append(f'typedef ap_fixed<{mac2_W}, {mac2_I}> mac2_t;     // 2->2 dense: 6 w1*t2 products + b1 + b1_diag = {mac2_terms} terms')

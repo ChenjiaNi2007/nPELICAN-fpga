@@ -22,6 +22,7 @@ workspace root. Device SLR limits: DSP 3072, LUT 432000, FF 864000.
 | Lever 1 dot symmetry | `a7b5b06` | `symmetry6_6_6report` | 2990 | 116,488 | 400,543 | `mul_24s_24s` ×2 DSP | **DSP-neutral** (HLS CSE already symmetric); ~1.7k FF/2.7k LUT only |
 | Lever 2 `--max-input-bits 18` | `f93d819` | `18inputwidthnPELICAN_report` | **2150** | 122,241 | **332,609** | `mul_18s_18s` ×1 DSP | **−840 DSP & −17% LUT** vs symmetry; recommended operating point |
 | Lever 2 `--max-input-bits 16` | `f93d819` | `16inputwidthnPELICAN_report` | 2150 | 118,521 | 331,231 | `mul_16s_16s` ×1 DSP | DSP identical to 18 (both ≤18 → 1 DSP48); only ~0.4% LUT / ~3% FF more → not worth the extra precision loss |
+| Lever 4 BN2-collapse + BN mean-fold | (uncommitted) | TBD (remote csynth owed) | TBD | TBD | TBD | unchanged | BN2 968 wide mults → NHIDDEN (push affine past 2→0 sum); BN1/BN2 mean folded into bias. **Local gate PASS**: dots-level 143/200 exact max\|Δ\|=1.1e-5 (was 142); golden 133/200 max\|Δ\|=6.26e-4 (was 133/6.3e-4). Expect ≈ −900 DSP toward the ~840-dot floor — confirm on remote csynth. |
 
 **Operating point: `--max-input-bits 18`.** It crosses the DSP48 packing threshold
 (both operands ≤18 fit one 27×18 block), capturing the full dot-DSP win (840 mults

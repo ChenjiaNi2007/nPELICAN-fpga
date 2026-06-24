@@ -151,6 +151,35 @@ substantially cuts the 357K "Expression" LUT.
 lowers throughput (II=4 ≈ ¼ rate). Only pursue if the latency/throughput budget
 has room. This is a deliberate user decision, not a silent refactor.
 
+### Lever 4 — Collapse BN2 past the 2→0 aggregation (+ fold BN means)  ✓ DONE (local gate PASS; awaits remote csynth)
+`Tr = BN2(relu)` was computed per `(i,j,h)` = 22·22·NHIDDEN = **968 wide `bn_t_gen`
+multiplies**, almost certainly the bulk of the ~1310 non-dot DSP floor (968 BN2 + 210 BN1
++ ~27 normalize ≈ 1310). But `Tr` is consumed ONLY by the linear 2→0 aggregators
+(`R_sum`, `R_trace`) and is NOT a quantization point. Because BN2 is affine and the
+aggregation linear, the per-channel affine moves PAST the sum (exact identity):
+```
+R_sum[h]   = Σ_ij BN2_h(Tp_q) = s_h·(Σ_ij Tp_q·mask) + β'_h·nobj²
+R_trace[h] = Σ_i  BN2_h(Tp_q) = s_h·(Σ_i Tp_q[i][i]·mask) + β'_h·nobj
+```
+with `β'_h = β_h − μ_h·s_h` (BN2 mean folded into bias). **968 wide multiplies → NHIDDEN**
+(one `s_h·A` per channel × {sum,trace}). Implemented in `nPELICAN.cpp` (the Tr array is
+gone; new `accrelu_t`/`accrelurow_t` accumulators sum the raw ReLU output `Tp_q`; loader
+emits them, `acc0_t`/`acc0row_t` retired). Same fold applied to BN1 per-element
+(`(dots−μ)s+β → dots·s+β'`) to drop the wide per-element mean subtract (LUT).
+
+**Invariant-safe:** this is NOT folding BN into the dense weights — BN1 stays an explicit
+elementwise affine before aggregation, and the N-dependent additive term is made explicit as
+`β'·count` with `count` (nobj²/nobj) from the runtime `nobj`. Normalize-late preserved (raw
+sum → one rescale). **More faithful to PyTorch**, not less (PyTorch sums float `Tr`; the
+firmware no longer rounds each `Tr` to `tr_t` first — one rounding at the t0 cast).
+
+**Validation (local clang, Phase-2 firmware is local==Vitis bit-for-bit):** dots-level gate
+143/200 exact, max|Δ|=1.1e-5 PASS (was 142/1.1e-5); golden 133/200, max|Δ|=6.26e-4 PASS
+(was 133/6.3e-4). ⚠ **Owed: remote csynth to quantify the DSP cut** (expect ≈ −900 toward
+the ~840-dot floor) and the online gate re-confirm; log in `resource_log.md`. Caught one bug
+in review: masked off-diagonal `Tp_q` is NOT zero (`T3=jdotp[i]` masked by `[i]` only), so the
+raw sums keep `·nobjmask` — the mask is not redundant.
+
 ## Not reducible / dead ends (don't re-investigate)
 - **2→2 dense MAC is not symmetric** — `T[i][j]` carries `jdotp[i]` vs `jdotp[j]`
   (channels 2/3) which swap under i↔j, so it can't be halved like the dots.

@@ -49,9 +49,9 @@ typedef ap_fixed<43, 1, AP_RND_CONV, AP_SAT> norm_t;  // 1/N̄, 1/N̄^2 normaliz
 typedef ap_fixed<30, 6, AP_RND_CONV, AP_SAT> bn1out_t;  // batch1 = BN1(dots); |batch1|<=27.4 (I=6), F=24
 typedef ap_fixed<39, 15> acc2_t;     // jmass raw sum of bn1out_t (I(bn1out)+H2)
 typedef ap_fixed<35, 11> accrow_t;   // jdotp row sums of bn1out_t (I(bn1out)+H1)
-typedef ap_fixed<33, 9, AP_RND_CONV, AP_SAT> tr_t;  // Tr = BN2(relu); |Tr|<=255.2 (I=9, vs t0_t I=1 which would saturate), F=24
-typedef ap_fixed<42, 18> acc0_t;     // R full sum of tr_t (I(tr_t)+H2)
-typedef ap_fixed<38, 14> acc0row_t;  // trace, sum of tr_t (I(tr_t)+H1)
+typedef ap_fixed<33, 9, AP_RND_CONV, AP_SAT> tr_t;  // Tr = BN2(relu); |Tr|<=255.2 (I=9); dump-only after #2 (BN2 folded past the 2->0 aggregation)
+typedef ap_fixed<33, 11> accrelu_t;     // R full sum of relu_t Tp_q (I(relu)+H2)
+typedef ap_fixed<29, 7> accrelurow_t;  // R trace, sum of relu_t Tp_q (I(relu)+H1)
 
 // ---- MAC temporaries: I = I(weight)+I(operand)+ceil(log2(#terms)), W = I+B ----
 typedef ap_fixed<51, 11> mac2_t;     // 2->2 dense: 6 w1*t2 products + b1 + b1_diag = 8 terms
