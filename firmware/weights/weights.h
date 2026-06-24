@@ -8,25 +8,25 @@ norm_t invnave = 0.02040816326530612;
 norm_t invnave2 = 0.00041649312786339027;
 
 //first batchnorm [mean, weight/sqrt(var), bias]
-bn_t_gen batch1_2to2[3] = {23.177701950073242,  0.031948961457160,  0.782554686069489};
+bn_t_gen batch1_2to2[3] = {5.432260131835938e+01, 3.303462847308006e-03, 1.722870022058487e-01};
 
 //2to2 linear layer
-w1_gen_t w1_2to2[NHIDDEN*6] = { 0.250000000000000, -0.937500000000000,  0.750000000000000,  0.812500000000000, -0.250000000000000,  0.125000000000000,  0.687500000000000, -0.500000000000000, -1.437500000000000, -1.437500000000000,  0.250000000000000, -1.312500000000000};
-bias_t_gen b1_2to2[NHIDDEN] = {-0.205158829689026,  0.191574335098267};
-bias_t_gen b1_diag_2to2[NHIDDEN] = {0.041548635810614, 0.323916405439377};
+w1_gen_t w1_2to2[NHIDDEN*6] = {-0.582458257675171,  0.008636951446533,  0.044788122177124,  0.041936874389648, -0.472422122955322, -1.931932926177979,  0.018446922302246,  0.167083740234375, -0.122265100479126, -0.213846921920776,  1.175067424774170, -0.266506910324097};
+bias_t_gen b1_2to2[NHIDDEN] = {0.030149489641190, 0.093185551464558};
+bias_t_gen b1_diag_2to2[NHIDDEN] = { 0.014243968762457, -0.142088621854782};
 
 //second batchnorm [channel][mean, weight/sqrt(var), bias]
-bn_t_gen batch2_2to0[NHIDDEN][3] = {{ 0.493991792201996,  8.323738098144531,  1.081001043319702}, { 0.108491204679012, 11.582330703735352,  0.595229983329773}};
+bn_t_gen batch2_2to0[NHIDDEN][3] = {{ 1.530051697045565e-02,  1.264945831298828e+02, -2.643904387950897e-01}, { 9.509509056806564e-02,  3.228477478027344e+01, -1.116147935390472e-01}};
 
 //2to1 linear layer
-w2_gen_t w2_2to0[NHIDDEN*2*NOUT] = { 4.000000000000000, -0.750000000000000, -5.750000000000000, -0.750000000000000};
-bias_t_gen b2_2to0[NOUT] = {-0.639774143695831};
+w2_gen_t w2_2to0[NHIDDEN*2*NOUT] = { 0.008559703826904, -2.889031887054443, -0.383216857910156, -1.464580535888672};
+bias_t_gen b2_2to0[NOUT] = {-0.339796096086502};
 
 //---- learned QAT scales (k = -log2(scale)); see types_generated.h ----
-//  input_quant                        scale=2^--2 (4.000000000e+00) signed=True bits=6
-//  output_quant                       scale=2^-3 (1.250000000e-01) signed=True bits=6
-//  net2to2.eq_layers.0.post_agg_quant scale=2^-3 (1.250000000e-01) signed=True bits=6
-//  net2to2.eq_layers.0.act_layer      scale=2^-3 (1.250000000e-01) signed=True bits=6
-//  agg_2to0.post_agg_quant            scale=2^-6 (1.562500000e-02) signed=True bits=6
-//  net2to2.eq_layers.0 (weights)      scale=2^-4 (6.250000000e-02) signed=True bits=6
-//  agg_2to0 (weights)                 scale=2^-2 (2.500000000e-01) signed=True bits=6
+//  input_quant                        scale=2^-10 (9.765625000e-04) signed=True bits=24
+//  output_quant                       scale=2^-23 (1.192092896e-07) signed=True bits=24
+//  net2to2.eq_layers.0.post_agg_quant scale=2^-18 (3.814697266e-06) signed=True bits=24
+//  net2to2.eq_layers.0.act_layer      scale=2^-22 (2.384185791e-07) signed=True bits=24
+//  agg_2to0.post_agg_quant            scale=2^-23 (1.192092896e-07) signed=True bits=24
+//  net2to2.eq_layers.0 (weights)      scale=2^-22 (2.384185791e-07) signed=True bits=24
+//  agg_2to0 (weights)                 scale=2^-21 (4.768371582e-07) signed=True bits=24
