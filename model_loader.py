@@ -471,6 +471,10 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     accrow_W, accrow_I         = bn1_W + H1, bn1_I + H1
     accrelu_W, accrelu_I       = relu_W + H2, relu_I + H2   # R full sum of relu_t Tp_q
     accrelurow_W, accrelurow_I = relu_W + H1, relu_I + H1   # R trace, sum of relu_t Tp_q
+    # The value the 2->0 norm_t multiplies is the BN2-applied full sum (s·A + β'·count),
+    # i.e. the sum-of-Tr magnitude = tr_I + H2 integer bits — same as before the collapse,
+    # only its computation moved. Used solely to size NORM_F's rounding bound below.
+    agg0_I = tr_I + H2
 
     # --- MAC temporaries: EXACT product width + term-count headroom ---
     # The product weight*operand is exact at F = F(weight)+F(operand) fractional bits; keep
@@ -554,7 +558,7 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     # norm_t: invnave=1/N̄, invnave2=1/N̄^2 (not po2). A 12-frac internal_t mis-rounds invnave2
     # by ~40%. They multiply the raw aggregation sums (mag ~ 2^acc_I) and the normalized result
     # lands on the post-agg grids: the 2->2 accumulator (acc2_I) renormalizes onto the t2 grid,
-    # the 2->0 accumulator (acc0_I) onto the t0 grid. For each path the norm-rounding error
+    # the 2->0 full sum (agg0_I = tr_I+H2) onto the t0 grid. For each path the norm-rounding error
     # 2^-(NORM_F+1) scaled by the accumulator must stay <= 1/4 LSB of that path's grid:
     #   2^acc_I * 2^-(NORM_F+1) <= 2^-(postF+2)  =>  NORM_F >= acc_I + postF + 1.
     # One shared norm_t covers both, so take the max over the two paths (full-sum accumulators
@@ -562,7 +566,7 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     # widths so it tracks the QAT bit-width flags (was a hardcoded <40,1> sized for the old
     # grids, which was in fact 2 bits short at t0_F=23). NORM_I=1: 1/N̄,1/N̄^2 are in [0,1).
     NORM_I = 1
-    NORM_F = max(acc2_I + t2_F, acc0_I + t0_F) + 1
+    NORM_F = max(acc2_I + t2_F, agg0_I + t0_F) + 1
     NORM_W = NORM_I + NORM_F
     L.append(f'typedef ap_fixed<{NORM_W}, {NORM_I}, AP_RND_CONV, AP_SAT> norm_t;'
              f'  // 1/N̄, 1/N̄^2 normalize-late multipliers (F={NORM_W-NORM_I})')
