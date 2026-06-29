@@ -13,7 +13,18 @@
 // t0_t / w1_gen_t / w2_gen_t / bias_t_gen / bn_t_gen / norm_t / acc*_t / mac*_t
 // from here. The hand-written typedefs below remain only for the standalone
 // float-export path (weights.h generated WITHOUT --quant).
+//
+// Float-reference build (equivariance harness): -DNPELICAN_FLOAT_BUILD swaps the
+// generated fixed-point header for types_float.h, which aliases EVERY datapath and
+// weight typedef to `double`. The exact firmware algorithm then runs with no
+// quantization, giving the un-quantized Lorentz-invariance floor (any gap to a
+// fixed-point curve is then purely a quantization artifact — same code, only the
+// number type changes).
+#ifdef NPELICAN_FLOAT_BUILD
+#include "weights/types_float.h"
+#else
 #include "weights/types_generated.h"
+#endif
 
 #define NPARTICLES  20
 #define NPARTICLES2 22  //Max number of particles plus number of spurions
@@ -46,11 +57,15 @@ typedef ap_fixed<36,12,AP_RND_CONV,AP_SAT> input_t;
 typedef ap_fixed<24, 1,AP_RND_CONV,AP_SAT> result_t;
 #endif
 // --- legacy hand types: used ONLY by the float-export weights.h (no --quant) ---
+// Guarded so the float-reference build (types_float.h) can alias them to double;
+// the normal fixed-point fallbacks below are used by every other build.
+#ifndef NPELICAN_LEGACY_WEIGHT_TYPES
 typedef ap_fixed<24,12,AP_TRN_ZERO,AP_SAT> internal_t;
 typedef ap_fixed<24,12,AP_TRN_ZERO,AP_SAT> weight_t;
 typedef ap_fixed<24, 1,AP_TRN_ZERO,AP_SAT> w1_t;
 typedef ap_fixed<24, 4,AP_TRN_ZERO,AP_SAT> w2_t;
 typedef ap_fixed<24,12,AP_TRN_ZERO,AP_SAT> bias_t;
+#endif
 
 typedef ap_fixed<12,10,AP_TRN_ZERO,AP_SAT> encoder_t;
 typedef ap_ufixed<32,16,AP_TRN_ZERO,AP_SAT> psloglut_t;

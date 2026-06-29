@@ -125,6 +125,34 @@ the invariance floor on every plot — conventionally the highest bit width). Re
 > width — that re-snaps weights onto a grid the model never trained for and corrupts the
 > measurement.
 
+### The floating-point reference curve (`label: "float"`)
+
+`config.yaml` carries one special entry, `{label: "float", float: true}`. It is the **same
+firmware `nPELICAN.cpp`** compiled with every datapath/weight typedef aliased to `double`
+(`-DNPELICAN_FLOAT_BUILD` → `firmware/weights/types_float.h`), fed the reference checkpoint's
+**full-precision master weights** (`model_loader.py` *without* `--quant`). It is the
+**un-quantized invariance floor**: same algorithm, same code, only the number type changes, so
+the gap between any fixed-point curve and this one is *100% a quantization artifact* — nothing
+is contaminated by the architecture or the boost protocol. `run_sweep.py` special-cases it
+(no weight-snapping, float build); `compute_metrics.py` needs no change — `"float"` sorts as the
+finest curve and `24:24:24` stays the plotted `reference` floor.
+
+Read it as the **lower envelope** of the family. On the **headline `score_drift`** it sits ~1e-8
+(vs ~1e-3–1e-1 for the quantized curves at high `|β|`); on **`logit_drift`** it holds a flat
+~1e-4 floor while the fixed-point curves climb (e.g. ~64× more invariant than `24:24:24` at
+`|β|=0.95`). That flat floor is **not** machine epsilon: the firmware recomputes
+`d_ij = E_iE_j − p·p` from the *boosted* momenta, and float64 **catastrophic cancellation** on
+near-lightlike high-energy pairs (the documented `dot4` cancellation caveat) is the real floor —
+a property the float PyTorch model shares.
+
+> **Small-`|β|` crossover (expected).** Below `|β|≈0.4` the float `logit_drift` can sit slightly
+> *above* `24:24:24`. This is the same "less responsive looks more invariant" confound noted
+> below: at tiny boosts the 24-bit dot grid **rounds away** the sub-LSB change (quantization
+> *freezes* it), so its *measured* drift is artificially low, while float resolves the change down
+> to the cancellation floor. The comparison is meaningful in the high-`|β|` regime (where
+> quantization genuinely breaks down); at small `|β|` both are in the noise floor. On
+> `score_drift` the float curve is the clear floor at all `|β|`.
+
 ---
 
 ## Where this fits in the project workflow

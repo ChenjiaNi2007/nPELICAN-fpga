@@ -67,6 +67,14 @@ models:
   - {label: "12:12:16", checkpoint: ../PELICAN-nano/model/fpga_model_qat_w12a12i16_best.pt, qat: true, reference: false}
   - {label: "16:16:16", checkpoint: ../PELICAN-nano/model/fpga_model_qat_w16a16i16_best.pt, qat: true, reference: false}
   - {label: "24:24:24", checkpoint: ../PELICAN-nano/model/fpga_model_qat_best.pt,           qat: true, reference: true}
+  # Floating-point reference: the SAME firmware algorithm compiled with every datapath
+  # type = double (-DNPELICAN_FLOAT_BUILD, types_float.h), fed the reference checkpoint's
+  # full-precision master weights (model_loader.py WITHOUT --quant). This is the
+  # un-quantized Lorentz-invariance floor — under boosted beams it collapses to ~1e-13,
+  # so the gap from any fixed-point curve to this one is 100% quantization artifact.
+  # `float: true` selects the double build; it is NOT the plotted reference floor
+  # (24:24:24 stays reference), it sorts as the finest (un-numbered) curve.
+  - {label: "float",    checkpoint: ../PELICAN-nano/model/fpga_model_qat_best.pt,           float: true, reference: false}
 
 # ---- Golden gate tolerance (matches nPELICAN_tb.cpp TOL_GOLDEN, momenta path) -
 golden_tol: 1.0e-3

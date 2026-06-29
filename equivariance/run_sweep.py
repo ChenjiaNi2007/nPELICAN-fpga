@@ -58,13 +58,26 @@ def regen_weights(ckpt_abs: str, pelican_repo: str):
         cwd=FPGA_ROOT)
 
 
+def regen_weights_float(ckpt_abs: str, pelican_repo: str):
+    """Float-reference build: export the checkpoint's full-precision master weights
+    (model_loader.py WITHOUT --quant). Same weights.h schema/array names as the quant
+    path, but the legacy weight_t/bias_t/internal_t element types resolve to double
+    under -DNPELICAN_FLOAT_BUILD (types_float.h)."""
+    run([PY, "model_loader.py", "--model", ckpt_abs,
+         "--repo", pelican_repo, "--out", "firmware/weights/weights.h"],
+        cwd=FPGA_ROOT)
+
+
 def regen_golden(ckpt_abs: str, pelican_repo: str, num: int = 200):
     run([PY, "scripts/export_golden.py", "--checkpoint", ckpt_abs, "--num", str(num)],
         cwd=pelican_repo)
 
 
-def build_tb(define: str, out: str) -> str:
-    run(["g++", *GPP_BASE, f"-D{define}", "nPELICAN_tb.cpp", "firmware/nPELICAN.cpp",
+def build_tb(define: str, out: str, float_build: bool = False) -> str:
+    # float_build adds -DNPELICAN_FLOAT_BUILD so nPELICAN.h pulls in types_float.h
+    # (every datapath/weight type -> double): the same firmware algorithm, unquantized.
+    extra = ["-DNPELICAN_FLOAT_BUILD"] if float_build else []
+    run(["g++", *GPP_BASE, f"-D{define}", *extra, "nPELICAN_tb.cpp", "firmware/nPELICAN.cpp",
          "-o", out], cwd=FPGA_ROOT)
     return os.path.join(FPGA_ROOT, out)
 
@@ -87,7 +100,7 @@ def run_tb_on(pmu_src: str, nobj_src: str, beams_src: str | None = None) -> np.n
     return np.loadtxt(out, dtype=np.float64).reshape(-1)
 
 
-def gate(pelican_repo: str, warn_tol: float):
+def gate(pelican_repo: str, warn_tol: float, float_build: bool = False):
     """Validate the oracle, then build the equiv TB ready for the sweep.
 
     Two distinct checks (see FINDINGS for why they must be separated):
@@ -108,14 +121,14 @@ def gate(pelican_repo: str, warn_tol: float):
         sys.exit(f"GATE: missing golden vectors ({gpmu}). export_golden.py must run first.")
 
     # firmware golden path: writes golden_fw_results.log (firmware logits on golden_pmu)
-    build_tb("RUN_GOLDEN_GATE", "tb_golden")
+    build_tb("RUN_GOLDEN_GATE", "tb_golden", float_build=float_build)
     run([os.path.join(FPGA_ROOT, "tb_golden")], cwd=FPGA_ROOT,
         stdout=subprocess.DEVNULL)
     fw = np.loadtxt(gfw, dtype=np.float64).reshape(-1)
 
     # equiv path on the same golden inputs (also leaves tb_equiv built for the sweep).
     # beams_src=None -> constant beams, matching the firmware golden path (no boost).
-    build_tb("RUN_EQUIVARIANCE", "tb_equiv")
+    build_tb("RUN_EQUIVARIANCE", "tb_equiv", float_build=float_build)
     got = run_tb_on(gpmu, gnobj, beams_src=None)
 
     m = min(len(got), len(fw))
@@ -131,8 +144,15 @@ def gate(pelican_repo: str, warn_tol: float):
     pyt = np.loadtxt(glog, dtype=np.float64).reshape(-1)
     mp = min(len(fw), len(pyt))
     fw_vs_pyt = float(np.max(np.abs(fw[:mp] - pyt[:mp]))) if mp else float("inf")
-    flag = "" if fw_vs_pyt < warn_tol else "  (large: float-BN boundary tipping at low bits)"
-    print(f"  bit-faithfulness (firmware vs PyTorch): max|delta|={fw_vs_pyt:.3g}{flag}")
+    if float_build:
+        # golden_logits is the QUANTIZED PyTorch model; comparing it to the float
+        # firmware is apples-to-oranges, so this number is expected to be nonzero and
+        # is NOT a faithfulness signal. (The bit-exact equiv==firmware gate above is.)
+        print(f"  bit-faithfulness: N/A for float build (vs quant PyTorch golden, "
+              f"max|delta|={fw_vs_pyt:.3g})")
+    else:
+        flag = "" if fw_vs_pyt < warn_tol else "  (large: float-BN boundary tipping at low bits)"
+        print(f"  bit-faithfulness (firmware vs PyTorch): max|delta|={fw_vs_pyt:.3g}{flag}")
 
 
 # Mode -> canonical beams file. "boostedbeams": beams transform with the particles
@@ -176,16 +196,21 @@ def main():
     for mdl in models:
         label = model_label(mdl)
         ckpt_abs = repo_path(mdl["checkpoint"])
+        is_float = bool(mdl.get("float"))
         ref = " (reference)" if mdl.get("reference") else ""
-        print(f"\n=== model {label} (W:A:I){ref}  ckpt={ckpt_abs} ===")
+        tag = " [FLOAT build: double datapath, no quantization]" if is_float else ""
+        print(f"\n=== model {label} (W:A:I){ref}{tag}  ckpt={ckpt_abs} ===")
         if not os.path.exists(ckpt_abs):
             sys.exit(f"  checkpoint not found: {ckpt_abs}")
 
         # Weights + golden + gate are mode-independent (gate runs at beta=0 constant
         # beams), so do them ONCE per model, then sweep each requested mode.
-        regen_weights(ckpt_abs, pelican_repo)
+        if is_float:
+            regen_weights_float(ckpt_abs, pelican_repo)
+        else:
+            regen_weights(ckpt_abs, pelican_repo)
         regen_golden(ckpt_abs, pelican_repo)
-        gate(pelican_repo, warn_tol)   # builds tb_golden + tb_equiv, validates the oracle
+        gate(pelican_repo, warn_tol, float_build=is_float)  # builds tb_golden + tb_equiv, validates the oracle
 
         if a.only_gate:
             continue
