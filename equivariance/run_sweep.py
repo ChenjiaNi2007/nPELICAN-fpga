@@ -195,6 +195,13 @@ def main():
 
     for mdl in models:
         label = model_label(mdl)
+        # Non-firmware curves (e.g. the DeepSet baseline) are produced by their own
+        # evaluator (run_sweep_deepset.py), not this firmware oracle. Skip them here;
+        # compute_metrics.py still picks up their logits_<mode>_<label>.dat if present.
+        if mdl.get("evaluator") and mdl["evaluator"] != "firmware":
+            print(f"\n=== model {label}: evaluator={mdl['evaluator']} (skipped by "
+                  f"run_sweep.py; run its own evaluator) ===")
+            continue
         ckpt_abs = repo_path(mdl["checkpoint"])
         is_float = bool(mdl.get("float"))
         ref = " (reference)" if mdl.get("reference") else ""

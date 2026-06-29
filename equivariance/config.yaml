@@ -75,6 +75,13 @@ models:
   # `float: true` selects the double build; it is NOT the plotted reference floor
   # (24:24:24 stays reference), it sorts as the finest (un-numbered) curve.
   - {label: "float",    checkpoint: ../PELICAN-nano/model/fpga_model_qat_best.pt,           float: true, reference: false}
+  # Non-equivariant baseline: the DeepSet (l1-jet-id) retrained on the SAME binary
+  # top-tag task (Phase C). It is NOT the firmware oracle, so run_sweep.py skips it
+  # (evaluator: deepset) and run_sweep_deepset.py produces its logits_<mode>_deepset.dat
+  # in the l1-jet-id env. DeepSet has no Lorentz symmetry -> its curve climbs with |beta|
+  # (the headline contrast). No beam spurions -> mode-independent (same curve on both
+  # overlays). compute_metrics.py picks it up automatically once its logits exist.
+  - {label: "deepset",  evaluator: deepset, qat: false, reference: false}
 
 # ---- Golden gate tolerance (matches nPELICAN_tb.cpp TOL_GOLDEN, momenta path) -
 golden_tol: 1.0e-3
