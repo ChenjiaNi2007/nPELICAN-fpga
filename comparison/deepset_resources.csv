@@ -1,0 +1,2 @@
+model,nconst,nbits,latency_cycles,clock_ns,latency_ns,II,DSP,LUT,FF,BRAM,accuracy
+deepset_csynth,20,8,144,5.0,720,40,124,665981,343142,0,0.8879

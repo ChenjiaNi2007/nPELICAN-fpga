@@ -1,0 +1,2 @@
+model,AUC,inv_eps_b@0.3,accuracy,n
+DeepSet (8-bit),0.9518,184.89,0.8879,39936
