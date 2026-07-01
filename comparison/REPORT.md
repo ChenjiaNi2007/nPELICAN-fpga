@@ -1,19 +1,25 @@
 # DeepSet vs nanoPELICAN — comparison report
 
-Common task: **binary top-tagging** on the PELICAN-nano dataset (`is_signal`), both models
-evaluated on the held-out `PELICAN-nano/data/sample_data/test.h5`. See
-`../DEEPSET_COMPARISON_PLAN.md` for the full plan. This file is the narrative deliverable;
-fill the placeholder tables from the staged scripts once the remote runs complete.
+Common task: **binary top-tagging**. **See `HANDOFF.md` for the current state and the runbook
+to finish** — a fresh session should read that first.
+
+> **⚠ DATASET CORRECTION (2026-07-01):** the comparison is being moved to **`data/toptag`**
+> (nanoPELICAN's training set) for BOTH models. The earlier DeepSet numbers here were on
+> `data/sample_data`, where nanoPELICAN is out-of-distribution (0.70 vs its real 0.95). The
+> "nanoPELICAN AUC discrepancy" was a **dataset mismatch**, not fixed-point precision —
+> `--max-input-bits` was a red herring. The DeepSet is being retrained on `data/toptag`; the
+> tables below (from the old sample_data run) will be refreshed.
 
 ## Status
 
-- [x] Phase 0 — context internalized; **D2 part = `xcvu13p-flga2577-2-e`** (paper's grade).
-- [x] Phase C **code** — `toptag_data.py`, `import_data` hook, binary configs, plot labels;
-      feature-conversion sanity gate PASS (AUC 0.931, masking + jet-relative math correct).
-- [ ] Phase C5/C6 — train binary DeepSet, test on `test.h5`, ROC overlay  *(remote: GPU env)*
-- [ ] Phase A — DeepSet resource/latency report on the binary checkpoint  *(remote: Vitis)*
-- [ ] Phase B — resource/latency vs N ∈ {8,16,20,32}  *(remote: Vitis)*
-- [ ] Phase D — DeepSet equivariance curve under boost  *(remote: l1-jet-id env)*
+- [x] Phase 0 — context; **D2 part = `xcvu13p-flga2577-2-e`**.
+- [x] Phase C code — adapter (now leading-pT-20 for 200-wide toptag), hooks, configs (now point
+      at `data/toptag`), plot labels, softmax strip.
+- [x] Resource/latency (csynth) collected — DeepSet + nanoPELICAN (see table; arch-valid).
+- [~] Phase C5 — **retrain DeepSet on `data/toptag`** (blocked on pod GPU TF install — in prog).
+- [ ] Phase C6 — ROC overlay on `toptag/test.h5` (after retrain).
+- [ ] Phase D — DeepSet equivariance overlay with the toptag model (tooling ready).
+- [ ] Refresh stale sample_data numbers below.
 
 ## D2 — common FPGA part
 
