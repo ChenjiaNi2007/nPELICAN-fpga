@@ -84,31 +84,39 @@ Mac (only `sample_data`).
 ## 3. What's BLOCKED / IN PROGRESS
 
 **GPU TensorFlow on the pod** (needed for a fast 1.21M-jet toptag retrain). The pod has an
-**NVIDIA A10 (23GB), driver 595.71.05**. Status as of handoff: `tensorflow==2.14.0` is
-installed but the `nvidia-*-cu11` CUDA-runtime wheels are NOT (the `[and-cuda]` install kept
-dying mid-download — pod cull / disk). `libcuda.so.1` (driver) is fine at
-`/usr/lib/x86_64-linux-gnu`. **Next action: finish installing the nvidia wheels** (see §4).
+**NVIDIA A10 (23GB), driver 595.71.05**. `libcuda.so.1` (driver) is fine at
+`/usr/lib/x86_64-linux-gnu`.
+
+**STORAGE FACT (learned 2026-07-01, the root cause of every failed install):** `/opt/conda`
+is on the container overlay — wiped on every server reset, and writing GBs there trips the
+k8s ephemeral-storage limit → pod eviction (the `[and-cuda]` install *completed* once, then
+the pod was evicted and the env vanished). Only `/home/jovyan` (100G RBD) persists, including
+`~/.cache/pip` (downloaded wheels survive resets) and `~/.condarc`. **The env must live at
+`/home/jovyan/envs/fast_jetclass`** (see §4a). The pod base image ships TF 2.17/cu12 —
+unusable here (qkeras 0.9 needs Keras-2-era TF 2.14).
 
 ---
 
 ## 4. RUNBOOK to the goal (do these on the pod)
 
-### 4a. Finish GPU TF (or fall back to CPU)
+### 4a. Create the GPU-TF env ON PERSISTENT STORAGE (survives resets)
+`environment.yml` now pins `tensorflow[and-cuda]==2.14` directly (l1-jet-id 7d7a7d6).
 ```bash
-conda activate fast_jetclass                       # if 'conda activate' fails:
-                                                    # source "$(conda info --base)/etc/profile.d/conda.sh"
-nohup pip install 'tensorflow[and-cuda]==2.14' > ~/tfgpu.log 2>&1 &   # completes missing nvidia-*-cu11 wheels
-tail -f ~/tfgpu.log
-pip list | grep -i nvidia                           # expect ~10 nvidia-*-cu11 packages
-# set CUDA + libstdc++ paths, verify GPU:
+cd ~/ClaudeInProgress/l1-jet-id && git pull origin toptag-comparison
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda config --append envs_dirs /home/jovyan/envs   # persists in ~/.condarc; enables activate-by-name
+nohup conda env create -f environment.yml -p /home/jovyan/envs/fast_jetclass > ~/envcreate.log 2>&1 &
+tail -f ~/envcreate.log        # wheels come from ~/.cache/pip (persistent) — minutes, not hours
+conda activate /home/jovyan/envs/fast_jetclass
+pip uninstall -y tensorrt      # ~1.6GB, pulled by [and-cuda], not needed by TF
+# set CUDA + libstdc++ paths, verify GPU (put in ~/gpuenv.sh, re-source in every new shell):
 NV=$CONDA_PREFIX/lib/python3.10/site-packages/nvidia
 export LD_LIBRARY_PATH=$(echo $NV/*/lib | tr ' ' ':'):/usr/lib/x86_64-linux-gnu:$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 unset CUDA_VISIBLE_DEVICES
 python3 -c "import tensorflow as tf; print('GPUs:', tf.config.list_physical_devices('GPU'))"
 ```
-If the big wheels keep dying, install them one at a time (nvidia-cudnn-cu11 ~700MB and
-nvidia-cublas-cu11 ~400MB are the culprits). **CPU fallback:** the DeepSet is tiny; a CPU run
-with `batch_size 1024`, `kfolds 2` on 1.21M jets is a few hours — acceptable if GPU stays stuck.
+**CPU fallback:** the DeepSet is tiny; a CPU run with `batch_size 1024`, `kfolds 2` on 1.21M
+jets is a few hours — acceptable if GPU stays stuck.
 
 ### 4b. Retrain the DeepSet on toptag  ← the main deliverable
 ```bash
