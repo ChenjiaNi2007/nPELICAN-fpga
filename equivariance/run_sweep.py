@@ -208,7 +208,9 @@ def main():
         tag = " [FLOAT build: double datapath, no quantization]" if is_float else ""
         print(f"\n=== model {label} (W:A:I){ref}{tag}  ckpt={ckpt_abs} ===")
         if not os.path.exists(ckpt_abs):
-            sys.exit(f"  checkpoint not found: {ckpt_abs}")
+            print(f"  checkpoint not found: {ckpt_abs} -- SKIPPING this curve "
+                  f"(compute_metrics will simply omit it).")
+            continue
 
         # Weights + golden + gate are mode-independent (gate runs at beta=0 constant
         # beams), so do them ONCE per model, then sweep each requested mode.
