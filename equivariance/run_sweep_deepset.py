@@ -79,7 +79,13 @@ def main():
     # 4) trained binary DeepSet -> p_top -> single logit (matches nPELICAN convention).
     from tensorflow import keras
     import tensorflow as tf
-    model = keras.models.load_model(a.model_dir, compile=False)
+    # QKeras models need their custom layers (QDense/QActivation/quantized_bits) registered;
+    # load_qmodel handles that. Fall back to plain load for a non-quantized (float) model.
+    try:
+        from qkeras.utils import load_qmodel
+        model = load_qmodel(a.model_dir, compile=False)
+    except Exception:
+        model = keras.models.load_model(a.model_dir, compile=False)
     pred = model.predict(x, batch_size=4096, verbose=1)
     if isinstance(model.layers[-1], keras.layers.Dense):
         pred = tf.nn.softmax(pred).numpy()               # last layer is bare Dense
