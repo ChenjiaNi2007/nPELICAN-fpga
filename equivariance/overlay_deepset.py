@@ -72,15 +72,33 @@ def deepset_aggregate(mode):
 
     betas = sorted(set(beta.tolist()))
     out = {m: [] for m in METRICS}
+    ns = []
     for b in betas:
         sel = beta == b
+        ns.append(int(sel.sum()))
         out["score_drift_mse"].append(float(np.mean((sig0[sel] - sig[sel]) ** 2)))
         out["mean_abs_dsigma"].append(float(np.mean(np.abs(sig0[sel] - sig[sel]))))
         out["mean_abs_dlogit"].append(float(np.mean(np.abs(w0[sel] - logit[sel]))))
         out["flip_rate"].append(float(np.mean(flip[sel])))
         out["auc"].append(mann_whitney_auc(truth[sel], logit[sel]))
         out["inv_eps_b"].append(inv_eps_b_at(truth[sel], logit[sel], EPS_S))
-    return betas, out
+    return betas, out, ns
+
+
+def write_deepset_aggregate_csv(betas, ds, ns):
+    """Persist the DeepSet per-beta aggregate in the SAME schema as the committed
+    nanoPELICAN aggregates_*.csv, so the DeepSet curve is as portable/re-plottable as the
+    PELICAN ones (its raw logits are gitignored). Mode-independent (no beam spurions)."""
+    path = os.path.join(RESULTS_DIR, "aggregates_deepset.csv")
+    cols = ["config", "beta", "n"] + list(METRICS)
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=cols)
+        w.writeheader()
+        for i, b in enumerate(betas):
+            row = {"config": DS_LABEL, "beta": b, "n": ns[i]}
+            row.update({m: ds[m][i] for m in METRICS})
+            w.writerow(row)
+    print(f"wrote {path}")
 
 
 def read_aggregates(mode):
@@ -116,9 +134,13 @@ def main():
     outdir = os.path.join(RESULTS_DIR, "plots_deepset_overlay")
     os.makedirs(outdir, exist_ok=True)
 
+    wrote_csv = False
     for mode in modes:
         npel = read_aggregates(mode)                    # nanoPELICAN curves (committed)
-        ds_betas, ds = deepset_aggregate(mode)          # DeepSet curve (computed here)
+        ds_betas, ds, ds_ns = deepset_aggregate(mode)   # DeepSet curve (computed here)
+        if not wrote_csv:                               # mode-independent -> write once
+            write_deepset_aggregate_csv(ds_betas, ds, ds_ns)
+            wrote_csv = True
         npel_cfgs = sorted(npel.keys(), key=label_sort_key)
 
         for metric, (ylabel, logy) in METRICS.items():
