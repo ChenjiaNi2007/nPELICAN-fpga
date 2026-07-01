@@ -60,13 +60,13 @@ nobj_avg:  49        # N-bar normalization constant (informational; baked into w
 #   * WEIGHT/ACT sweep (I=16 fixed, W=A vary):   8:8:16, 12:12:16, 16:16:16
 # plus the 24:24:24 reference.
 models:
-  - {label: "6:6:6",    checkpoint: ../PELICAN-nano/model/fpga_model_qat_w6a6i6_best.pt,    qat: true, reference: false}
-  - {label: "6:6:8",    checkpoint: ../PELICAN-nano/model/fpga_model_qat_w6a6i8_best.pt,    qat: true, reference: false}
-  - {label: "6:6:12",   checkpoint: ../PELICAN-nano/model/fpga_model_qat_w6a6i12_best.pt,   qat: true, reference: false}
-  - {label: "8:8:16",   checkpoint: ../PELICAN-nano/model/fpga_model_qat_w8a8i16_best.pt,   qat: true, reference: false}
-  - {label: "12:12:16", checkpoint: ../PELICAN-nano/model/fpga_model_qat_w12a12i16_best.pt, qat: true, reference: false}
-  - {label: "16:16:16", checkpoint: ../PELICAN-nano/model/fpga_model_qat_w16a16i16_best.pt, qat: true, reference: false}
-  - {label: "24:24:24", checkpoint: ../PELICAN-nano/model/fpga_model_qat_best.pt,           qat: true, reference: true}
+  - {label: "6:6:6",    checkpoint: equivariance/checkpoints/fpga_model_qat_w6a6i6_best.pt,    qat: true, reference: false}
+  - {label: "6:6:8",    checkpoint: equivariance/checkpoints/fpga_model_qat_w6a6i8_best.pt,    qat: true, reference: false}
+  - {label: "6:6:12",   checkpoint: equivariance/checkpoints/fpga_model_qat_w6a6i12_best.pt,   qat: true, reference: false}
+  - {label: "8:8:16",   checkpoint: equivariance/checkpoints/fpga_model_qat_w8a8i16_best.pt,   qat: true, reference: false}
+  - {label: "12:12:16", checkpoint: equivariance/checkpoints/fpga_model_qat_w12a12i16_best.pt, qat: true, reference: false}
+  - {label: "16:16:16", checkpoint: equivariance/checkpoints/fpga_model_qat_w16a16i16_best.pt, qat: true, reference: false}
+  - {label: "24:24:24", checkpoint: equivariance/checkpoints/fpga_model_qat_best.pt,           qat: true, reference: true}
   # Floating-point reference: the SAME firmware algorithm compiled with every datapath
   # type = double (-DNPELICAN_FLOAT_BUILD, types_float.h), fed the reference checkpoint's
   # full-precision master weights (model_loader.py WITHOUT --quant). This is the
@@ -74,7 +74,7 @@ models:
   # so the gap from any fixed-point curve to this one is 100% quantization artifact.
   # `float: true` selects the double build; it is NOT the plotted reference floor
   # (24:24:24 stays reference), it sorts as the finest (un-numbered) curve.
-  - {label: "float",    checkpoint: ../PELICAN-nano/model/fpga_model_qat_best.pt,           float: true, reference: false}
+  - {label: "float",    checkpoint: equivariance/checkpoints/fpga_model_qat_best.pt,           float: true, reference: false}
   # Non-equivariant baseline: the DeepSet (l1-jet-id) retrained on the SAME binary
   # top-tag task (Phase C). It is NOT the firmware oracle, so run_sweep.py skips it
   # (evaluator: deepset) and run_sweep_deepset.py produces its logits_<mode>_deepset.dat
