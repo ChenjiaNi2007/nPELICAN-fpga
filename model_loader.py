@@ -61,7 +61,9 @@ parser.add_argument('--max-input-bits', type=int, default=None,
                          'Capping below that shrinks the dot multiplier (e.g. 18 -> mul_18s_18s '
                          '= 1 DSP instead of 2). NOT free: re-check the online golden gate after '
                          'lowering it. Only INPUT_F is reduced; INPUT_I (range) is preserved so '
-                         'momenta never saturate. No effect if N >= the derived bit-exact width.')
+                         'momenta never saturate. Caps <= INPUT_I give NEGATIVE F (ap_fixed<W,I> '
+                         'with I > W, momentum LSB 2^-F > 1 GeV) — legal, but expect heavy dot4 '
+                         'precision loss. No effect if N >= the derived bit-exact width.')
 args = parser.parse_args()
 
 if args.out_types is None:
@@ -401,13 +403,17 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     # which the online golden tolerance gate must re-validate. No-op if the cap is
     # >= the bit-exact width.
     if args.max_input_bits is not None and args.max_input_bits < INPUT_W:
-        if args.max_input_bits <= INPUT_I:
-            sys.exit(f'ERROR: --max-input-bits={args.max_input_bits} <= INPUT_I={INPUT_I} '
-                     f'(integer bits needed for |p|max={pmax:.1f}); momenta would saturate. '
-                     f'Choose a cap > {INPUT_I}.')
+        if args.max_input_bits < 2:
+            sys.exit(f'ERROR: --max-input-bits={args.max_input_bits} < 2; need at least '
+                     f'sign + 1 magnitude bit.')
+        # Caps <= INPUT_I are allowed: INPUT_I (range) is ALWAYS preserved so momenta
+        # never saturate, and F goes NEGATIVE (ap_fixed permits I > W; e.g. <10,12>
+        # stores multiples of 2^2 = 4 GeV). A negative-F cap is hardware-identical to
+        # "divide momenta by 2^-F and feed a W-bit integer" — the binary point is free.
         capped_F = args.max_input_bits - INPUT_I
         print(f'  (input_t Lever-2 cap: width {INPUT_W} -> {args.max_input_bits}, '
-              f'F {INPUT_F} -> {capped_F}; bit-exact dots NOT guaranteed — re-check gate)')
+              f'F {INPUT_F} -> {capped_F}; momentum LSB = 2^{-capped_F:+d} GeV; '
+              f'bit-exact dots NOT guaranteed — re-check gate)')
         INPUT_F = capped_F
         INPUT_W = args.max_input_bits
 

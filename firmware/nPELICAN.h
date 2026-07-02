@@ -84,10 +84,16 @@ static void lut_pslog_init(data_T table_out[N_TABLE])
 // dots carry the input_quant grid → dot_t (was an internal_t/input_t mismatch before).
 void dot4(input_t p1[4], input_t p2[4], dot_t& dot);
 
+// nobj is a PARTICLE COUNT (0..NPARTICLES2), not a momentum: it must not share
+// input_t. With input_t capped below 12 bits (negative F, momentum LSB > 1 GeV)
+// an input_t nobj would round odd counts to even, corrupting the mask and the
+// BN2 β'·count terms. ap_uint<5> covers 0..31 and is exact at every input width.
+typedef ap_uint<5> nobj_t;
+
 void nPELICAN(
     input_t model_input[(NPARTICLES)*4],
     input_t beam_input[2*4],            // 2 beam spurions as a top-level input
-    input_t nobj,
+    nobj_t nobj,
     result_t model_out[1]
 );
 

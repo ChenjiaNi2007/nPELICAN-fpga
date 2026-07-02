@@ -140,6 +140,39 @@ down (e.g. 24→20→18→16) and re-run the online golden gate each time**; pic
 narrowest width with acceptable accuracy. It is a deliberate accuracy tradeoff, not
 a free derivation; re-validate the gate whenever the model or dataset changes.
 
+#### Sub-12-bit caps (negative F) — MEASURED 2026-07-02, NOT VIABLE
+`--max-input-bits` now accepts caps ≤ INPUT_I: INPUT_I stays fixed (range preserved)
+and F goes negative (`ap_fixed<W,I>` with I > W is legal; e.g. `<10,12>` = momentum
+LSB 2² = 4 GeV). This is hardware-identical to "divide momenta by 2^-F and feed a
+W-bit integer" — the binary point is free, so a global ÷8 by itself changes nothing
+(see dead-ends list); only the width cut is real. Two interface fixes were required:
+`nobj` is now its own `nobj_t = ap_uint<5>` port (an input_t nobj rounds odd counts
+to even below 12 bits, corrupting the mask), and note the beam spurions (1,0,0,±1)
+are unrepresentable below 12 bits (F<0 → LSB>1) — any real sub-12 design would have
+to special-case them.
+
+Local golden-gate sweep (w6a6i6 checkpoint, 200 sample_data events, local g++ oracle;
+baseline = uncapped 24-bit input_t, whose 93/200 / max|Δ|=0.375 residual is the known
+6/6/6 float-BN bit-faithfulness floor; logit full range ±4):
+
+| input_t | LSB (GeV) | exact | max\|Δ\| | mean\|Δ\| | sign flips vs PyTorch |
+|---------|-----------|-------|--------|---------|----------------------|
+| 24 (uncapped) | 2⁻¹² | 93/200 | 0.375 | 0.082 | 10 |
+| 18 (op point) | 2⁻⁶ | 85/200 | 0.375 | 0.094 | 10 |
+| 16 | 2⁻⁴ | 77/200 | 0.5 | 0.11 | 11 |
+| 14 | 2⁻² | 41/200 | 0.75 | 0.22 | 12 |
+| 12 | 1 | 16/200 | 3.25 | 0.60 | 19 |
+| 11 | 2 | 2/200 | 4.5 | 1.29 | 28 |
+| 10 | 4 | 1/200 | 4.6 | 1.65 | 32 |
+
+A control experiment (momenta pre-snapped to the coarse grid in the TB data while the
+firmware stayed at 18 bits, beams/nobj exact) reproduces the same collapse (10-bit-equiv
+4 GeV grid: 34/200 sign flips), proving it is the real-momentum grid itself, not the
+beam artifact. The dots-level gate is width-invariant (94/200, 0.375) at every cap, as
+it must be. **Conclusion: the knee is 18 and the cliff starts at ~14; ≤12 bits destroys
+the dot4 front-end (mean logit error ~0.6–1.7 on a ±4 logit, 10–18% of decisions flip).
+Sub-12-bit input widths are a dead end for DSP→fabric savings — do not pursue.**
+
 ### Lever 3 — Relax `PIPELINE II=1` / partial roll  (biggest possible cut; breaks an invariant)
 Root cause of the magnitude: the whole 22×22 datapath is replicated 484× because
 everything is unrolled at II=1. Allowing II>1 (roll the i/j loops, `ARRAY_PARTITION`

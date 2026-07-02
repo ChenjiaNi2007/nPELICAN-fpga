@@ -44,7 +44,7 @@ dot = p1[0]*p2[0]-p1[1]*p2[1]-p1[2]*p2[2]-p1[3]*p2[3];
 void nPELICAN(
     input_t model_input[(NPARTICLES)*4],
     input_t beam_input[2*4],            // 2 beam spurions as a top-level input
-    input_t nobj,
+    nobj_t nobj,                        // particle count — exact at any input width
     result_t model_out[1]
 ) {
     #pragma HLS ARRAY_RESHAPE variable=model_input complete dim=0
