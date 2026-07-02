@@ -15,7 +15,10 @@
 # =============================================================================
 
 pelican_nano_repo: ../PELICAN-nano
-data_file:         ../PELICAN-nano/data/sample_data/test.h5
+# data/toptag is the common benchmark for the DeepSet comparison (both models trained
+# on it). It exists on the POD only — gen_boosted_inputs.py must run there; the Mac
+# side (run_sweep.py) only reads canonical/*.dat, never this file.
+data_file:         ../PELICAN-nano/data/toptag/test.h5
 
 n_jets: 2000        # test jets to use (balanced across signal/background, seeded)
 seed:   1234        # determinism: the SAME physical boosted set is reused across all builds

@@ -86,9 +86,22 @@ def select_jets(testfile: str, n_jets: int, seed: int):
         half = min(half, len(sig_idx), len(bkg_idx))
         sel = np.concatenate([sig_idx[:half], bkg_idx[:half]])
         sel.sort()                       # keep file order for reproducible I/O
-        Pmu = f["Pmu"][:][sel]           # [n, 20, 4] float64 GeV
-        Nobj = f["Nobj"][:][sel].astype(int)
+        Pmu = f["Pmu"][:][sel]           # [n, nconst, 4] float64 GeV (nconst 20 or 200)
+        if "Nobj" in f:
+            Nobj = f["Nobj"][:][sel].astype(int)
+        else:
+            # toptag-style files have no Nobj key: real particles are the nonzero rows.
+            Nobj = (np.abs(Pmu[:, :, 0]) > 0).sum(axis=1).astype(int)
         sig = sig_all[sel].astype(int)
+    if Pmu.shape[1] > NPARTICLES:
+        # 200-wide toptag Pmu: keep the leading-NPARTICLES by pT, BEFORE boosting —
+        # the jet the firmware sees is defined in the lab frame, and invariance is
+        # then measured on that same particle set. Matches PELICAN-nano's --nobj cap
+        # and the DeepSet adapter's _select_leading_pt.
+        pt2 = Pmu[:, :, 1] ** 2 + Pmu[:, :, 2] ** 2
+        order = np.argsort(-pt2, axis=1)[:, :NPARTICLES]
+        Pmu = np.take_along_axis(Pmu, order[:, :, None], axis=1)
+        Nobj = np.minimum(Nobj, NPARTICLES)
     return sel, Pmu, Nobj, sig
 
 
