@@ -16,3 +16,5 @@ results/results_*.csv
 #   results/aggregates*.csv          (compact per-(config, beta) metrics; per-mode too)
 #   results/plots*/*.png             (the curves, per-mode + boosted-vs-fixed overlay)
 __pycache__/
+*.tar.gz
+.DS_Store
