@@ -3,12 +3,12 @@
 Common task: **binary top-tagging**. **See `HANDOFF.md` for the current state and the runbook
 to finish** — a fresh session should read that first.
 
-> **⚠ DATASET CORRECTION (2026-07-01):** the comparison is being moved to **`data/toptag`**
-> (nanoPELICAN's training set) for BOTH models. The earlier DeepSet numbers here were on
-> `data/sample_data`, where nanoPELICAN is out-of-distribution (0.70 vs its real 0.95). The
-> "nanoPELICAN AUC discrepancy" was a **dataset mismatch**, not fixed-point precision —
-> `--max-input-bits` was a red herring. The DeepSet is being retrained on `data/toptag`; the
-> tables below (from the old sample_data run) will be refreshed.
+> **⚠ DATASET CORRECTION (2026-07-01):** the comparison moved to **`data/toptag`** for BOTH
+> models. The earlier DeepSet numbers were on `data/sample_data`, where nanoPELICAN is
+> out-of-distribution (0.70 vs its real 0.95); the "nanoPELICAN AUC discrepancy" was a
+> **dataset mismatch**, not fixed-point precision — `--max-input-bits` was a red herring.
+> **Retrain DONE (2026-07-01, A10 GPU, 5 kfolds): DeepSet on toptag test.h5 = AUC
+> 0.9744 ± 0.0005, 1/ε_B@0.3 = 338 ± 39, accuracy 0.920 ± 0.001.**
 
 ## Status
 
@@ -16,10 +16,12 @@ to finish** — a fresh session should read that first.
 - [x] Phase C code — adapter (now leading-pT-20 for 200-wide toptag), hooks, configs (now point
       at `data/toptag`), plot labels, softmax strip.
 - [x] Resource/latency (csynth) collected — DeepSet + nanoPELICAN (see table; arch-valid).
-- [~] Phase C5 — **retrain DeepSet on `data/toptag`** (blocked on pod GPU TF install — in prog).
-- [ ] Phase C6 — ROC overlay on `toptag/test.h5` (after retrain).
+- [x] Phase C5 — DeepSet retrained + tested on `data/toptag` (2026-07-01): AUC 0.9744±0.0005,
+      1/ε_B@0.3 = 338±39, acc 0.920±0.001. Per-fold predictions saved at
+      `trained_deepsets/.../kfolding*/plots_123/y_pred.dat` (test.h5 jet order).
+- [ ] Phase C6 — ROC overlay on `toptag/test.h5` (needs nanoPELICAN logits on the same jets).
 - [ ] Phase D — DeepSet equivariance overlay with the toptag model (tooling ready).
-- [ ] Refresh stale sample_data numbers below.
+- [x] Refresh stale sample_data numbers (roc_summary.csv row kept for provenance).
 
 ## D2 — common FPGA part
 
@@ -37,8 +39,13 @@ II, DSP, LUT, FF, BRAM, accuracy`. Plot `resource_vs_N.png`: DeepSet O(N) vs nPE
 
 | model | nconst | nbits | DSP | LUT | FF | latency | II | AUC | acc |
 |---|---|---|---|---|---|---|---|---|---|
-| DeepSet | 20 | 8 | 124 | 665,981 | 343,142 | 144 cyc / 0.72 µs | 40 | 0.9518 | 0.8879 |
-| nanoPELICAN | 20 | 18in | 1347 | 230,231 | 63,343 | 14 cyc / 0.070 µs | 1 | TBD | TBD |
+| DeepSet | 20 | 8 | 124 | 665,981 | 343,142 | 144 cyc / 0.72 µs | 40 | 0.9744 | 0.920 |
+| nanoPELICAN | 20 | 18in | 1347 | 230,231 | 63,343 | 14 cyc / 0.070 µs | 1 | 0.9529 | TBD |
+
+AUC/acc now both on `data/toptag` (DeepSet: test.h5, 5-fold avg; nanoPELICAN:
+full_pmu_test.dat, 50k jets — same split, alignment check pending for C6). **On accuracy the
+DeepSet leads (0.9744 vs 0.9529)**; nanoPELICAN's edge is latency (10×), II (1 vs 40), FF,
+and Lorentz invariance (Phase D).
 
 Takeaways: nanoPELICAN is **~10× lower latency (70 ns vs 720 ns) and II=1 vs II=40** despite
 O(N²); the resource cost trades **DSP↔LUT** — nanoPELICAN spends DSPs on its Minkowski dot
