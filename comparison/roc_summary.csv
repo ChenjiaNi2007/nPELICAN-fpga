@@ -1,2 +1,4 @@
-model,AUC,inv_eps_b@0.3,accuracy,n
-DeepSet (8-bit),0.9518,184.89,0.8879,39936
+model,dataset,AUC,inv_eps_b@0.3,accuracy,n
+DeepSet (8-bit),toptag test.h5,0.9744,338.0,0.920,
+nanoPELICAN (firmware 18in),toptag full_pmu_test.dat,0.9529,,,50000
+DeepSet (8-bit) STALE sample_data run,sample_data test.h5,0.9518,184.89,0.8879,39936
