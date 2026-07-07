@@ -1,0 +1,58 @@
+================================================================
+== Design Size Report
+================================================================
+
+* Total Instructions per Compilation Phase
++---------------+-----------------------------+--------------+----------------------------------------------------------------------------------------+
+| Phase         | Step                        | Instructions | Description                                                                            |
++---------------+-----------------------------+--------------+----------------------------------------------------------------------------------------+
+| Compile/Link  |                             |  14,066      | After all functions are compiled and linked into a single design                       |
+|               |                             |              |                                                                                        |
+| Unroll/Inline |                             |              | After user unroll and inline pragmas are applied                                       |
+|               | (1) unroll                  | 638,221 *    | user unroll pragmas are applied                                                        |
+|               | (2) simplification          | 254,432 *    | simplification of applied user unroll pragmas                                          |
+|               | (3) inline                  | 254,432 *    | user inline pragmas are applied                                                        |
+|               | (4) simplification          | 242,854 *    | simplification of applied user inline pragmas                                          |
+|               |                             |              |                                                                                        |
+| Array/Struct  |                             |              | After user array partition and struct aggregate/disaggregate pragmas are applied       |
+|               | (1) array partition         | 243,913 *    | user array partition pragmas are applied                                               |
+|               | (2) simplification          | 195,132 *    | simplification of applied user array partition & struct aggregate/disaggregate pragmas |
+|               | (3) aggregate/disaggregate  | 195,132 *    | user struct aggregate/disaggregate pragmas are applied                                 |
+|               | (4) array reshape           | 176,916 *    | apply array reshape pragmas                                                            |
+|               | (5) access patterns         | 174,716 *    | array access pattern optmizations                                                      |
+|               |                             |              |                                                                                        |
+| Performance   |                             |              | After transformations are applied to meet performance pragma targets                   |
+|               | (1) loop simplification     | 168,849 *    | loop and instruction simplification                                                    |
+|               | (2) parallelization         | 164,958 *    | loops are unrolled or pipelined to meet performance targets                            |
+|               | (3) array partition         | 164,474 *    | arrays are partitioned to meet performance targets                                     |
+|               | (4) simplification          | 164,474 *    | simplification of design after performance transformations                             |
+|               |                             |              |                                                                                        |
+| HW Transforms |                             |              | After hardware transfomations                                                          |
+|               | (1) lowering                | 164,478 *    | initial conversion to HW specific instructions                                         |
+|               | (2) optimizations           | 158,600 *    | high level synthesis optimizations                                                     |
++---------------+-----------------------------+--------------+----------------------------------------------------------------------------------------+
+    * - Exceeded design size warning message threshold
+
+* Instructions per Function for each Compilation Phase
++---------------+------------------------+--------------+--------------------+--------------------+-------------+---------------+
+| Function      | Location               | Compile/Link | Unroll/Inline      | Array/Struct       | Performance | HW Transforms |
++---------------+------------------------+--------------+--------------------+--------------------+-------------+---------------+
+| + nPELICAN    | nPELICAN_split.cpp:348 | 14,066       | 242,854 *          | 174,716 *          | 164,474 *   | 158,600 *     |
+|  + np_dots    | nPELICAN_split.cpp:41  | 2,017        | 25,555             | 23,448             | 18,553      | 18,555        |
+|     dot4      | nPELICAN_split.cpp:32  | 1,514        | 22,264 (253 calls) | 20,746 (253 calls) |             |               |
+|    np_bn1     | nPELICAN_split.cpp:83  | 1,712        | 19,183             | 18,195             | 17,689      | 17,691        |
+|    np_agg2to2 | nPELICAN_split.cpp:109 | 1,647        | 11,358             |  8,388             |  7,904      |  7,906        |
+|    np_eq2to2  | nPELICAN_split.cpp:147 | 3,276        | 167,764            | 99,862             | 98,871      | 98,873        |
+|    np_agg2to0 | nPELICAN_split.cpp:252 | 4,223        | 15,856             | 13,141             | 11,688      | 11,690        |
+|    np_out2to0 | nPELICAN_split.cpp:318 |   476        |     70             |     64             |     60      |     62        |
++---------------+------------------------+--------------+--------------------+--------------------+-------------+---------------+
+    * - Exceeded design size warning message threshold
+
+* Design Size Message Settings
++---------------------------------------------+--------+------------------------------------------------------------------+
+| Message Setting                             | Value  | Description                                                      |
++---------------------------------------------+--------+------------------------------------------------------------------+
+| config_compile -design_size_maximum_warning | 100000 | Show a warning when total design instructions exceeds this value |
++---------------------------------------------+--------+------------------------------------------------------------------+
+
+
