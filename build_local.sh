@@ -7,11 +7,24 @@
 # that suppress the macOS/clang ambiguous-'complex' errors from libc++ inline namespaces.
 set -euo pipefail
 
+# `./build_local.sh split` builds the per-stage split firmware
+# (firmware/nPELICAN_split.cpp, same top function) into ./tb_local_split.
+# Default builds the monolith into ./tb_local. Extra g++ flags (e.g.
+# -DRUN_GOLDEN_GATE) can be passed after the optional `split` argument.
+SRC=firmware/nPELICAN.cpp
+OUT=tb_local
+if [[ "${1:-}" == "split" ]]; then
+    SRC=firmware/nPELICAN_split.cpp
+    OUT=tb_local_split
+    shift
+fi
+
 g++ -std=c++17 -O2 \
     -I third_party/stubs \
     -I third_party/ap_types/include \
     -I . \
-    nPELICAN_tb.cpp firmware/nPELICAN.cpp \
-    -o tb_local
+    "$@" \
+    nPELICAN_tb.cpp "$SRC" \
+    -o "$OUT"
 
-echo "Build succeeded: ./tb_local"
+echo "Build succeeded: ./$OUT"

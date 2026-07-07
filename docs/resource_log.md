@@ -36,6 +36,21 @@ gate must be confirmed at width 18 (Lever 2 trades dot4 front-end precision). Re
 the GOLDEN / DOTS-LEVEL exact-count + max|Δ| here once run. If 18 passes comfortably,
 stop there; do not adopt 16.
 
+## Per-stage split build (resource attribution)
+
+`firmware/nPELICAN_split.cpp` + `build_prj.tcl split=1` synthesize the SAME datapath
+as per-stage functions (INLINE off) so csynth reports LUT/FF/DSP/latency per stage —
+see `FUNCTION_SPLIT.md` for the stage map and the overhead watchlist. The monolith
+stays default; the split project dir is `nPELICAN_split_prj`. Local gate 2026-07-03:
+split vs monolith **byte-identical** (200 golden events incl. dots-level + stage dump,
+and the 10k legacy flow). Record remote csynth numbers here (same weights.h for both):
+
+| date | commit | build | DSP | FF | LUT | latency | II | notes |
+|------|--------|-------|-----|----|-----|---------|----|-------|
+| TBD  | TBD    | monolith (`nPELICAN_prj`) | TBD | TBD | TBD | TBD | TBD | baseline for the delta |
+| TBD  | TBD    | split total (`nPELICAN_split_prj`) | TBD | TBD | TBD | TBD | TBD | split-vs-monolith overhead lives here |
+| TBD  | TBD    | └ per stage: np_dots / np_bn1 / np_agg2to2 / np_eq2to2 / np_agg2to0 / np_out2to0 | | | | | | copy the grp_np_* Instance rows from csynth.rpt |
+
 ## Phase 2 bit-exactness — interpretation
 
 Zero-tolerance 200/200 csim vs the PyTorch quant logits is **not achievable for this

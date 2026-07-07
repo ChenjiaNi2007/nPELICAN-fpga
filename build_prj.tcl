@@ -10,6 +10,7 @@ array set opt {
     export     1
     vsynth     1
     fifo_opt   0
+    split      0
 }
 
 set tcldir [file dirname [info script]]
@@ -146,13 +147,33 @@ file mkdir tb_data
 set CSIM_RESULTS "./tb_data/csim_results.log"
 set RTL_COSIM_RESULTS "./tb_data/rtl_cosim_results.log"
 
-if {$opt(reset)} {
-    open_project -reset ${project_name}_prj
+# split=1: synthesize firmware/nPELICAN_split.cpp instead — same top function,
+# datapath split into per-stage functions (INLINE off) so the csynth report
+# attributes resources/latency per stage (grp_np_* instances). Uses its own
+# project dir so the monolith's project/reports are never clobbered. Reporting
+# flow only: csim + synth are supported; cosim/validation/export/vsynth path
+# plumbing assumes the monolith project dir, so they are forced off here.
+if {$opt(split)} {
+    set src_file firmware/${project_name}_split.cpp
+    set prj_dir  ${project_name}_split_prj
+    foreach o {cosim validation export vsynth} {
+        if {$opt($o)} {
+            puts "INFO: split=1 supports csim+synth only; disabling $o"
+            set opt($o) 0
+        }
+    }
 } else {
-    open_project ${project_name}_prj
+    set src_file firmware/${project_name}.cpp
+    set prj_dir  ${project_name}_prj
+}
+
+if {$opt(reset)} {
+    open_project -reset ${prj_dir}
+} else {
+    open_project ${prj_dir}
 }
 set_top ${project_name}
-add_files firmware/${project_name}.cpp -cflags "-std=c++0x"
+add_files ${src_file} -cflags "-std=c++0x"
 add_files -tb ${project_name}_tb.cpp -cflags "-std=c++0x"
 add_files -tb firmware/weights
 add_files -tb tb_data
