@@ -22,7 +22,7 @@ workspace root. Device SLR limits: DSP 3072, LUT 432000, FF 864000.
 | Lever 1 dot symmetry | `a7b5b06` | `symmetry6_6_6report` | 2990 | 116,488 | 400,543 | `mul_24s_24s` ×2 DSP | **DSP-neutral** (HLS CSE already symmetric); ~1.7k FF/2.7k LUT only |
 | Lever 2 `--max-input-bits 18` | `f93d819` | `18inputwidthnPELICAN_report` | **2150** | 122,241 | **332,609** | `mul_18s_18s` ×1 DSP | **−840 DSP & −17% LUT** vs symmetry; recommended operating point |
 | Lever 2 `--max-input-bits 16` | `f93d819` | `16inputwidthnPELICAN_report` | 2150 | 118,521 | 331,231 | `mul_16s_16s` ×1 DSP | DSP identical to 18 (both ≤18 → 1 DSP48); only ~0.4% LUT / ~3% FF more → not worth the extra precision loss |
-| Lever 4 BN2-collapse + BN mean-fold | (uncommitted) | TBD (remote csynth owed) | TBD | TBD | TBD | unchanged | BN2 968 wide mults → NHIDDEN (push affine past 2→0 sum); BN1/BN2 mean folded into bias. **Local gate PASS**: dots-level 143/200 exact max\|Δ\|=1.1e-5 (was 142); golden 133/200 max\|Δ\|=6.26e-4 (was 133/6.3e-4). Expect ≈ −900 DSP toward the ~840-dot floor — confirm on remote csynth. |
+| Lever 4 BN2-collapse + BN mean-fold | ≤`d658d10` | `reports/csynth_monolith.rpt` (2026-07-07) | **1347** | **63,343** | **229,779** | `mul_18s_18s`/`mac_mulsub_18s_18s` ×1 DSP | BN2 968 wide mults → NHIDDEN (push affine past 2→0 sum); BN1/BN2 mean folded into bias. **Local gate PASS**: dots-level 143/200 exact max\|Δ\|=1.1e-5 (was 142); golden 133/200 max\|Δ\|=6.26e-4 (was 133/6.3e-4). **Csynth confirmed: −803 DSP / −48% FF / −31% LUT vs Lever 2 @18.** Dot front-end floor is 1012 DSP (253 upper-triangle dots × 4 mults, 1 DSP each — see split report); latency 14 cyc, II=1, slack −0.02 ns. |
 
 **Operating point: `--max-input-bits 18`.** It crosses the DSP48 packing threshold
 (both operands ≤18 fit one 27×18 block), capturing the full dot-DSP win (840 mults
@@ -45,11 +45,29 @@ stays default; the split project dir is `nPELICAN_split_prj`. Local gate 2026-07
 split vs monolith **byte-identical** (200 golden events incl. dots-level + stage dump,
 and the 10k legacy flow). Record remote csynth numbers here (same weights.h for both):
 
-| date | commit | build | DSP | FF | LUT | latency | II | notes |
-|------|--------|-------|-----|----|-----|---------|----|-------|
-| TBD  | TBD    | monolith (`nPELICAN_prj`) | TBD | TBD | TBD | TBD | TBD | baseline for the delta |
-| TBD  | TBD    | split total (`nPELICAN_split_prj`) | TBD | TBD | TBD | TBD | TBD | split-vs-monolith overhead lives here |
-| TBD  | TBD    | └ per stage: np_dots / np_bn1 / np_agg2to2 / np_eq2to2 / np_agg2to0 / np_out2to0 | | | | | | copy the grp_np_* Instance rows from csynth.rpt |
+First results (Vitis 2023.2, xcvu13p-2, 5 ns; weights: 6/6/6 QAT @ `--max-input-bits 18`;
+reports in `reports/csynth_{monolith,split}.rpt`):
+
+| date | build | DSP | FF | LUT | latency (cyc) | II | notes |
+|------|-------|-----|----|-----|---------------|----|-------|
+| 2026-07-07 | monolith (`nPELICAN_prj`) | 1347 | 63,343 | 229,779 | 14 | 1 | baseline; slack −0.02 ns |
+| 2026-07-07 | **split total** (`nPELICAN_split_prj`) | 1579 | 108,786 | 292,033 | 22 | 1 | **overhead vs monolith: +232 DSP (+17%) / +45.4k FF (+72%) / +62.3k LUT (+27%) / +8 cyc**; slack −0.02 ns |
+| | ├ np_dots | 1012 | 27,763 | 45,700 | 4 | 1 | 253 dots × 4 mults × 1 DSP48 (18×18) — 64% of all DSP |
+| | ├ np_bn1 | 0 | 0 | 38,038 | 0 | 1 | 253 `mul_6s_9ns` → pure LUT |
+| | ├ np_agg2to2 | 23 | 7,443 | 21,299 | 3 | 1 | adder trees + 23 normalize mults |
+| | ├ np_eq2to2 | 529 | 20,136 | 148,562 | 2 | 1 | 2→2 MAC — **51% of all LUT**, top LUT target |
+| | ├ np_agg2to0 | 14 | 6,671 | 21,677 | 4 | 1 | sums/trace + collapsed BN2 |
+| | ├ np_out2to0 | 1 | 0 | 85 | 0 | 1 | negligible |
+| | └ top residual | 0 | 46,773 | 16,672 | — | — | inter-stage boundary registers (FF) + nobjmask/glue (LUT) — this is most of the split overhead |
+
+Reading guide: per-stage DSP sums exactly to the split top (1012+0+23+529+14+1=1579),
+so DSP attribution is clean. The split's overhead is NOT inside the stages: ~47k of the
++45k FF delta is the *top residual* (each non-inlined boundary registers its wide
+inter-stage bus, +8 pipeline cycles × multi-k-bit buses), and the +232 DSP / part of the
+LUT delta is lost cross-stage sharing inside np_eq2to2's MAC (the monolith CSEs across
+the BN1/basis/MAC boundary; the split maps more uniform `mac_muladd_6s_4ns_12s` cores).
+**Use the split for proportions (where to optimize); use the monolith for real totals
+(what to ship). Throughput is unaffected (II=1 in both).**
 
 ## Phase 2 bit-exactness — interpretation
 
