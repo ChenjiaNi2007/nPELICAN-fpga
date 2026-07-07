@@ -102,6 +102,23 @@ void nPELICAN(
     //beam spurions are now inputs so the test harness can Lorentz-boost them.
     //At |beta|=0 these are driven with (1,0,0,+1)/(1,0,0,-1), which quantize into
     //input_t identically to the previous constants -> beta=0 stays bit-exact.
+#ifdef NPELICAN_CONST_BEAMS
+    //Lever 5 (deployment build): beams hardwired to the fixed spurions as
+    //compile-time constants, so the 43 beam-involving dots fold to E∓pz adds
+    //(no multipliers) — recovers the ~172 DSP the runtime port costs (the
+    //per-stage report showed np_dots at 253×4 DSP vs the historical 210×4 with
+    //constant beams). beam_input is ignored (HLS may prune the port). Bit-exact
+    //vs the runtime port driven at |beta|=0. Build WITHOUT this flag for the
+    //equivariance harness (it Lorentz-boosts the beams).
+    const input_t const_beams[2][4] = {{1, 0, 0, 1}, {1, 0, 0, -1}};
+    BeamPrep: for (unsigned int i = 0; i < 2; i++) {
+      #pragma HLS unroll
+      for (unsigned int k = 0; k < 4; k++) {
+        #pragma HLS unroll
+        p1[i][k] = const_beams[i][k];
+      }
+    }
+#else
     BeamPrep: for (unsigned int i = 0; i < 2; i++) {
       #pragma HLS unroll
       for (unsigned int k = 0; k < 4; k++) {
@@ -109,6 +126,7 @@ void nPELICAN(
         p1[i][k] = beam_input[i*4+k];
       }
     }
+#endif
 
     //fill input array (each dot rounded into dot_t = input_quant grid).
     //dot4 is symmetric (p_i·p_j == p_j·p_i), so compute only the upper triangle
@@ -241,6 +259,12 @@ void nPELICAN(
     //rounding is the act_layer quantizer below. Bias is NOT folded into BN/weights.
     mac2_t Tp[NPARTICLES2][NPARTICLES2][NHIDDEN];
     #pragma HLS ARRAY_PARTITION variable=Tp complete dim=0
+#ifdef NPELICAN_MAC_DSP
+    //Lever 6 experiment: force the 2->2 MAC multiplies into DSP48s. LUT is the
+    //binding resource (53% SLR, half of it this MAC) while DSP sits at 44%;
+    //impl choice does not change values, so this is bit-exact by construction.
+    #pragma HLS BIND_OP variable=Tp op=mul impl=dsp
+#endif
 
     // initialize with bias
     for (unsigned int i = 0; i < NPARTICLES2; i++) {

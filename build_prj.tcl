@@ -11,6 +11,8 @@ array set opt {
     vsynth     1
     fifo_opt   0
     split      0
+    const_beams 0
+    mac_dsp    0
 }
 
 set tcldir [file dirname [info script]]
@@ -167,13 +169,25 @@ if {$opt(split)} {
     set prj_dir  ${project_name}_prj
 }
 
+# Resource-lever build flags (docs/RESOURCE_REDUCTION_LEVERS.md). Both are
+# bit-exact for the deployment case; use reset=1 when toggling them so stale
+# cflags in an existing project dir can't leak between runs.
+#   const_beams=1 -> -DNPELICAN_CONST_BEAMS (Lever 5): beams hardwired to the
+#                    fixed spurions; beam dots constant-fold (~-172 DSP). Do
+#                    NOT use for the equivariance harness (boosted beams).
+#   mac_dsp=1     -> -DNPELICAN_MAC_DSP (Lever 6): BIND_OP the 2->2 MAC mults
+#                    into DSP48s (trade spare DSP for the binding LUT).
+set fw_cflags "-std=c++0x"
+if {$opt(const_beams)} { append fw_cflags " -DNPELICAN_CONST_BEAMS" }
+if {$opt(mac_dsp)}     { append fw_cflags " -DNPELICAN_MAC_DSP" }
+
 if {$opt(reset)} {
     open_project -reset ${prj_dir}
 } else {
     open_project ${prj_dir}
 }
 set_top ${project_name}
-add_files ${src_file} -cflags "-std=c++0x"
+add_files ${src_file} -cflags ${fw_cflags}
 add_files -tb ${project_name}_tb.cpp -cflags "-std=c++0x"
 add_files -tb firmware/weights
 add_files -tb tb_data

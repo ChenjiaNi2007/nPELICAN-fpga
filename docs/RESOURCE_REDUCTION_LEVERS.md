@@ -38,16 +38,24 @@ sed -n '76,1100p' <report>.txt | grep -E "\|mul_" \
   | awk -F'|' '{print $3, "DSP="$5}' | sort | uniq -c | sort -rn
 ```
 
-## Current state (6/6/6, 20 particles → 22 with spurions; `secondnew6_6_6_20p.txt`)
+## Current state (6/6/6, 20p; Lever 4 confirmed 2026-07-07, `reports/csynth_monolith.rpt`)
 
-Current operating point: **`--max-input-bits 18`** (Lever 2 applied).
+Current operating point: **`--max-input-bits 18`** (Lever 2) + BN2-collapse (Lever 4).
 
 | metric | value | notes |
 |--------|-------|-------|
-| DSP | **2150** | 70% of one SLR (3072). ~840 dots (`mul_18s_18s` × 1 DSP, floor for this mult count) + ~1310 inferred BN1/normalize/MAC. |
-| FF  | 122,241 | 14% SLR |
-| LUT | 332,609 | 77% of one SLR (432000). −17% vs the 24-bit-input build. Expression (adder trees) still the bulk. |
-| Latency | 18 cycles / 90 ns, II=1 | fully pipelined |
+| DSP | **1347** | 44% of one SLR (3072). 1012 dots (253 × 4 mults × 1 DSP, beams-as-inputs — see Lever 5) + ~335 MAC/normalize. |
+| FF  | 63,343 | 7% SLR |
+| LUT | **332,609 → 229,779** | **53% of one SLR (432000) — now the binding resource.** Per-stage: 51% of it is the 2→2 MAC (Lever 6), 16% dots, 13% BN1. |
+| Latency | 14 cycles / 70 ns, II=1 | fully pipelined; slack −0.02 ns (marginal) |
+
+**Per-stage attribution now exists** (2026-07-07): the split build
+(`firmware/nPELICAN_split.cpp`, `build_prj.tcl split=1`, see `FUNCTION_SPLIT.md`)
+reports each stage separately — dots 1012 DSP / 45.7k LUT, BN1 0 DSP / 38.0k LUT,
+eq2to2 148.6k LUT, aggregations ~21k LUT each (`reports/csynth_split.rpt`,
+`resource_log.md`). Levers below cite these numbers. NOTE: `np_bn1` uses ZERO DSP
+(6×9-bit const mults → LUT), so the old "~1310 inferred BN1/normalize/MAC" DSP
+estimate is obsolete — post-Lever-4 non-dot DSP is ~335, all in the MAC/normalize.
 
 Progress so far (all 6/6/6, 20p):
 | report | DSP | FF | LUT | dot multiplier |
@@ -58,6 +66,7 @@ Progress so far (all 6/6/6, 20p):
 | `symmetry6_6_6report` (Lever 1) | 2990 | 116,488 | 400,543 | `mul_24s_24s_48` ×2 DSP (still 840) |
 | `18inputwidthnPELICAN_report` (Lever 2, **operating point**) | **2150** | 122,241 | 332,609 | `mul_18s_18s` ×1 DSP |
 | `16inputwidthnPELICAN_report` (Lever 2 @16) | 2150 | 118,521 | 331,231 | `mul_16s_16s` ×1 DSP (DSP-identical to 18) |
+| `reports/csynth_monolith.rpt` (Lever 4, **current**) | **1347** | **63,343** | **229,779** | `mac_mulsub_18s_18s` ×1 DSP (1012 total, beams-as-inputs) |
 
 Key empirical facts established:
 - **Particle count dominates and scales as (N+2)².** From the reports:
@@ -184,7 +193,7 @@ substantially cuts the 357K "Expression" LUT.
 lowers throughput (II=4 ≈ ¼ rate). Only pursue if the latency/throughput budget
 has room. This is a deliberate user decision, not a silent refactor.
 
-### Lever 4 — Collapse BN2 past the 2→0 aggregation (+ fold BN means)  ✓ DONE (local gate PASS; awaits remote csynth)
+### Lever 4 — Collapse BN2 past the 2→0 aggregation (+ fold BN means)  ✓ DONE & CSYNTH-CONFIRMED
 `Tr = BN2(relu)` was computed per `(i,j,h)` = 22·22·NHIDDEN = **968 wide `bn_t_gen`
 multiplies**, almost certainly the bulk of the ~1310 non-dot DSP floor (968 BN2 + 210 BN1
 + ~27 normalize ≈ 1310). But `Tr` is consumed ONLY by the linear 2→0 aggregators
@@ -208,10 +217,47 @@ firmware no longer rounds each `Tr` to `tr_t` first — one rounding at the t0 c
 
 **Validation (local clang, Phase-2 firmware is local==Vitis bit-for-bit):** dots-level gate
 143/200 exact, max|Δ|=1.1e-5 PASS (was 142/1.1e-5); golden 133/200, max|Δ|=6.26e-4 PASS
-(was 133/6.3e-4). ⚠ **Owed: remote csynth to quantify the DSP cut** (expect ≈ −900 toward
-the ~840-dot floor) and the online gate re-confirm; log in `resource_log.md`. Caught one bug
+(was 133/6.3e-4). **Csynth confirmed 2026-07-07** (`reports/csynth_monolith.rpt`): DSP
+2150 → **1347** (−803, as predicted), FF −48%, LUT −31%. Caught one bug
 in review: masked off-diagonal `Tp_q` is NOT zero (`T3=jdotp[i]` masked by `[i]` only), so the
 raw sums keep `·nobjmask` — the mask is not redundant.
+
+### Lever 5 — Constant beams for deployment (`const_beams=1`)  ✓ IMPLEMENTED (csynth owed)
+Revealed by the per-stage report: `np_dots` = **1012 DSP = 253 × 4** — the upper
+triangle of all 22 slots *including the beams*. Historical reports showed 840 = 210 × 4
+because the beams were compile-time constants and dots against (1,0,0,±1) fold to
+`E∓pz` (adds, zero multipliers). Making beams a runtime port (needed only for the
+equivariance boost study) silently costs **43 dots × 4 = ~172 DSP (+13%)** plus their
+adder-tree LUT. Deployment never boosts the beams, so hardwire them back:
+
+- `-DNPELICAN_CONST_BEAMS` (`build_prj.tcl const_beams=1`, `./build_local.sh
+  [split] -DNPELICAN_CONST_BEAMS`): beam rows of `p1` come from constants; the
+  `beam_input` port is ignored (HLS may prune it). Implemented in BOTH
+  `nPELICAN.cpp` and `nPELICAN_split.cpp` (sync rule).
+- **Bit-exact** vs the runtime port driven at |beta|=0 (verified locally
+  2026-07-07: all four build combinations byte-identical on the golden gate).
+- ⚠ The equivariance harness MUST build without the flag (it boosts the beams).
+- **Owed:** remote csynth with `const_beams=1` — expect ≈ −172 DSP in `np_dots`;
+  log in `resource_log.md`.
+
+### Lever 6 — Rebalance LUT→DSP in the 2→2 MAC (`mac_dsp=1`)  ✓ IMPLEMENTED (csynth owed)
+LUT is now the binding resource (53% SLR vs DSP 44%), and the split report pins
+**51% of all LUT in `np_eq2to2`** (the 2→2 MAC's strength-reduced constant
+multiplies + adder trees, 148.6k). ~1700 DSPs sit idle — trade them:
+
+- `-DNPELICAN_MAC_DSP` (`build_prj.tcl mac_dsp=1`): `#pragma HLS BIND_OP
+  variable=Tp op=mul impl=dsp` forces the MAC multiplies into DSP48s. In both
+  firmware files. Bit-exact by construction (impl choice doesn't change values).
+- This is an EXPERIMENT: HLS may pack several 6-bit mults per DSP48 or may
+  ignore ops it already strength-reduced — measure, don't assume. Run on the
+  split build first so the effect is attributed to `np_eq2to2` alone.
+- Combines freely with Lever 5 (independent flags).
+- If BIND_OP moves too little (strength-reduced const-mults are no longer "mul"
+  ops), the fallback experiment is `config_op mul -impl dsp` in the tcl, or
+  rank-1 factoring of the basis terms (`row[i]+col[j]+scalar` regrouping —
+  bounded win, Lever-1 caveat applies to the products but not the adder trees).
+- **Owed:** remote csynth `split=1 mac_dsp=1` vs plain `split=1`; log the
+  `np_eq2to2` LUT/DSP delta in `resource_log.md`.
 
 ## Not reducible / dead ends (don't re-investigate)
 - **2→2 dense MAC is not symmetric** — `T[i][j]` carries `jdotp[i]` vs `jdotp[j]`
@@ -235,6 +281,12 @@ raw sums keep `·nobjmask` — the mask is not redundant.
 2. ~~Lever 2~~ done (`f93d819`) — **operating point `--max-input-bits 18`**: DSP
    2990→2150 (−840), LUT −17%. 16 gives no extra DSP (packing threshold). **Still
    owed: confirm the online golden gate at 18 and log it in `resource_log.md`.**
-3. **Next, if more is needed:** Lever 3 (relax II=1, ~throughput cost) or fewer
-   particles (N² scaling). Width-narrowing is exhausted — DSP floor is ~840 dots
-   (1 DSP each) + ~1310 BN1/normalize/MAC at the current particle count.
+3. ~~Lever 4~~ done & csynth-confirmed (2026-07-07): DSP 2150→1347, FF −48%, LUT −31%.
+4. **Now:** remote csynth for Lever 5 (`const_beams=1`, expect −172 DSP, free) and
+   the Lever 6 experiment (`split=1 mac_dsp=1`, LUT→DSP trade in `np_eq2to2`).
+   Both implemented and locally gated 2026-07-07.
+5. **If more LUT is needed after 5+6:** rank-1 factoring of the basis adder trees
+   (Lever 6 fallback), training-side sparsity on `w1_2to2` (each zeroed entry
+   deletes a 484-element term forest; currently 0/12 are zero), then the two big
+   decisions — Lever 3 (relax II=1, throughput cost) or fewer particles ((N+2)²
+   scaling on ~90% of LUT and ~97% of DSP, per the split report).

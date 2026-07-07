@@ -47,6 +47,13 @@ This uses its own project dir `nPELICAN_split_prj` (the monolith's
 only; `cosim`/`validation`/`export`/`vsynth` are forced off (their tcl plumbing
 assumes the monolith project dir — extend if ever needed).
 
+The resource-lever build flags apply to BOTH builds (`RESOURCE_REDUCTION_LEVERS.md`
+Levers 5/6): `const_beams=1` (constant beam spurions, `-DNPELICAN_CONST_BEAMS`)
+and `mac_dsp=1` (2→2 MAC mults bound to DSP48, `-DNPELICAN_MAC_DSP`). Use
+`reset=1` when toggling flags so stale cflags can't leak from an existing
+project dir; run lever experiments on the split build first so the delta is
+attributed to the right stage.
+
 Per-stage numbers: `nPELICAN_split_prj/solution/syn/report/csynth.rpt` —
 the "Utilization Estimates > Detail > Instance" table lists one
 `grp_np_<stage>_fu_*` row per stage with its LUT/FF/DSP, and the Latency

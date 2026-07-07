@@ -58,6 +58,19 @@ void np_dots(
         p1[(i + (NPARTICLES2 - NPARTICLES))][k] = model_input[i*(4)+k]*nobjmask[i][0];
       }
     }
+#ifdef NPELICAN_CONST_BEAMS
+    //Lever 5 (deployment build): beams hardwired to the fixed spurions —
+    //beam dots fold to E∓pz adds, ~172 DSP recovered. Mirrors nPELICAN.cpp;
+    //build WITHOUT this flag for the equivariance harness (boosted beams).
+    const input_t const_beams[2][4] = {{1, 0, 0, 1}, {1, 0, 0, -1}};
+    BeamPrep: for (unsigned int i = 0; i < 2; i++) {
+      #pragma HLS unroll
+      for (unsigned int k = 0; k < 4; k++) {
+        #pragma HLS unroll
+        p1[i][k] = const_beams[i][k];
+      }
+    }
+#else
     BeamPrep: for (unsigned int i = 0; i < 2; i++) {
       #pragma HLS unroll
       for (unsigned int k = 0; k < 4; k++) {
@@ -65,6 +78,7 @@ void np_dots(
         p1[i][k] = beam_input[i*4+k];
       }
     }
+#endif
 
     //dot4 is symmetric: compute only the upper triangle and mirror (pure wiring).
     for(unsigned int i = 0; i < NPARTICLES2; i++){
@@ -194,6 +208,11 @@ void np_eq2to2(
 
     mac2_t Tp[NPARTICLES2][NPARTICLES2][NHIDDEN];
     #pragma HLS ARRAY_PARTITION variable=Tp complete dim=0
+#ifdef NPELICAN_MAC_DSP
+    //Lever 6 experiment: force the 2->2 MAC multiplies into DSP48s (LUT is the
+    //binding resource; this stage holds 51% of it). Mirrors nPELICAN.cpp.
+    #pragma HLS BIND_OP variable=Tp op=mul impl=dsp
+#endif
 
     // initialize with bias
     for (unsigned int i = 0; i < NPARTICLES2; i++) {
