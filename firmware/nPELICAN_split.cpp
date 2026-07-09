@@ -29,6 +29,54 @@ dot_t* npelican_dots_override = nullptr;
 // one that is wrong.
 // ============================================================================
 
+// ---------------------------------------------------------------------------
+// Stage isolation (one-boundary-at-a-time marginal costs; FUNCTION_SPLIT.md).
+// Default: ALL six stages split (full attribution build). Define exactly one
+// NPELICAN_SPLIT_ONLY_<STAGE> (build_prj.tcl split_only=<stage>) to keep ONLY
+// that stage as a function and force-inline the other five back into the top:
+// the isolated stage is then measured in monolith context (true marginal cost),
+// and the run's total minus the monolith baseline is that ONE boundary's
+// overhead. C-sim output is identical in every configuration — inlining does
+// not change arithmetic.
+// ---------------------------------------------------------------------------
+#if defined(NPELICAN_SPLIT_ONLY_DOTS) || defined(NPELICAN_SPLIT_ONLY_BN1) || \
+    defined(NPELICAN_SPLIT_ONLY_AGG2TO2) || defined(NPELICAN_SPLIT_ONLY_EQ2TO2) || \
+    defined(NPELICAN_SPLIT_ONLY_AGG2TO0) || defined(NPELICAN_SPLIT_ONLY_OUT2TO0)
+  #define NP_ISOLATE 1
+#else
+  #define NP_ISOLATE 0
+#endif
+#if !NP_ISOLATE || defined(NPELICAN_SPLIT_ONLY_DOTS)
+  #define NP_SPLIT_DOTS 1
+#else
+  #define NP_SPLIT_DOTS 0
+#endif
+#if !NP_ISOLATE || defined(NPELICAN_SPLIT_ONLY_BN1)
+  #define NP_SPLIT_BN1 1
+#else
+  #define NP_SPLIT_BN1 0
+#endif
+#if !NP_ISOLATE || defined(NPELICAN_SPLIT_ONLY_AGG2TO2)
+  #define NP_SPLIT_AGG2TO2 1
+#else
+  #define NP_SPLIT_AGG2TO2 0
+#endif
+#if !NP_ISOLATE || defined(NPELICAN_SPLIT_ONLY_EQ2TO2)
+  #define NP_SPLIT_EQ2TO2 1
+#else
+  #define NP_SPLIT_EQ2TO2 0
+#endif
+#if !NP_ISOLATE || defined(NPELICAN_SPLIT_ONLY_AGG2TO0)
+  #define NP_SPLIT_AGG2TO0 1
+#else
+  #define NP_SPLIT_AGG2TO0 0
+#endif
+#if !NP_ISOLATE || defined(NPELICAN_SPLIT_ONLY_OUT2TO0)
+  #define NP_SPLIT_OUT2TO0 1
+#else
+  #define NP_SPLIT_OUT2TO0 0
+#endif
+
 void dot4(input_t p1[4], input_t p2[4], dot_t& dot) {
 // Input in the form E, px, py, pz. The Minkowski dot is computed in HLS's exact
 // promoted type (products/sums of fixed-point are exact) and rounded once into
@@ -44,8 +92,12 @@ void np_dots(
     ap_uint<1> nobjmask[NPARTICLES2][NPARTICLES2],
     dot_t dots[(NPARTICLES2)*(NPARTICLES2)]
 ) {
+#if NP_SPLIT_DOTS
     #pragma HLS INLINE off
     #pragma HLS PIPELINE II=1
+#else
+    #pragma HLS INLINE
+#endif
     #pragma HLS ARRAY_PARTITION variable=nobjmask complete dim=0
     #pragma HLS ARRAY_PARTITION variable=dots complete dim=0
 
@@ -99,8 +151,12 @@ void np_bn1(
     ap_uint<1> nobjmask[NPARTICLES2][NPARTICLES2],
     bn1out_t batch1[(NPARTICLES2)*(NPARTICLES2)]
 ) {
+#if NP_SPLIT_BN1
     #pragma HLS INLINE off
     #pragma HLS PIPELINE II=1
+#else
+    #pragma HLS INLINE
+#endif
     #pragma HLS ARRAY_PARTITION variable=dots complete dim=0
     #pragma HLS ARRAY_PARTITION variable=nobjmask complete dim=0
     #pragma HLS ARRAY_PARTITION variable=batch1 complete dim=0
@@ -125,8 +181,12 @@ void np_agg2to2(
     t2_t &jmass,
     t2_t jdotp[NPARTICLES2]
 ) {
+#if NP_SPLIT_AGG2TO2
     #pragma HLS INLINE off
     #pragma HLS PIPELINE II=1
+#else
+    #pragma HLS INLINE
+#endif
     #pragma HLS ARRAY_PARTITION variable=batch1 complete dim=0
     #pragma HLS ARRAY_PARTITION variable=jdotp complete dim=0
 
@@ -165,8 +225,12 @@ void np_eq2to2(
     ap_uint<1> nobjmask[NPARTICLES2][NPARTICLES2],
     relu_t Tp_q[NPARTICLES2][NPARTICLES2][NHIDDEN]
 ) {
+#if NP_SPLIT_EQ2TO2
     #pragma HLS INLINE off
     #pragma HLS PIPELINE II=1
+#else
+    #pragma HLS INLINE
+#endif
     #pragma HLS ARRAY_PARTITION variable=batch1 complete dim=0
     #pragma HLS ARRAY_PARTITION variable=jdotp complete dim=0
     #pragma HLS ARRAY_PARTITION variable=nobjmask complete dim=0
@@ -274,8 +338,12 @@ void np_agg2to0(
     nobj_t nobj,
     t0_t R[NHIDDEN][2]
 ) {
+#if NP_SPLIT_AGG2TO0
     #pragma HLS INLINE off
     #pragma HLS PIPELINE II=1
+#else
+    #pragma HLS INLINE
+#endif
     #pragma HLS ARRAY_PARTITION variable=Tp_q complete dim=0
     #pragma HLS ARRAY_PARTITION variable=nobjmask complete dim=0
     #pragma HLS ARRAY_PARTITION variable=R complete dim=0
@@ -338,8 +406,12 @@ void np_out2to0(
     t0_t R[NHIDDEN][2],
     mac0_t Rp[NOUT]
 ) {
+#if NP_SPLIT_OUT2TO0
     #pragma HLS INLINE off
     #pragma HLS PIPELINE II=1
+#else
+    #pragma HLS INLINE
+#endif
     #pragma HLS ARRAY_PARTITION variable=R complete dim=0
     #pragma HLS ARRAY_PARTITION variable=Rp complete dim=0
     #pragma HLS ARRAY_PARTITION variable=w2_2to0 complete dim=0

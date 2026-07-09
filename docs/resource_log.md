@@ -62,6 +62,22 @@ reports in `reports/csynth_{monolith,split}.rpt`):
 | | ├ np_out2to0 | 1 | 0 | 85 | 0 | 1 | negligible |
 | | └ top residual | 0 | 46,773 | 16,672 | — | — | inter-stage boundary registers (FF) + nobjmask/glue (LUT) — this is most of the split overhead |
 
+### Stage-isolation runs (`split_only=<stage>`, one boundary per run)
+
+Marginal per-stage costs measured with the other five stages inlined (monolith
+context); see `FUNCTION_SPLIT.md` "Stage isolation". Baseline = monolith row
+above (1347 / 63,343 / 229,779, 14 cyc). All six configs verified byte-identical
+csim 2026-07-09. Fill from `nPELICAN_split_<stage>_prj/solution/syn/report/csynth.rpt`:
+
+| stage isolated | stage DSP | stage FF | stage LUT | run total DSP/FF/LUT | latency (cyc) | boundary overhead (total − baseline) |
+|----------------|-----------|----------|-----------|----------------------|---------------|--------------------------------------|
+| dots    | TBD | TBD | TBD | TBD | TBD | TBD |
+| bn1     | TBD | TBD | TBD | TBD | TBD | TBD |
+| agg2to2 | TBD | TBD | TBD | TBD | TBD | TBD |
+| eq2to2  | TBD | TBD | TBD | TBD | TBD | TBD |
+| agg2to0 | TBD | TBD | TBD | TBD | TBD | TBD |
+| out2to0 | TBD | TBD | TBD | TBD | TBD | TBD |
+
 Reading guide: per-stage DSP sums exactly to the split top (1012+0+23+529+14+1=1579),
 so DSP attribution is clean. The split's overhead is NOT inside the stages: ~47k of the
 +45k FF delta is the *top residual* (each non-inlined boundary registers its wide

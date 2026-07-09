@@ -73,6 +73,39 @@ and the printed gate summaries between the two: they must be **byte-identical**
 all means the split drifted from the monolith and the monolith wins).
 Verified identical on 2026-07-03 (200 golden events + 10k legacy flow).
 
+## Stage isolation — one-boundary-at-a-time marginal costs
+
+The full split measures every stage in a degraded context: all six boundaries
+exist at once, so per-stage numbers include lost cross-boundary sharing (e.g.
+np_eq2to2 reported 529 DSP in the full split vs ~335 total non-dot DSP implied
+by the monolith), and the aggregate overhead (+232 DSP / +45k FF / +8 cyc on
+2026-07-07) cannot be attributed to a specific boundary.
+
+`split_only=<stage>` fixes both: ONLY the named stage stays a function; the
+other five are force-inlined back into the top (preprocessor-selected
+`INLINE off` vs `INLINE` — the code, and therefore csim output, is identical
+in every configuration; verified byte-identical for all six on 2026-07-09).
+Each run then yields two clean numbers against `reports/csynth_monolith.rpt`:
+
+- the stage's `grp_np_<stage>` row = its **true marginal cost** with the rest
+  of the design still globally optimized (the number to quote per component);
+- run total − monolith baseline = that **one boundary's overhead**
+  (boundary registers + lost sharing + added latency cycles).
+
+```bash
+# per stage (own project dir nPELICAN_split_<stage>_prj — reports accumulate):
+vitis_hls -f build_prj.tcl reset=1 csim=0 cosim=0 validation=0 export=0 vsynth=0 split_only=dots
+# stages: dots  bn1  agg2to2  eq2to2  agg2to0  out2to0
+```
+
+Run these WITHOUT `const_beams`/`mac_dsp` so they stay comparable to the
+monolith baseline. Priority if synth time is scarce — the 3-run reduced set
+{dots, eq2to2, bn1} covers ~90% of LUT and ~97% of DSP; the aggregation and
+output stages are refinements. Record results in the isolation table in
+`resource_log.md`. (This is the cumulative-splitting idea from review,
+strengthened: isolating one stage per run makes each measurement independent
+of the order in which boundaries are introduced.)
+
 ## Resource-overhead watchlist (why splitting can cost resources)
 
 The known mechanisms by which "same design, more functions" inflates HLS

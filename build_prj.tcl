@@ -11,6 +11,7 @@ array set opt {
     vsynth     1
     fifo_opt   0
     split      0
+    split_only 0
     const_beams 0
     mac_dsp    0
 }
@@ -149,6 +150,23 @@ file mkdir tb_data
 set CSIM_RESULTS "./tb_data/csim_results.log"
 set RTL_COSIM_RESULTS "./tb_data/rtl_cosim_results.log"
 
+# split_only=<stage>: stage-ISOLATION build (one-boundary-at-a-time marginal
+# costs, see docs/FUNCTION_SPLIT.md): only the named stage stays a function,
+# the other five are force-inlined back into the top. Implies split=1; each
+# stage gets its own project dir (nPELICAN_split_<stage>_prj) so the reports
+# accumulate side by side. Run WITHOUT the lever flags to stay comparable to
+# the monolith baseline report.
+set split_only_stage ""
+if {$opt(split_only) ne "0"} {
+    set valid_stages {dots bn1 agg2to2 eq2to2 agg2to0 out2to0}
+    if {[lsearch -exact $valid_stages $opt(split_only)] < 0} {
+        puts "ERROR: split_only=$opt(split_only) invalid; must be one of: $valid_stages"
+        exit 1
+    }
+    set split_only_stage $opt(split_only)
+    set opt(split) 1
+}
+
 # split=1: synthesize firmware/nPELICAN_split.cpp instead — same top function,
 # datapath split into per-stage functions (INLINE off) so the csynth report
 # attributes resources/latency per stage (grp_np_* instances). Uses its own
@@ -157,7 +175,11 @@ set RTL_COSIM_RESULTS "./tb_data/rtl_cosim_results.log"
 # plumbing assumes the monolith project dir, so they are forced off here.
 if {$opt(split)} {
     set src_file firmware/${project_name}_split.cpp
-    set prj_dir  ${project_name}_split_prj
+    if {$split_only_stage ne ""} {
+        set prj_dir ${project_name}_split_${split_only_stage}_prj
+    } else {
+        set prj_dir ${project_name}_split_prj
+    }
     foreach o {cosim validation export vsynth} {
         if {$opt($o)} {
             puts "INFO: split=1 supports csim+synth only; disabling $o"
@@ -180,6 +202,9 @@ if {$opt(split)} {
 set fw_cflags "-std=c++0x"
 if {$opt(const_beams)} { append fw_cflags " -DNPELICAN_CONST_BEAMS" }
 if {$opt(mac_dsp)}     { append fw_cflags " -DNPELICAN_MAC_DSP" }
+if {$split_only_stage ne ""} {
+    append fw_cflags " -DNPELICAN_SPLIT_ONLY_[string toupper $split_only_stage]"
+}
 
 if {$opt(reset)} {
     open_project -reset ${prj_dir}
