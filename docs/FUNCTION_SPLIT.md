@@ -45,7 +45,16 @@ vitis_hls -f build_prj.tcl split=1 reset=1        # csim + csynth
 This uses its own project dir `nPELICAN_split_prj` (the monolith's
 `nPELICAN_prj` reports are never touched). `split=1` supports `csim`/`synth`
 only; `cosim`/`validation`/`export`/`vsynth` are forced off (their tcl plumbing
-assumes the monolith project dir — extend if ever needed).
+assumes the monolith project dir). For a split **Vivado synthesis** run, use the
+standalone tcl instead (after `split=1 synth=1` has produced the RTL):
+
+```bash
+vivado -mode batch -source vivado_synth_split.tcl   # → vivado_synth_split.rpt
+```
+
+It reads `nPELICAN_split_prj/solution/syn/vhdl` and writes the utilization
+report next to the monolith's `vivado_synth.rpt` (from `vsynth=1`). Archived
+results: `reports/vsynth_{monolith,split}.rpt`, analyzed in `resource_log.md`.
 
 The resource-lever build flags apply to BOTH builds (`RESOURCE_REDUCTION_LEVERS.md`
 Levers 5/6): `const_beams=1` (constant beam spurions, `-DNPELICAN_CONST_BEAMS`)
@@ -79,7 +88,11 @@ The full split measures every stage in a degraded context: all six boundaries
 exist at once, so per-stage numbers include lost cross-boundary sharing (e.g.
 np_eq2to2 reported 529 DSP in the full split vs ~335 total non-dot DSP implied
 by the monolith), and the aggregate overhead (+232 DSP / +45k FF / +8 cyc on
-2026-07-07) cannot be attributed to a specific boundary.
+2026-07-07) cannot be attributed to a specific boundary. Vivado synthesis
+(2026-07-09, `reports/vsynth_*.rpt`) confirmed the +232 DSP overhead exactly at
+the netlist level and the FF overhead ratio (+72%), while the LUT overhead
+shrinks to +10.6% after real synthesis — see `resource_log.md` for the
+csynth-vs-vsynth calibration.
 
 `split_only=<stage>` fixes both: ONLY the named stage stays a function; the
 other five are force-inlined back into the top (preprocessor-selected

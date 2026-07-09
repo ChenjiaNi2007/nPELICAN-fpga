@@ -87,6 +87,53 @@ the BN1/basis/MAC boundary; the split maps more uniform `mac_muladd_6s_4ns_12s` 
 **Use the split for proportions (where to optimize); use the monolith for real totals
 (what to ship). Throughput is unaffected (II=1 in both).**
 
+## Vivado post-synthesis (vsynth) — netlist-level ground truth
+
+`report_utilization` after `synth_design` (Vivado 2023.2), both builds from the same
+weights.h as the 2026-07-07 csynth rows. Reports archived at
+`reports/vsynth_{monolith,split}.rpt`. Monolith via `build_prj.tcl vsynth=1`; split via
+`vivado -mode batch -source vivado_synth_split.tcl` (build_prj.tcl force-disables vsynth
+for `split=1`). Part caveat: these ran on `xcu250-figd2104-2L-e` (remote project.tcl was
+edited), repo project.tcl says `xcvu13p-flga2577-2-e` — the U250 is the same VU13P
+silicon (identical LUT/FF/DSP/BRAM/URAM totals), so counts are directly comparable.
+
+| build (2026-07-09) | LUT | FF | DSP | CARRY8 | SRL | BRAM |
+|--------------------|-----|----|-----|--------|-----|------|
+| monolith | 69,735 (4.04%) | 25,142 (0.73%) | 1,343 (10.9%) | 6,929 | 25 | 0 |
+| split | 77,157 (4.47%) | 43,238 (1.25%) | 1,575 (12.8%) | 7,096 | 3,695 | 0 |
+| Δ split−mono | **+7,422 (+10.6%)** | **+18,096 (+72%)** | **+232 (+17.3%)** | +167 | +3,670 | 0 |
+
+### csynth estimate vs vsynth actual — calibration
+
+| metric | csynth mono | vsynth mono | actual/est | csynth split | vsynth split | actual/est |
+|--------|-------------|-------------|------------|--------------|--------------|------------|
+| DSP | 1,347 | 1,343 | **1.00** | 1,579 | 1,575 | **1.00** |
+| FF  | 63,343 | 25,142 | 0.40 | 108,786 | 43,238 | 0.40 |
+| LUT | 229,779 | 69,735 | 0.30 | 292,033 | 77,157 | 0.26 |
+
+Takeaways:
+
+- **DSP: csynth is exact** (−4 in both builds, identically). Trust csynth DSP numbers
+  as-is, including the split's per-stage attribution (1012 dots floor etc.) and the
+  +232 lost-sharing overhead — that overhead is real silicon, not an estimation artifact.
+- **LUT/FF: csynth overestimates ~3.3× / ~2.5×**, consistently across both builds. Real
+  monolith footprint is ~70k LUT / 25k FF — comfortably inside one SLR (432k LUT). The
+  levers' csynth *proportions* (np_eq2to2 ≈ 51% of LUT) remain the right optimization
+  guide, but absolute LUT pressure is far lower than csynth implied. The DSP count
+  (10.9% of device, 44% of one SLR) is now clearly the binding metric, as assumed.
+- **Split overhead at the netlist**: FF overhead stays +72% (same ratio as csynth —
+  boundary registers are real registers and survive optimization), while LUT overhead
+  collapses from +27% (csynth) to +10.6% (Vivado sweeps most of the boundary glue).
+  The split's +3,670 SRL16E are inter-stage pipeline delays retimed into shift
+  registers (the +8 latency cycles × wide buses). Conclusion unchanged and now
+  netlist-confirmed: **split for attribution, monolith for shipping**.
+- Ignore the IOB row (1604/676 = 237%): `synth_design` ran non-out-of-context, so every
+  top-level port maps to a pad. Add `-mode out_of_context` to the vivado_synth tcl if a
+  pad-free report is ever needed. Both reports are Design State = Synthesized; final
+  LUT after opt_design/impl is typically lower still.
+- These are utilization-only runs (no XDC/timing in the report); timing status remains
+  the csynth estimate (II=1, slack −0.02 ns at 5 ns).
+
 ## Phase 2 bit-exactness — interpretation
 
 Zero-tolerance 200/200 csim vs the PyTorch quant logits is **not achievable for this
