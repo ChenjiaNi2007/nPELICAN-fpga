@@ -1,0 +1,41 @@
+events: 10000, masked off-diagonal dots (i<j): 2279978
+non-positive dots (massless d_ii excluded already): 3626 (0.159%)
+min positive: 2.049e-08 (2^-25.5)   max: 1.145e+04 (2^13.5)
+dynamic range: 39.0 octaves
+
+percentile      value        log2
+     0.10%     0.00012207    -13.00
+     1.00%       0.013306     -6.23
+     5.00%       0.084275     -3.57
+    25.00%         1.0476      0.07
+    50.00%         6.6991      2.74
+    75.00%         29.326      4.87
+    95.00%         162.89      7.35
+    99.00%         456.78      8.84
+    99.90%         1279.4     10.32
+    99.99%         2526.3     11.30
+
+current input_t = ap_fixed<24,12>: saturates at 2048 (2^11), LSB 2^-12
+  fraction saturating (>= 2^11): 0.0227%
+  fraction rounding to zero (< 2^-11 ulp): 0.0962%
+  fraction of dots >= 2^8: 2.6490%
+  fraction of dots >= 2^9: 0.8083%
+  fraction of dots >= 2^10: 0.1775%
+  fraction of dots >= 2^11: 0.0227%
+  fraction of dots >= 2^12: 0.0009%
+  fraction of dots >= 2^13: 0.0000%
+  fraction of dots >= 2^14: 0.0000%
+  fraction of dots >= 2^15: 0.0000%
+
+         beam-beam: n=   10000  median=         2  p99.9=         2  max=         2
+     beam-particle: n=  396728  median=     14.29  p99.9=      1168  max=      3429
+ particle-particle: n= 1869624  median=      5.01  p99.9=      1306  max= 1.145e+04
+
+tail structure (dots >= 2^11 = 2048):
+  saturating dots: 517 across 443 events (4.43% of events)
+  dots/affected event: median 1, max 5
+  pairs involving a beam: 45 (8.7%)
+  fraction with lower-index constituent rank <= 0: 92.5%
+  fraction with lower-index constituent rank <= 1: 99.2%
+  fraction with lower-index constituent rank <= 2: 100.0%
+  fraction with lower-index constituent rank <= 3: 100.0%
