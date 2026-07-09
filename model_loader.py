@@ -43,6 +43,11 @@ parser.add_argument('--weight-bit-width', type=int, default=None,
                     help='Override bit width (default: read from checkpoint args)')
 parser.add_argument('--act-bit-width', type=int, default=None)
 parser.add_argument('--input-bit-width', type=int, default=None)
+parser.add_argument('--pmu-bit-width', type=int, default=None,
+                    help='Override momentum-quantizer (pmu_quant) bit width for checkpoints '
+                         'trained with --pmu-bit-width (default: read from checkpoint args). '
+                         'When present, input_t is the TRAINED momentum grid and both the '
+                         'analytic width bound and --max-input-bits are bypassed.')
 parser.add_argument('--no-po2', action='store_true',
                     help='Set if trained WITHOUT --po2-scales')
 parser.add_argument('--split-types', action='store_true', default=False,
@@ -263,9 +268,18 @@ def _extract_quant_weights():
     abw = args.act_bit_width    or _arg('act_bit_width', 24)
     ibw = args.input_bit_width  or _arg('input_bit_width', 24)
     po2 = (not args.no_po2) if margs is None else _arg('po2_scales', not args.no_po2)
+    pbw = args.pmu_bit_width if args.pmu_bit_width is not None else _arg('pmu_bit_width', None)
+    if pbw is None and any(k.startswith('pmu_quant.') for k in sd):
+        sys.exit('ERROR: checkpoint has pmu_quant keys (trained momentum quantizer) but no '
+                 'recorded bit width; pass --pmu-bit-width matching the training flag.')
 
-    qcfg = QuantConfig(enabled=True, weight_bit_width=wbw, act_bit_width=abw,
-                       input_bit_width=ibw, po2_scales=po2)
+    qkw = dict(enabled=True, weight_bit_width=wbw, act_bit_width=abw,
+               input_bit_width=ibw, po2_scales=po2)
+    if pbw is not None:
+        # only when set, so the loader still works against an older PELICAN-nano
+        # checkout whose QuantConfig has no pmu_bit_width field
+        qkw['pmu_bit_width'] = pbw
+    qcfg = QuantConfig(**qkw)
 
     def _build():
         return PELICANNano(NHIDDEN, quant_config=qcfg,
@@ -289,7 +303,8 @@ def _extract_quant_weights():
         if act_info is None:
             sys.exit('ERROR: act-quantizer scales still uninitialized after calibration.')
 
-    print(f'\nQuant config: weight/act/input bits = {wbw}/{abw}/{ibw}, po2={po2}')
+    print(f'\nQuant config: weight/act/input bits = {wbw}/{abw}/{ibw}, '
+          f'pmu={pbw if pbw is not None else "off"}, po2={po2}')
     print('QuantLinear weight scales:')
     qw1 = model.net2to2.eq_layers[0].mixing.quant_weight()
     qw2 = model.agg_2to0.mixing.quant_weight()
@@ -390,32 +405,48 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     #      F therefore tracks the dot_t grid: coarser dots (lower QAT bits) -> smaller F
     #      -> narrower input_t -> each 36x36 dot multiply shrinks (4 DSP -> fewer/1 DSP).
     pmax = _momentum_absmax(args.repo)
-    INPUT_I = _int_bits(pmax)
-    # Floor at 0: a very coarse dot grid (dot_F <= -(Pbits+3)) genuinely needs no
-    # fractional momentum bits, but ap_fixed requires F >= 0 (W >= I).
-    INPUT_F = max(0, int(math.ceil(math.log2(pmax))) + dot_F + 3)
-    INPUT_W = INPUT_I + INPUT_F
+    pmu = act.get('pmu_quant')
+    if pmu is not None:
+        # --- Phase A* (INPUT_WIDTH_RETRAIN_PLAN.md): the momentum grid was TRAINED
+        # (QuantIdentity on Pmu before dot4). input_t IS that learned grid: PyTorch
+        # and the firmware quantize momenta identically, so dots are bit-exact by
+        # construction — the analytic headroom bound and the Lever-2 cap don't apply.
+        if not pmu['signed']:
+            sys.exit('ERROR: pmu_quant is unsigned; momenta need a signed type.')
+        INPUT_W, INPUT_I, _, INPUT_k = _pt(pmu['scale'], pmu['signed'], pmu['bits'], 'pmu_quant')
+        INPUT_F = INPUT_W - INPUT_I
+        print(f'  (input_t from TRAINED pmu_quant: W={INPUT_W}, I={INPUT_I}, '
+              f'clip ±2^{INPUT_I - 1} vs |p|max={pmax:.1f} in sample, '
+              f'momentum LSB = 2^{-INPUT_F:+d} GeV)')
+        if args.max_input_bits is not None:
+            print('  (--max-input-bits IGNORED: input_t comes from the trained pmu_quant grid)')
+    else:
+        INPUT_I = _int_bits(pmax)
+        # Floor at 0: a very coarse dot grid (dot_F <= -(Pbits+3)) genuinely needs no
+        # fractional momentum bits, but ap_fixed requires F >= 0 (W >= I).
+        INPUT_F = max(0, int(math.ceil(math.log2(pmax))) + dot_F + 3)
+        INPUT_W = INPUT_I + INPUT_F
 
-    # --- Lever 2: optional cap on input_t width (--max-input-bits). Trades dot4
-    # front-end precision for DSP (a narrower mul_NsNs, e.g. <=18 -> 1 DSP). Only
-    # INPUT_F is shaved (INPUT_I/range preserved so momenta never saturate); the
-    # dots then round to dot_t slightly differently from PyTorch on some events,
-    # which the online golden tolerance gate must re-validate. No-op if the cap is
-    # >= the bit-exact width.
-    if args.max_input_bits is not None and args.max_input_bits < INPUT_W:
-        if args.max_input_bits < 2:
-            sys.exit(f'ERROR: --max-input-bits={args.max_input_bits} < 2; need at least '
-                     f'sign + 1 magnitude bit.')
-        # Caps <= INPUT_I are allowed: INPUT_I (range) is ALWAYS preserved so momenta
-        # never saturate, and F goes NEGATIVE (ap_fixed permits I > W; e.g. <10,12>
-        # stores multiples of 2^2 = 4 GeV). A negative-F cap is hardware-identical to
-        # "divide momenta by 2^-F and feed a W-bit integer" — the binary point is free.
-        capped_F = args.max_input_bits - INPUT_I
-        print(f'  (input_t Lever-2 cap: width {INPUT_W} -> {args.max_input_bits}, '
-              f'F {INPUT_F} -> {capped_F}; momentum LSB = 2^{-capped_F:+d} GeV; '
-              f'bit-exact dots NOT guaranteed — re-check gate)')
-        INPUT_F = capped_F
-        INPUT_W = args.max_input_bits
+        # --- Lever 2: optional cap on input_t width (--max-input-bits). Trades dot4
+        # front-end precision for DSP (a narrower mul_NsNs, e.g. <=18 -> 1 DSP). Only
+        # INPUT_F is shaved (INPUT_I/range preserved so momenta never saturate); the
+        # dots then round to dot_t slightly differently from PyTorch on some events,
+        # which the online golden tolerance gate must re-validate. No-op if the cap is
+        # >= the bit-exact width.
+        if args.max_input_bits is not None and args.max_input_bits < INPUT_W:
+            if args.max_input_bits < 2:
+                sys.exit(f'ERROR: --max-input-bits={args.max_input_bits} < 2; need at least '
+                         f'sign + 1 magnitude bit.')
+            # Caps <= INPUT_I are allowed: INPUT_I (range) is ALWAYS preserved so momenta
+            # never saturate, and F goes NEGATIVE (ap_fixed permits I > W; e.g. <10,12>
+            # stores multiples of 2^2 = 4 GeV). A negative-F cap is hardware-identical to
+            # "divide momenta by 2^-F and feed a W-bit integer" — the binary point is free.
+            capped_F = args.max_input_bits - INPUT_I
+            print(f'  (input_t Lever-2 cap: width {INPUT_W} -> {args.max_input_bits}, '
+                  f'F {INPUT_F} -> {capped_F}; momentum LSB = 2^{-capped_F:+d} GeV; '
+                  f'bit-exact dots NOT guaranteed — re-check gate)')
+            INPUT_F = capped_F
+            INPUT_W = args.max_input_bits
 
     bias_max = float(max(abs(np.asarray(b1)).max(), abs(np.asarray(b1d)).max(), abs(np.asarray(b2)).max()))
     # b1,b1_diag are added in the 2->2 MAC then quantized to the relu grid; b2 in the 2->0
@@ -538,15 +569,27 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     L.append(_pt_line('w2_gen_t', w2_W,   w2_I,   w2_s,   wgt['agg_2to0']['scale'], w2_k, '2->0 weights'))
     L.append('')
     L.append('// ---- Raw-momentum / IO interface type (input_t): operand of the dot4')
-    L.append('//      multipliers (36x36 today) that dominate DSP. NOT a learned quantizer;')
-    L.append('//      input_quant grids the DOTS (dot_t). I = physics |p| range (flag-')
-    L.append('//      independent); F = ceil(log2|p|max) + dot_F + 3 so the dot4 product error')
-    L.append('//      stays < 1/2 dot_t LSB (bit-exact dots). F tracks the dot grid, so lower')
-    L.append('//      QAT bits -> smaller F -> narrower input_t -> cheaper dot multipliers.')
+    if pmu is not None:
+        L.append('//      multipliers. TRAINED grid (Phase A*): pmu_quant = QuantIdentity on Pmu')
+        L.append('//      before dot4, learned po2 scale. PyTorch and firmware grid the momenta')
+        L.append('//      identically, so dots are bit-exact by construction (no analytic bound,')
+        L.append('//      no Lever-2 cap). Leading |p| above the clip point saturates BY DESIGN;')
+        L.append('//      the model was trained through that clipping.')
+    else:
+        L.append('//      multipliers (36x36 today) that dominate DSP. NOT a learned quantizer;')
+        L.append('//      input_quant grids the DOTS (dot_t). I = physics |p| range (flag-')
+        L.append('//      independent); F = ceil(log2|p|max) + dot_F + 3 so the dot4 product error')
+        L.append('//      stays < 1/2 dot_t LSB (bit-exact dots). F tracks the dot grid, so lower')
+        L.append('//      QAT bits -> smaller F -> narrower input_t -> cheaper dot multipliers.')
     L.append('//      Guard macro lets nPELICAN.h keep a hand fallback for the float path.')
     L.append('#define NPELICAN_INPUT_T_GENERATED 1')
-    L.append(f'typedef ap_fixed<{INPUT_W}, {INPUT_I}, AP_RND_CONV, AP_SAT> input_t;'
-             f'  // raw momenta; |p|max={pmax:.1f} (I={INPUT_I}), F={INPUT_F} (dot_F={dot_F})')
+    if pmu is not None:
+        L.append(f'typedef ap_fixed<{INPUT_W}, {INPUT_I}, AP_RND_CONV, AP_SAT> input_t;'
+                 f'  // raw momenta; TRAINED pmu_quant grid (I={INPUT_I}, F={INPUT_F}); '
+                 f'|p|max={pmax:.1f}')
+    else:
+        L.append(f'typedef ap_fixed<{INPUT_W}, {INPUT_I}, AP_RND_CONV, AP_SAT> input_t;'
+                 f'  // raw momenta; |p|max={pmax:.1f} (I={INPUT_I}), F={INPUT_F} (dot_F={dot_F})')
     L.append('')
     L.append('// ---- Float-trained biases / BatchNorm constants / normalization constants ----')
     L.append('// These are NOT PyTorch quantization points (PyTorch keeps them in float), so')

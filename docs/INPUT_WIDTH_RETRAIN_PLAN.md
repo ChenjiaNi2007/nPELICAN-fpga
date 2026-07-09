@@ -1,9 +1,10 @@
 # Input-width retrain plan: spend freed headroom on finer fractional resolution
 
-Status: REVISED 2026-07-09 after review — the original Phase A (sweep
-`--input-bit-width`) targets the DOT grid, which existing w6a6i6 runs already
-prove tolerant down to 6 bits. The genuinely open experiment is the MOMENTUM
-grid (`input_t`), which today exists only at export time. See "Two widths".
+Status: Phase A* IMPLEMENTED 2026-07-09 (PELICAN-nano `--pmu-bit-width` +
+loader support; smoke-validated end to end, see Phase A* section). Full-dataset
+sweep owed. Original Phase A (sweep `--input-bit-width`) targeted the DOT grid,
+which existing w6a6i6 runs already prove tolerant down to 6 bits. See "Two
+widths".
 Companion analysis: `analysis/dot_scales.py` → `analysis/out/`. Resource
 context: `docs/RESOURCE_REDUCTION_LEVERS.md` (Lever 2).
 
@@ -67,6 +68,26 @@ grid in the loop:
 4. **Sweep** `--pmu-bit-width` ∈ {18, 16, 14, 12, 10} at the known-good
    production quant settings (w6a6i6), fixed seed, full dataset. 18 first as a
    sanity anchor (should match the current 18-bit operating point's AUC).
+
+**Implementation status (2026-07-09): steps 1–3 DONE.**
+`QuantConfig.pmu_bit_width` / `--pmu-bit-width` (train, check_scales,
+export_golden — old checkpoints unaffected, field defaults None), loader reads
+the trained grid (auto-detects from ckpt args, `--pmu-bit-width` override,
+`--max-input-bits` ignored with a notice when present). 48/48 tests pass incl.
+new `tests/test_pmu_quant.py`; loader output byte-identical on non-pmu
+checkpoints (gated vs git HEAD). Sweep runner:
+
+```bash
+cd PELICAN-nano
+bash scripts/sweep_pmu_width.sh          # sample_data smoke, CPU
+DATADIR=<full-dataset-dir> EPOCHS=35 DEVICE="--cuda --no-reproducible" \
+    bash scripts/sweep_pmu_width.sh      # full Phase A* sweep
+```
+
+Smoke result (pmu=14 @ w6a6i6, sample_data, 8 ep, CPU): learned pmu scale
+2^-3 → `input_t = ap_fixed<14,11>` (clip ±1024 vs |p|max≈1947, LSB 0.125 GeV),
+test AUC 0.9005 vs 0.9036 no-pmu baseline. Loader + export_golden verified on
+that checkpoint (`model/fpga_model_qat_w6a6i6p14_best.pt`).
 
 Per width record: AUC (float + current baselines alongside), learned pmu scale
 k (extend `scripts/check_scales.py` — it walks QuantIdentity modules, so the
