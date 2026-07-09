@@ -1,141 +1,122 @@
 # Input-width retrain plan: spend freed headroom on finer fractional resolution
 
-Status: Phase A ready to run (2026-07-09). Companion analysis:
-`analysis/dot_scales.py` → `analysis/out/` (dot-product scale distribution,
-bits-needed plots, `dot_scales_summary.txt`). Resource context:
-`docs/RESOURCE_REDUCTION_LEVERS.md` (Lever 2 = post-hoc `--max-input-bits` cap).
+Status: REVISED 2026-07-09 after review — the original Phase A (sweep
+`--input-bit-width`) targets the DOT grid, which existing w6a6i6 runs already
+prove tolerant down to 6 bits. The genuinely open experiment is the MOMENTUM
+grid (`input_t`), which today exists only at export time. See "Two widths".
+Companion analysis: `analysis/dot_scales.py` → `analysis/out/`. Resource
+context: `docs/RESOURCE_REDUCTION_LEVERS.md` (Lever 2).
 
-## Motivation (measured on tb_data/10k_pmu_test.dat, 2026-07-09)
+## Two widths — do not conflate them
 
-The masked off-diagonal dot products d_ij (top-20 constituents + massless beams,
-float32) span 2^-25.5 → 2^13.5, median 6.7, p99.9 = 1279. Against the current
-`input_quant`-derived dot grid `ap_fixed<24,12>` (clip 2^11, LSB 2^-12):
+| | training knob | firmware type | what it grids | resource role |
+|---|---|---|---|---|
+| dot grid | `--input-bit-width` (Brevitas `input_quant`, learned po2 scale) | `dot_t` | the dot products d_ij | minor (post-dot datapath) |
+| momentum grid | **none today** — only export-time cap `--max-input-bits` | `input_t` | raw 4-momenta, the dot4 multiplier operands | **major** (dot4 mults dominate DSP/LUT) |
 
-- only **0.023%** of dots exceed the clip point (517 dots across 443 of 10k events,
-  median 1 per affected event);
-- **92.5%** of those saturating pairs involve the leading (highest-energy)
-  constituent, **99.2%** involve rank ≤ 1.
+`input_t` is NOT a learned quantizer. The loader widens it analytically
+(`model_loader.py` ~382–397): `INPUT_I = int_bits(|p|max)` (physics range),
+`INPUT_F = ceil(log2|p|max) + dot_F + 3` — the F needed so momentum rounding
+never moves a firmware dot off the PyTorch-float dot's grid point (bit-exact
+contract). `--max-input-bits` shaves that F **post-hoc, no retraining by
+construction**: the golden sweep cliffed at ~14 bits and collapsed ≤12
+(momentum-grid drift + beams ±1 unrepresentable at negative F).
 
-The high tail is a handful of leading-constituent pairs. If the task tolerates
-clipping them, integer headroom can be re-spent on fractional resolution for the
-bulk — or the total width cut.
+## Facts established so far (2026-07-09)
 
-## Reframing: why "divide by C and retrain" must be run as a width/scale sweep
+- Dot distribution (10k events, masked i<j, float32): span 2^-25.5→2^13.5,
+  median 6.7, p99.9 = 1279. CCDF: ≥2^11 0.023%, ≥2^10 0.18%, ≥2^9 0.81%,
+  ≥2^8 2.6%, ≥2^7 ≈5%, ≥2^5 ≈25%. Saturating pairs are 99.2% rank ≤1
+  (leading constituents). `analysis/out/dot_scales_summary.txt`.
+- **Dot grid is cheap (already proven by training runs):** w6a6i6 checkpoint's
+  6-bit input_quant learned scale 4 = 2^+2 → grid step 4, clip 2^7 = 128,
+  ~5% of dots clipped — AUC held. The professor's hypothesis (clip the tail,
+  keep the bulk coarse) is CONFIRMED at the dot level.
+- Phase A smoke (w24a24i14, sample_data, 8 ep): learned scale 2^-1, clip 2^12,
+  test AUC 0.9007 vs 0.9036 baseline. Consistent: retrained dot-width is a
+  solved axis. Sweep runner `PELICAN-nano/scripts/sweep_input_width.sh` kept
+  for reference/reproduction, but this axis is NOT the priority.
+- Momentum rescaling (divide by 2^s) is width-invariant with a learned/derived
+  scale — pure binary-point relabel, proven no-op (Lever 2 notes).
 
-The Brevitas input quantizer (`QuantIdentity` built on `Int8ActPerTensorFloat`
-with `RestrictValueType.POWER_OF_TWO`) has a **learned** scale: initialized from
-runtime percentile stats, then trained by gradient. Dividing all momenta by 2^k
-moves the distribution and the learned scale together — a pure binary-point
-relabel (already proven no-op for Lever 2). The two experiments that are NOT
-no-ops:
+## Phase A* — momentum quantizer in training (the real experiment)
 
-1. **Shrink the quantizer width W** (`--input-bit-width`) and retrain: the learned
-   po2 scale 2^-k re-places the clip point 2^(W-1-k), trading tail clipping
-   against bulk resolution, and the weights/BN adapt to the clipped dots.
-2. **Force the scale** (fixed k) at constant W: directly maps AUC vs clip
-   threshold, decoupled from resolution.
+Why: nothing in training currently sees the momentum grid, so `--max-input-bits`
+failures at ≤14 bits say nothing about what a RETRAINED model tolerates. Put the
+grid in the loop:
 
-The earlier ~14-bit cliff (RESOURCE_REDUCTION_LEVERS.md Lever 2 sweep) was
-post-hoc: 24-bit-trained model, scale frozen at 2^-12, bits shaved with no
-retraining. Retraining at low W is the untested regime.
+1. **Model change (PELICAN-nano):** add an optional Brevitas `QuantIdentity` on
+   the 4-momenta immediately before `dot4` in `PELICANNano.forward`
+   (`src/models/pelican_nano.py:100-102`), controlled by
+   `QuantConfig.pmu_bit_width: Optional[int] = None` + CLI `--pmu-bit-width`
+   (None = off, exact current behavior — float path and existing QAT
+   checkpoints unaffected). Per-tensor, signed, po2 scale. Learned scale is
+   fine (loader reads it); physics says it should land near
+   I = int_bits(|p|max) ≈ 12.
+   - Quantize BEFORE beams are dotted too — beams flow through the same
+     quantizer (they're part of Pmu after collate), matching firmware where
+     beams are input_t.
+   - Masking invariant: 0 must stay exactly representable (po2 grid ⇒ yes).
+2. **Golden export (PELICAN-nano `scripts/export_golden.py`):** goldens must
+   come from the pmu-quantized model so the bit-exact gate stays meaningful.
+3. **Loader (nPELICAN-fpga `model_loader.py`):** when the checkpoint has a pmu
+   quantizer, derive `input_t` W/I directly from its learned scale + width
+   (I = B−k), replacing the analytic `INPUT_F` bound and `--max-input-bits`.
+   The bit-exact contract becomes exact again: PyTorch and firmware now compute
+   dots from identically gridded momenta.
+4. **Sweep** `--pmu-bit-width` ∈ {18, 16, 14, 12, 10} at the known-good
+   production quant settings (w6a6i6), fixed seed, full dataset. 18 first as a
+   sanity anchor (should match the current 18-bit operating point's AUC).
 
-## Phase A — width sweep with retraining (zero code changes)
+Per width record: AUC (float + current baselines alongside), learned pmu scale
+k (extend `scripts/check_scales.py` — it walks QuantIdentity modules, so the
+new one appears automatically), fraction of momentum components clipped, and
+after export: golden gate pass + remote csynth LUT/FF/DSP.
 
-Sweep `--input-bit-width` at fixed weight/act width 24, otherwise the exact
-flags of the current firmware checkpoint `fpga_model_qat` (from
-`log/fpga_model_qat.log`). Runner:
+## What success buys (honest expectation)
 
-```bash
-cd PELICAN-nano
-bash scripts/sweep_input_width.sh                    # sample_data smoke, CPU
-# full run (cluster / GPU):
-DATADIR=<full-dataset-dir> EPOCHS=35 DEVICE="--cuda --no-reproducible" \
-    bash scripts/sweep_input_width.sh
-```
+Current operating point: input_t 18 → dot mults 1 DSP each (DSP48 threshold
+18). Retrained 14→12-bit momenta would shrink the 24×24→(capped 18×18) mults
+to 12×12: DSP count likely flat (already 1/mult) but **LUT/FF shrink across
+the whole dot front-end + BN1** (LUT is the binding resource, 53% SLR), and
+12×12 mults become candidates for LUT implementation, freeing ~840-1012 DSPs
+entirely if we choose to bind them there. If AUC holds at 10–12 bits where the
+post-hoc cap collapsed, that's the headline result: retraining moved the cliff.
 
-Checkpoints land at `model/fpga_model_qat_w24a24i<W>_best.pt`, logs at
-`log/fpga_model_qat_w24a24i<W>.log`. Per width record:
+## Phase B — forced-scale scan (unchanged, optional)
 
-| record | how |
-|---|---|
-| valid/test AUC | trainer log (script greps the tail) |
-| learned k (input_quant scale = 2^-k) | `scripts/check_scales.py` (script runs it) |
-| implied clip point 2^(W-1-k) | arithmetic |
-| predicted clipped fraction | CCDF table below / `analysis/out/dot_scales_summary.txt` |
+Decouple clip tolerance from resolution at the DOT level if ever needed:
+`QuantConfig.input_scale_exp` forcing `ScalingImplType.CONST`,
+`scaling_init = 2^(W-1-k)`. Largely superseded by the w6a6i6 evidence.
 
-Reference CCDF of the dots (predicted fraction clipped for a given clip point):
+## Phase C — structural fallback (unchanged)
 
-| clip at | 2^11 | 2^10 | 2^9 | 2^8 | 2^5 |
-|---|---|---|---|---|---|
-| clipped | 0.023% | 0.18% | 0.81% | 2.6% | ~25% |
-
-Sanity check: at W=14 a sensible learned optimum is k ≈ 3–5 (clip 2^9–2^10,
-grid 2^-3–2^-5 vs median dot 6.7). A wildly different learned k suggests the
-po2 log-domain scale learning plateaued, not physics — rerun with a different
-seed / init before drawing conclusions.
-
-Baselines needed for the AUC column: float model (no `--quant`) and the
-existing 24-bit QAT run, same data/epochs/seed.
-
-## Phase B — forced-scale scan (small code change; decouples clip from resolution)
-
-Add to `PELICAN-nano/src/layers/quant.py`:
-
-- `QuantConfig.input_scale_exp: Optional[int] = None`
-- In `make_act_quant`, when set: `scaling_impl_type = ScalingImplType.CONST`,
-  `scaling_init = 2.0 ** (bw - 1 - k)` (Brevitas scaling init is the clip
-  threshold; LSB 2^-k follows from the width).
-- CLI: `--input-scale-exp` in `src/trainer/args.py`, plumbed through
-  `train_pelican_nano.py`.
-
-Then at fixed W=24 force k ∈ {13, 14, 15, 16} (clip 2^10 → 2^7) and retrain.
-AUC flat down to clip ≈ 2^8–2^9 proves 2–3 integer bits are expendable,
-independent of width.
-
-## Firmware validation loop (per surviving checkpoint)
-
-1. `cd nPELICAN-fpga && python model_loader.py --model ../PELICAN-nano/model/<prefix>_best.pt --quant --repo ../PELICAN-nano`
-   — emits `weights/weights.h` + `types_generated.h`; the coarser learned dot
-   grid narrows `dot_t` and (via dot_F → INPUT_F) `input_t` automatically, no
-   Lever-2 cap needed.
-2. Regenerate golden vectors (`PELICAN-nano/scripts/export_golden.py`), run the
-   bit-exact C-sim gate.
-3. Remote csynth; compare vs baseline 1347 DSP / 230k LUT / 63k FF.
-
-Expected payoff, stated honestly: below the 18-bit input_t operating point the
-dot multipliers stay 1 DSP each (DSP48 packing threshold), so further gains are
-**LUT (the binding resource, 53% SLR) and FF**, plus the option of binding
-narrow mults to LUTs. The science deliverable is the AUC-vs-width curve WITH
-retraining: does the cliff move below 14, and how did each width spend its
-headroom (learned k)?
-
-## Phase C — structural fallback (only if uniform clipping hurts)
-
-Tail is 99% leading-constituent pairs → per-event po2 normalization by the
-leading energy's exponent (barrel shift, exactly representable). Changes the
-input distribution (needs its own retraining) and adds firmware shift logic.
-Reach for it only if Phases A/B show the tail carries signal.
+Per-event po2 normalization by leading-energy exponent (barrel shift). Only if
+uniform momentum clipping in Phase A* hurts; tail is 99% leading-constituent.
 
 ## Practicalities / gotchas
 
-- `--no-reproducible` required for QAT on **GPU** (Brevitas `torch.kthvalue`
-  has no deterministic CUDA kernel); CPU runs can keep `--reproducible`.
-- LR scheduler: `--lr-decay-type cos` needs `--num-epoch ≥ 8`.
-- Fix `--seed` across widths for comparability.
-- QAT checkpoint reload: `model.train(); model(batch)` before
-  `load_state_dict(strict=True)` (check_scales.py handles its own path).
-- Keep `--nobj 20` (firmware NPARTICLES), NOT the 80 used by the old full
-  PELICAN slurm job.
+- `--no-reproducible` for QAT on GPU (`torch.kthvalue` has no deterministic
+  CUDA kernel); CPU can keep `--reproducible`. `--lr-decay-type cos` needs
+  `--num-epoch ≥ 8`. Fix `--seed` across sweep points.
+- QAT reload: `model.train(); model(batch)` before `load_state_dict` when
+  building a fresh model around a checkpoint.
+- Keep `--nobj 20` (firmware NPARTICLES).
+- Float path must stay bit-for-bit unaffected when quant flags are off.
 
-## Results
+## Results — Phase A* (momentum width, at w6/a6/i6)
 
-| W (input) | learned k | clip 2^(W-1-k) | % clipped | valid AUC | test AUC | notes |
+| pmu W | learned k | momentum clip | AUC | golden gate | LUT / FF / DSP | notes |
 |---|---|---|---|---|---|---|
-| float |  |  |  |  |  | baseline |
-| 24 | 12 | 2^11 | 0.023% |  |  | current fpga_model_qat |
-| 20 |  |  |  |  |  |  |
-| 18 |  |  |  |  |  |  |
-| 16 |  |  |  |  |  |  |
-| 14 |  |  |  |  |  |  |
-| 12 |  |  |  |  |  |  |
-| 10 |  |  |  |  |  |  |
+| off (float pmu) | — | — | | n/a | 1347 DSP / 230k LUT baseline | current 18-cap operating point |
+| 18 | | | | | | sanity anchor |
+| 16 | | | | | | |
+| 14 | | | | | | post-hoc cliff was here |
+| 12 | | | | | | post-hoc collapse ≤ here |
+| 10 | | | | | | |
+
+## Appendix: original Phase A (dot-width sweep) — superseded
+
+Sweep `--input-bit-width` at w24/a24 via `scripts/sweep_input_width.sh`
+(env: WIDTHS/DATADIR/EPOCHS/DEVICE/SEED). Kept for reproduction; the w6a6i6
+production runs already answered this axis (6 bits OK, learned clip 2^7).
