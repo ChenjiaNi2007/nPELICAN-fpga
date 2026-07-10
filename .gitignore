@@ -9,3 +9,11 @@ tb_data/equiv_in_pmu.dat
 tb_data/equiv_in_nobj.dat
 tb_data/equiv_in_beams.dat
 tb_data/equiv_out_logits.dat
+# local g++ testbench binaries (build_local.sh / equivariance harness)
+tb_local_split
+tb_equiv_f
+tb_equiv_q
+# stray loader output at the default --out; the build reads firmware/weights/
+/weights/
+.DS_Store
+__pycache__/

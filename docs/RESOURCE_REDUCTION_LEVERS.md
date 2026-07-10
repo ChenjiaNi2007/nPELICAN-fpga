@@ -49,6 +49,19 @@ Current operating point: **`--max-input-bits 18`** (Lever 2) + BN2-collapse (Lev
 | LUT | **332,609 → 229,779** | **53% of one SLR (432000) — now the binding resource.** Per-stage: 51% of it is the 2→2 MAC (Lever 6), 16% dots, 13% BN1. |
 | Latency | 14 cycles / 70 ns, II=1 | fully pipelined; slack −0.02 ns (marginal) |
 
+⚠ **CORRECTION 2026-07-10 — the LUT numbers above are csynth ESTIMATES and are
+~3.3× pessimistic.** Vivado post-synth on this same baseline
+(`reports/vsynth_monolith.rpt`, Vivado 2023.2, xcu250): **69,735 LUT / 25,142 FF
+/ 1343 DSP** — i.e. 4.0% of the device's LUTs (16% of one 432k SLR, not 53%) and
+10.9% of DSPs. DSP estimates were accurate (1343 vs 1347); LUT/FF were not.
+Split-build vsynth (`reports/vsynth_split.rpt`): 77,157 LUT / 43,238 FF /
+1575 DSP — the split costs extra (function boundaries block cross-stage optim),
+use it for attribution RATIOS only. Consequence: "LUT is the binding resource"
+was an estimate artifact; at post-synth reality neither LUT nor DSP is near
+binding on xcu250. Relative csynth-to-csynth comparisons between levers remain
+valid; absolute headroom claims must use vsynth numbers. (Workspace-root
+`vivado_synth.rpt` is the DEEPSET design, 1.196M LUT — don't confuse.)
+
 **Per-stage attribution now exists** (2026-07-07): the split build
 (`firmware/nPELICAN_split.cpp`, `build_prj.tcl split=1`, see `FUNCTION_SPLIT.md`)
 reports each stage separately — dots 1012 DSP / 45.7k LUT, BN1 0 DSP / 38.0k LUT,
@@ -240,7 +253,19 @@ adder-tree LUT. Deployment never boosts the beams, so hardwire them back:
 - **Owed:** remote csynth with `const_beams=1` — expect ≈ −172 DSP in `np_dots`;
   log in `resource_log.md`.
 
-### Lever 6 — Rebalance LUT→DSP in the 2→2 MAC (`mac_dsp=1`)  ✓ IMPLEMENTED (csynth owed)
+### Lever 6 — Rebalance LUT→DSP in the 2→2 MAC (`mac_dsp=1`)  ✗ MEASURED 2026-07-10: DEAD
+
+Remote csynth (monolith, pmu-12 weights, `reset=1 mac_dsp=1`) is **byte-identical**
+to `mac_dsp=0`: 1173 DSP / 61,436 FF / 229,268 LUT / 14 cyc. This is the failure
+mode anticipated below: `w1_2to2` are compile-time literals in `weights.h`, so HLS
+strength-reduces every MAC multiply into shift-add trees during elaboration — by
+scheduling time there are **no `mul` ops left for BIND_OP to bind** (silent no-op;
+same reason `config_op mul -impl dsp` won't bite either). And the endgame was
+impossible anyway: the 2→2 MAC has 22·22·2·6 = **5808 constant multiplies**; at
+1 DSP each that's ~3× the whole SLR's remaining DSP budget (~1900 idle of 3072).
+**The LUT→DSP trade direction is dead for any constant-weight stage (this MAC,
+BN1, BN2) — don't re-attempt with pragmas.** The flag stays in the tcl/firmware
+as documentation; it is a no-op.
 LUT is now the binding resource (53% SLR vs DSP 44%), and the split report pins
 **51% of all LUT in `np_eq2to2`** (the 2→2 MAC's strength-reduced constant
 multiplies + adder trees, 148.6k). ~1700 DSPs sit idle — trade them:
@@ -282,11 +307,25 @@ multiplies + adder trees, 148.6k). ~1700 DSPs sit idle — trade them:
    2990→2150 (−840), LUT −17%. 16 gives no extra DSP (packing threshold). **Still
    owed: confirm the online golden gate at 18 and log it in `resource_log.md`.**
 3. ~~Lever 4~~ done & csynth-confirmed (2026-07-07): DSP 2150→1347, FF −48%, LUT −31%.
-4. **Now:** remote csynth for Lever 5 (`const_beams=1`, expect −172 DSP, free) and
-   the Lever 6 experiment (`split=1 mac_dsp=1`, LUT→DSP trade in `np_eq2to2`).
-   Both implemented and locally gated 2026-07-07.
-5. **If more LUT is needed after 5+6:** rank-1 factoring of the basis adder trees
-   (Lever 6 fallback), training-side sparsity on `w1_2to2` (each zeroed entry
-   deletes a 484-element term forest; currently 0/12 are zero), then the two big
-   decisions — Lever 3 (relax II=1, throughput cost) or fewer particles ((N+2)²
-   scaling on ~90% of LUT and ~97% of DSP, per the split report).
+4. ~~Lever 6~~ MEASURED DEAD 2026-07-10 (no-op; see section — constant mults have
+   no `mul` ops to bind, and 5808 mults ≫ DSP budget regardless). Lever 5
+   (`const_beams=1`) likely already absorbed by the pmu-12 retrain (−174 DSP ≈ the
+   172 beam-port cost); csynth it only if the DSP number matters.
+5. **Now — LUT levers that survive the Lever-6 lesson** (adder trees, not mults,
+   are the cost; only fewer TERMS or narrower OPERANDS shrink them):
+   a. **`w1_2to2` sparsity retrain** (PELICAN-nano, same pattern as the pmu sweep):
+      each zeroed entry deletes one 484-position mult-forest + adder-tree slice,
+      ~1/12 of the 148.6k eq2to2 LUT upper-bound per entry; currently 0/12 zero.
+   b. ~~Vivado reality check~~ DONE 2026-07-09/10 for the BASELINE build (see
+      CORRECTION box above: real LUT 69.7k, 3.3× below the csynth estimate;
+      neither resource near binding on xcu250). Still owed for the pmu-12
+      build (its vsynth would show the real pmu-12 LUT delta; monolith vsynth
+      DSP 1343 proves the existing reports predate pmu-12).
+   c. **Rank-1/structural factoring probe**: 4 of 6 basis channels are rank-≤1
+      (jdotp[j], jdotp[i], jmass, δ-terms) so only ~1104 of the 5808 products are
+      distinct — BUT fully-unrolled CSE may already share them (Lever-1 lesson)
+      and δ-zeros likely constant-fold. Cheap to test on the split build; expect
+      the adder trees (the real cost) to survive factoring.
+6. **The two big decisions, unchanged:** Lever 3 (relax II=1 — time-multiplexing
+   genuinely SHARES the adder trees, the only structural LUT fix) or fewer
+   particles ((N+2)² scaling on ~90% of LUT, ~97% of DSP, per the split report).

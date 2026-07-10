@@ -1,8 +1,9 @@
 # Input-width retrain plan: spend freed headroom on finer fractional resolution
 
-Status: Phase A* IMPLEMENTED 2026-07-09 (PELICAN-nano `--pmu-bit-width` +
-loader support; smoke-validated end to end, see Phase A* section). Full-dataset
-sweep owed. Original Phase A (sweep `--input-bit-width`) targeted the DOT grid,
+Status: Phase A* SWEEP DONE 2026-07-09 (full-dataset sweep {18,16,14,12,10}
+complete — retraining moved the cliff from 14 to below 12; see Results).
+Owed: clip-fraction measurement, golden gate + remote csynth per width.
+Original Phase A (sweep `--input-bit-width`) targeted the DOT grid,
 which existing w6a6i6 runs already prove tolerant down to 6 bits. See "Two
 widths".
 Companion analysis: `analysis/dot_scales.py` → `analysis/out/`. Resource
@@ -127,14 +128,68 @@ uniform momentum clipping in Phase A* hurts; tail is 99% leading-constituent.
 
 ## Results — Phase A* (momentum width, at w6/a6/i6)
 
-| pmu W | learned k | momentum clip | AUC | golden gate | LUT / FF / DSP | notes |
+Full-dataset sweep run 2026-07-09 (`scripts/sweep_pmu_width.sh`, checkpoints
+`model/fpga_model_qat_w6a6i6p<W>_best.pt`). AUC = best-checkpoint test AUC
+(that's what gets exported); learned k = pmu_quant fractional bits →
+`input_t = ap_fixed<W, W−k>`, clip ±2^(W−k−1). Momentum clip fraction not yet
+measured; golden gate + csynth owed per width.
+
+| pmu W | learned k | implied input_t (clip / LSB) | AUC | golden gate | LUT / FF / DSP | notes |
 |---|---|---|---|---|---|---|
-| off (float pmu) | — | — | | n/a | 1347 DSP / 230k LUT baseline | current 18-cap operating point |
-| 18 | | | | | | sanity anchor |
-| 16 | | | | | | |
-| 14 | | | | | | post-hoc cliff was here |
-| 12 | | | | | | post-hoc collapse ≤ here |
-| 10 | | | | | | |
+| off (float pmu) | — | analytic <18,12> (post-hoc cap) | — (not re-run this sweep) | n/a | 1347 DSP / 230k LUT baseline | current 18-cap operating point |
+| 18 | 7 | <18,11> (±1024 / 2⁻⁷) | 0.9568 | owed | owed | sanity anchor — matches operating point ✓; dot scale 2⁴; best ep 5 |
+| 16 | 5 | <16,11> (±1024 / 2⁻⁵) | **0.9592** | owed | owed | best of sweep; dot scale 2³; best ep 6 |
+| 14 | 4 | <14,10> (±512 / 2⁻⁴) | 0.9563 | owed | owed | post-hoc cliff was here — retrained it's free; dot scale 2³; best ep 6 |
+| 12 | 2 | <12,10> (±512 / 2⁻²) | 0.9519 | owed | 229.3k / 61.4k / 1173 (14 cyc, II=1) | post-hoc collapse ≤ here — retrained costs only ~0.005 AUC; dot scale 2⁴; best ep 3, final/best loss gap 0.295/0.274 (least stable run) |
+| 10 | 1 | <10,9> (±256 / 2⁻¹) | 0.9305 | owed | owed | real degradation — the retrained cliff is between 12 and 10 |
+
+### Analysis (2026-07-09)
+
+**Headline: retraining moved the cliff.** The post-hoc `--max-input-bits` cap
+cliffed at ~14 and collapsed ≤12; with the grid in the training loop, 14 bits
+is accuracy-free (0.9563, within noise of the 18-bit anchor 0.9568 and the
+16-bit best 0.9592), 12 bits costs only ~0.005–0.007 AUC (0.9519), and the
+cliff has moved below 12 — only 10 bits shows real damage (0.9305, ≈−0.026).
+
+- **Sanity anchor holds.** 18-bit lands at 0.9568; the 16/18/14 spread
+  (0.9592/0.9568/0.9563) is ~0.003, i.e. seed-level noise. 16 nominally
+  winning over 18 confirms these widths are not the binding constraint.
+- **Learned scales confirm clip-the-tail at the momentum level too.** Physics
+  says I ≈ 12 (|p|max ≈ 1947 GeV), but every width learned I = 9–11
+  (clip ±256–1024): the model consistently spends bits on resolution and
+  saturates leading constituents, mirroring the dot-level finding. Note the
+  full-dataset 14-bit run learned k=4 (clip ±512), one notch tighter than the
+  sample_data smoke's k=3 (±1024).
+- **The ≤12-bit post-hoc failure mode (beams unrepresentable) is gone by
+  construction:** all learned grids have k ≥ 1 (LSB ≤ 0.5), so the ±1 beam
+  spurions sit exactly on-grid at every width including 10.
+- **Dot grid co-adapts** (input_quant scale moved 2⁴/2³/2³/2⁴/2² across
+  18/16/14/12/10) — another reason post-hoc capping understated tolerance.
+- **Caveats:** best epochs were early (3–6), and the 12-bit run shows a
+  final-vs-best loss gap (0.2954 vs 0.2740, best at ep 3) — low-width QAT is
+  noisier; a second seed at 12 would firm up the ~0.005 cost estimate before
+  committing. Clip fractions not yet measured.
+
+**Recommendation:** take **12 bits** as the resource-work target (12×12 dot
+mults → LUT-implementable, per "What success buys") if ~0.005 AUC is
+acceptable; **14 bits** is the zero-cost fallback. Next: export both, run the
+golden gate, remote csynth for the LUT/FF/DSP columns, and add a clip-fraction
+measurement to `check_scales.py`.
+
+### csynth @ pmu 12 (2026-07-09) vs baseline 1347 DSP / 63.3k FF / 229.8k LUT
+
+DSP 1173 (−174), FF 61.4k (−1.9k), LUT 229.3k (−0.5k, ~flat), 14 cyc II=1
+intact. Reading: the −174 DSP ≈ the +172 beam-port cost measured in the split
+attribution — consistent with narrow beam-side mults dropping out of DSP.
+LUT barely moved because the binding LUT is NOT in the dot front-end:
+np_eq2to2 alone is 148.6k (51%) and BN1 38k, neither touched by input_t.
+So the 12-bit retrain leaves LUT (~53% SLR) as the binding resource. Do NOT
+bind the 12×12 dot mults to LUTs — that trades into the binding resource.
+UPDATE 2026-07-10: Lever 6 (`mac_dsp=1`) measured byte-identical → DEAD
+(constant-weight mults are strength-reduced, nothing for BIND_OP to bind;
+see RESOURCE_REDUCTION_LEVERS.md). Remaining LUT levers: w1_2to2 sparsity
+retrain, Vivado post-synth reality check, II relaxation, fewer particles.
+Owed: `split=1` re-attribution at pmu 12, golden gate.
 
 ## Appendix: original Phase A (dot-width sweep) — superseded
 
