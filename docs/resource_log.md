@@ -102,6 +102,18 @@ silicon (identical LUT/FF/DSP/BRAM/URAM totals), so counts are directly comparab
 | monolith | 69,735 (4.04%) | 25,142 (0.73%) | 1,343 (10.9%) | 6,929 | 25 | 0 |
 | split | 77,157 (4.47%) | 43,238 (1.25%) | 1,575 (12.8%) | 7,096 | 3,695 | 0 |
 | Δ split−mono | **+7,422 (+10.6%)** | **+18,096 (+72%)** | **+232 (+17.3%)** | +167 | +3,670 | 0 |
+| monolith, pmu-12 weights (2026-07-10) | 69,112 (4.00%) | 24,815 (0.72%) | 1,169 (9.5%) | 7,032 | — | 0 |
+| Δ pmu-12 − baseline mono | −623 (−0.9%) | −327 (−1.3%) | **−174 (−13%)** | +103 | | |
+
+pmu-12 row: monolith rebuilt from the Phase A* 12-bit momentum-quantizer weights
+(`fpga_model_qat_w6a6i6p12_best.pt`, `input_t = ap_fixed<12,10>`; see
+`INPUT_WIDTH_RETRAIN_PLAN.md`), run WITH `mac_dsp=1` — a proven no-op (Lever 6),
+so this report doubles as its netlist-level confirmation. Archived at
+`reports/vsynth_monolith_pmu12.rpt`. The csynth deltas carry to the netlist
+unchanged: DSP −174 exactly as csynth predicted (and the same −4 csynth→vsynth
+offset: 1,173 → 1,169), LUT/FF essentially flat, and the calibration ratios
+reproduce to two decimals (LUT 0.30, FF 0.40). csynth remains a trustworthy
+*relative* estimator; vsynth remains the absolute source of truth.
 
 ### csynth estimate vs vsynth actual — calibration
 

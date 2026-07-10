@@ -316,11 +316,14 @@ multiplies + adder trees, 148.6k). ~1700 DSPs sit idle — trade them:
    a. **`w1_2to2` sparsity retrain** (PELICAN-nano, same pattern as the pmu sweep):
       each zeroed entry deletes one 484-position mult-forest + adder-tree slice,
       ~1/12 of the 148.6k eq2to2 LUT upper-bound per entry; currently 0/12 zero.
-   b. ~~Vivado reality check~~ DONE 2026-07-09/10 for the BASELINE build (see
-      CORRECTION box above: real LUT 69.7k, 3.3× below the csynth estimate;
-      neither resource near binding on xcu250). Still owed for the pmu-12
-      build (its vsynth would show the real pmu-12 LUT delta; monolith vsynth
-      DSP 1343 proves the existing reports predate pmu-12).
+   b. ~~Vivado reality check~~ DONE for baseline (2026-07-09) AND pmu-12
+      (2026-07-10, `reports/vsynth_monolith_pmu12.rpt`): pmu-12 monolith =
+      **69,112 LUT / 24,815 FF / 1169 DSP** — the csynth −174 DSP delta is
+      netlist-real, LUT/FF flat, calibration ratios identical (LUT 0.30,
+      FF 0.40, DSP exact). That run also had `mac_dsp=1`, netlist-confirming
+      the Lever 6 no-op. At 4.0% LUT / 9.5% DSP, nothing is resource-bound;
+      levers below only matter against an external (SLR/latency/device)
+      budget — get that budget before spending training runs.
    c. **Rank-1/structural factoring probe**: 4 of 6 basis channels are rank-≤1
       (jdotp[j], jdotp[i], jmass, δ-terms) so only ~1104 of the 5808 products are
       distinct — BUT fully-unrolled CSE may already share them (Lever-1 lesson)

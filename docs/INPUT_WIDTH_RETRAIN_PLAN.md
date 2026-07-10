@@ -140,7 +140,7 @@ measured; golden gate + csynth owed per width.
 | 18 | 7 | <18,11> (±1024 / 2⁻⁷) | 0.9568 | owed | owed | sanity anchor — matches operating point ✓; dot scale 2⁴; best ep 5 |
 | 16 | 5 | <16,11> (±1024 / 2⁻⁵) | **0.9592** | owed | owed | best of sweep; dot scale 2³; best ep 6 |
 | 14 | 4 | <14,10> (±512 / 2⁻⁴) | 0.9563 | owed | owed | post-hoc cliff was here — retrained it's free; dot scale 2³; best ep 6 |
-| 12 | 2 | <12,10> (±512 / 2⁻²) | 0.9519 | owed | 229.3k / 61.4k / 1173 (14 cyc, II=1) | post-hoc collapse ≤ here — retrained costs only ~0.005 AUC; dot scale 2⁴; best ep 3, final/best loss gap 0.295/0.274 (least stable run) |
+| 12 | 2 | <12,10> (±512 / 2⁻²) | 0.9519 | owed | csynth 229.3k / 61.4k / 1173 (14 cyc, II=1); **vsynth 69.1k / 24.8k / 1169** | post-hoc collapse ≤ here — retrained costs only ~0.005 AUC; dot scale 2⁴; best ep 3, final/best loss gap 0.295/0.274 (least stable run) |
 | 10 | 1 | <10,9> (±256 / 2⁻¹) | 0.9305 | owed | owed | real degradation — the retrained cliff is between 12 and 10 |
 
 ### Analysis (2026-07-09)
@@ -187,8 +187,13 @@ So the 12-bit retrain leaves LUT (~53% SLR) as the binding resource. Do NOT
 bind the 12×12 dot mults to LUTs — that trades into the binding resource.
 UPDATE 2026-07-10: Lever 6 (`mac_dsp=1`) measured byte-identical → DEAD
 (constant-weight mults are strength-reduced, nothing for BIND_OP to bind;
-see RESOURCE_REDUCTION_LEVERS.md). Remaining LUT levers: w1_2to2 sparsity
-retrain, Vivado post-synth reality check, II relaxation, fewer particles.
+see RESOURCE_REDUCTION_LEVERS.md).
+VSYNTH @ pmu 12 (2026-07-10, `reports/vsynth_monolith_pmu12.rpt`):
+**69,112 LUT / 24,815 FF / 1169 DSP** vs baseline vsynth 69,735 / 25,142 /
+1343 — the −174 DSP survives to the netlist exactly; LUT/FF flat, calibration
+ratios unchanged (LUT 0.30, FF 0.40, DSP exact). At 4.0% LUT / 9.5% DSP of the
+device, nothing is resource-bound; further LUT levers (sparsity, II, fewer
+particles) only matter against an external budget.
 Owed: `split=1` re-attribution at pmu 12, golden gate.
 
 ## Appendix: original Phase A (dot-width sweep) — superseded
