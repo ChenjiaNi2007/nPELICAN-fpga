@@ -104,6 +104,19 @@ silicon (identical LUT/FF/DSP/BRAM/URAM totals), so counts are directly comparab
 | Δ split−mono | **+7,422 (+10.6%)** | **+18,096 (+72%)** | **+232 (+17.3%)** | +167 | +3,670 | 0 |
 | monolith, pmu-12 weights (2026-07-10) | 69,112 (4.00%) | 24,815 (0.72%) | 1,169 (9.5%) | 7,032 | — | 0 |
 | Δ pmu-12 − baseline mono | −623 (−0.9%) | −327 (−1.3%) | **−174 (−13%)** | +103 | | |
+| monolith, pmu-10 weights (2026-07-13) | 94,983 (5.50%) | 21,504 (0.62%) | 936 (7.6%) | 9,254 | 49 | 0 |
+| Δ pmu-10 − pmu-12 | **+25,871 (+37%)** | −3,311 | **−233 (−20%)** | +2,222 | | |
+
+pmu-10 row (`reports/vsynth_monolith_pmu10.rpt`, `input_t = ap_fixed<10,9>`): at
+10-bit momenta the tools started moving dot-front-end multiplies out of DSP48s
+into fabric — DSP −233 but LUT +25.9k and CARRY8 +2.2k, i.e. ~111 LUT paid per
+DSP saved, in the *wrong* direction (LUT was the pressured resource). csynth
+latency also went 14 → 15 cycles (fabric mults + longer carry chains need an
+extra pipeline stage at 5 ns; II=1 is the invariant that matters, latency is
+not). Combined with the Phase A* accuracy cliff at 10 bits (AUC 0.9305 vs
+0.9519 at 12), **pmu-10 is dominated by pmu-12 on every axis except raw DSP
+count — not an operating-point candidate**, just the far end of the
+resource-vs-accuracy curve.
 
 pmu-12 row: monolith rebuilt from the Phase A* 12-bit momentum-quantizer weights
 (`fpga_model_qat_w6a6i6p12_best.pt`, `input_t = ap_fixed<12,10>`; see

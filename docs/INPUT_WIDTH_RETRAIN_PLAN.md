@@ -141,7 +141,7 @@ measured; golden gate + csynth owed per width.
 | 16 | 5 | <16,11> (±1024 / 2⁻⁵) | **0.9592** | owed | owed | best of sweep; dot scale 2³; best ep 6 |
 | 14 | 4 | <14,10> (±512 / 2⁻⁴) | 0.9563 | owed | owed | post-hoc cliff was here — retrained it's free; dot scale 2³; best ep 6 |
 | 12 | 2 | <12,10> (±512 / 2⁻²) | 0.9519 | owed | csynth 229.3k / 61.4k / 1173 (14 cyc, II=1); **vsynth 69.1k / 24.8k / 1169** | post-hoc collapse ≤ here — retrained costs only ~0.005 AUC; dot scale 2⁴; best ep 3, final/best loss gap 0.295/0.274 (least stable run) |
-| 10 | 1 | <10,9> (±256 / 2⁻¹) | 0.9305 | owed | owed | real degradation — the retrained cliff is between 12 and 10 |
+| 10 | 1 | <10,9> (±256 / 2⁻¹) | 0.9305 | owed | **vsynth 95.0k / 21.5k / 936** (csynth latency 15 cyc) | real degradation — the retrained cliff is between 12 and 10. vsynth: DSP −233 but LUT +25.9k vs pmu-12 (mults spill DSP→fabric below the DSP-inference threshold) + 1 extra latency cycle — dominated by pmu-12, curve datapoint only |
 
 ### Analysis (2026-07-09)
 
