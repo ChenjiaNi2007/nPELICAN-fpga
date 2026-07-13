@@ -142,6 +142,8 @@ measured; golden gate + csynth owed per width.
 | 14 | 4 | <14,10> (±512 / 2⁻⁴) | 0.9563 | owed | owed | post-hoc cliff was here — retrained it's free; dot scale 2³; best ep 6 |
 | 12 | 2 | <12,10> (±512 / 2⁻²) | 0.9519 | owed | csynth 229.3k / 61.4k / 1173 (14 cyc, II=1); **vsynth 69.1k / 24.8k / 1169** | post-hoc collapse ≤ here — retrained costs only ~0.005 AUC; dot scale 2⁴; best ep 3, final/best loss gap 0.295/0.274 (least stable run) |
 | 10 | 1 | <10,9> (±256 / 2⁻¹) | 0.9305 | owed | **vsynth 95.0k / 21.5k / 936** (csynth latency 15 cyc) | real degradation — the retrained cliff is between 12 and 10. vsynth: DSP −233 but LUT +25.9k vs pmu-12 (mults spill DSP→fabric below the DSP-inference threshold) + 1 extra latency cycle — dominated by pmu-12, curve datapoint only |
+| 9 | | | | | | requested 2026-07-13 (curve extension). If k=W−9 trend holds: k=0, LSB 1, clip ±256 — beams ±1 still on-grid |
+| 8 | | | | | | requested 2026-07-13. Trend predicts k=−1, LSB 2 — **beams ±1 off-grid** (snap to 0/±2); expect damage beyond the pmu-10 cliff |
 
 ### Analysis (2026-07-09)
 
