@@ -150,7 +150,21 @@ The operand widths ARE the trained pmu widths (pseudoweight precision
 propagated), and at ≤10-bit operands Vitis's DSP-inference threshold sends
 every dot mult to fabric: 420×49 ≈ 20.6k / 420×40 ≈ 16.8k LUT of bare
 multipliers plus carry/glue = the observed LUT jump. (Instance counts differ
-across netlists because CSE/sharing re-decides per build.) If the threshold
+across netlists because CSE/sharing re-decides per build.)
+
+**Why pmu-8 uses MORE DSP than pmu-10 (2026-07-14, traced to the source
+line).** The extra DSPs are NOT dot mults — they're the ~250 BN1 multiplies
+(`nPELICAN.cpp:187`, `dots × batch1_2to2[1]`, i.e. 6-bit dot × loader-derived
+BN1 scale constant; a real mult because the constant lives in an array, which
+blocks constant-folding). In the pmu-9 build that constant's type is 10 bits →
+`mul_6s_10ns_15` = 0 DSP / 62 LUT each; in the pmu-8 build the checkpoint's
+learned BN constant needed 11 bits → `mul_6s_11ns_16` = **1 DSP / 6 LUT**
+each. One bit of loader-derived constant width pushed the whole ~250-instance
+population over the DSP threshold, trading ~14k LUT for ~250 DSPs. So the
+DSP wobble across 10/9/8 (936/998/977) is marginal multiplier populations
+flipping deterministically across the ~11-bit threshold as per-checkpoint
+type widths shift by ±1 bit — checkpoint-specific threshold crossings, not
+randomness, but still not a dial anyone can usefully turn. If the threshold
 story ever needs a hard proof: the dot mults are variable×variable (unlike
 the Lever-6 constant MACs), so a `BIND_OP variable=dots op=mul impl=dsp`
 run would force them back into DSPs — one cheap confirmatory synth.
