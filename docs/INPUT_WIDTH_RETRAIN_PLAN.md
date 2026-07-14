@@ -142,8 +142,8 @@ measured; golden gate + csynth owed per width.
 | 14 | 4 | <14,10> (±512 / 2⁻⁴) | 0.9563 | owed | owed | post-hoc cliff was here — retrained it's free; dot scale 2³; best ep 6 |
 | 12 | 2 | <12,10> (±512 / 2⁻²) | 0.9519 | owed | csynth 229.3k / 61.4k / 1173 (14 cyc, II=1); **vsynth 69.1k / 24.8k / 1169** | post-hoc collapse ≤ here — retrained costs only ~0.005 AUC; dot scale 2⁴; best ep 3, final/best loss gap 0.295/0.274 (least stable run) |
 | 10 | 1 | <10,9> (±256 / 2⁻¹) | 0.9305 | owed | **vsynth 95.0k / 21.5k / 936** (csynth latency 15 cyc) | real degradation — the retrained cliff is between 12 and 10. vsynth: DSP −233 but LUT +25.9k vs pmu-12 (mults spill DSP→fabric below the DSP-inference threshold) + 1 extra latency cycle — dominated by pmu-12, curve datapoint only |
-| 9 | | | | | | requested 2026-07-13 (curve extension). If k=W−9 trend holds: k=0, LSB 1, clip ±256 — beams ±1 still on-grid |
-| 8 | | | | | | requested 2026-07-13. Trend predicts k=−1, LSB 2 — **beams ±1 off-grid** (snap to 0/±2); expect damage beyond the pmu-10 cliff |
+| 9 | 1 | <9,8> (±128 / 2⁻¹) | 0.9320 | owed | owed | ≈ pmu-10 (curve plateaus 10→9); k=W−9 trend BROKE — model tightened clip to ±128 rather than coarsen the LSB; dot scale 2²; best ep 5 |
+| 8 | 0 | <8,8> (±128 / 1) | 0.9075 | owed | owed | model chose k=0 (LSB 1, beams ±1 ON-grid) over the predicted k=−1 — protected the spurions, paid in clip range; −0.023 AUC below the 10/9 plateau; dot scale 2²; best ep 7 |
 
 ### Analysis (2026-07-09)
 
@@ -172,9 +172,23 @@ cliff has moved below 12 — only 10 bits shows real damage (0.9305, ≈−0.026
   noisier; a second seed at 12 would firm up the ~0.005 cost estimate before
   committing. Clip fractions not yet measured.
 
+**Sub-10 extension (2026-07-13, professor-requested):** full curve is now
+18/16/14/12/10/9/8 → 0.9568/0.9592/0.9563/0.9519/0.9305/0.9320/0.9075.
+Two findings: (1) the curve PLATEAUS from 10 to 9 (0.9305 → 0.9320, noise-level)
+— 9 bits dominates 10 if anyone wants cliff-level accuracy at minimum width;
+(2) the learned-scale trend k=W−9 broke below 10: both runs pinned the LSB at
+beam-representable values (9-bit: k=1, LSB 0.5; 8-bit: k=0, LSB 1) and paid in
+clip range (±128 vs ±256–1024 above), i.e. **the optimizer protected the ±1
+beam spurions instead of momentum resolution** — the predicted off-grid-beams
+failure at 8 bits never materialized; the 8-bit damage (−0.023 vs the plateau)
+comes from clipping the constituent tail at 128 GeV and the coarse 1-GeV grid,
+not from the beams.
+
 **Recommendation:** take **12 bits** as the resource-work target (12×12 dot
 mults → LUT-implementable, per "What success buys") if ~0.005 AUC is
-acceptable; **14 bits** is the zero-cost fallback. Next: export both, run the
+acceptable; **14 bits** is the zero-cost fallback. The sub-10 points are
+resource-vs-accuracy curve data only (and per the pmu-10 vsynth, sub-10 widths
+spill mults DSP→fabric, so they cost MORE LUT anyway). Next: export both, run the
 golden gate, remote csynth for the LUT/FF/DSP columns, and add a clip-fraction
 measurement to `check_scales.py`.
 
