@@ -136,6 +136,25 @@ Verdict: pmu-8 is worse than pmu-10 on BOTH resources and worse than
 everything ≥9 on accuracy (AUC 0.9075) — the sub-10 branch is closed;
 **pmu-12 remains the resource-accuracy optimum**.
 
+**Multiplier-inventory receipt (2026-07-14, read from the archived csynth
+reports — no re-synthesis needed).** The per-instance tables prove both that
+the trained momentum grid reached the datapath and why LUT rises sub-threshold:
+
+| build | dot-mult module | count | per-instance binding |
+|---|---|---|---|
+| baseline (18-bit) | `mul_18s_18s_36` | 253 | **1 DSP**, 0 LUT |
+| pmu-9 | `mul_9s_9s_18` | 420 | **0 DSP, 49 LUT** |
+| pmu-8 | `mul_8s_8s_16` | 420 | **0 DSP, 40 LUT** |
+
+The operand widths ARE the trained pmu widths (pseudoweight precision
+propagated), and at ≤10-bit operands Vitis's DSP-inference threshold sends
+every dot mult to fabric: 420×49 ≈ 20.6k / 420×40 ≈ 16.8k LUT of bare
+multipliers plus carry/glue = the observed LUT jump. (Instance counts differ
+across netlists because CSE/sharing re-decides per build.) If the threshold
+story ever needs a hard proof: the dot mults are variable×variable (unlike
+the Lever-6 constant MACs), so a `BIND_OP variable=dots op=mul impl=dsp`
+run would force them back into DSPs — one cheap confirmatory synth.
+
 pmu-10 row (`reports/vsynth_monolith_pmu10.rpt`, `input_t = ap_fixed<10,9>`): at
 10-bit momenta the tools started moving dot-front-end multiplies out of DSP48s
 into fabric — DSP −233 but LUT +25.9k and CARRY8 +2.2k, i.e. ~111 LUT paid per
