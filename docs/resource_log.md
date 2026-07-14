@@ -107,8 +107,22 @@ silicon (identical LUT/FF/DSP/BRAM/URAM totals), so counts are directly comparab
 | monolith, pmu-10 weights (2026-07-13) | 94,983 (5.50%) | 21,504 (0.62%) | 936 (7.6%) | 9,254 | 49 | 0 |
 | Δ pmu-10 − pmu-12 | **+25,871 (+37%)** | −3,311 | **−233 (−20%)** | +2,222 | | |
 
+| monolith, pmu-9 weights (2026-07-13) | 97,174 (5.62%) | 22,514 (0.65%) | 998 (8.1%) | 9,263 | 48 | 0 |
 | monolith, pmu-8 weights (2026-07-13) | 98,863 (5.72%) | 21,271 (0.62%) | 977 (8.0%) | 10,618 | 64 | 0 |
 | Δ pmu-8 − pmu-10 | +3,880 | −233 | **+41** | +1,364 | | |
+
+pmu-9 row (`reports/{vsynth,csynth}_monolith_pmu9.rpt`, `input_t =
+ap_fixed<9,8>`): csynth 752 DSP / 50,184 FF / 281,073 LUT, 15 cyc II=1.
+**The "csynth DSP is exact" rule BREAKS in the sub-threshold regime**: vsynth
+998 DSP vs csynth 752 — Vivado re-inferred ~246 DSPs from arithmetic that HLS
+had emitted as generic fabric logic. The −4 rule only holds when csynth binds
+DSP48s explicitly; once HLS strength-reduces/fabric-implements mults, Vivado
+makes its own independent inference and BOTH estimates (csynth LUT was also
+non-monotonic: 281k at pmu-9 > 262k at pmu-8) become unreliable — in this
+regime only vsynth numbers mean anything. Full sub-threshold band at vsynth:
+LUT 95.0k/97.2k/98.9k and DSP 936/998/977 for 10/9/8 — LUT creeps up as width
+shrinks, DSP wobbles ±60. Uniform picture: ~+37–43% LUT over pmu-12 with no
+compensating win anywhere.
 
 pmu-8 row (`reports/vsynth_monolith_pmu8.rpt` + `csynth_monolith_pmu8.rpt`,
 `input_t = ap_fixed<8,8>`, integer-GeV momenta): csynth 981 DSP / 51,338 FF /
