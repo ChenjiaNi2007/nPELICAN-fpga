@@ -152,8 +152,22 @@ every dot mult to fabric: 420×49 ≈ 20.6k / 420×40 ≈ 16.8k LUT of bare
 multipliers plus carry/glue = the observed LUT jump. (Instance counts differ
 across netlists because CSE/sharing re-decides per build.)
 
-**Why pmu-8 uses MORE DSP than pmu-10 (2026-07-14, traced to the source
-line).** The extra DSPs are NOT dot mults — they're the ~250 BN1 multiplies
+**The 12→10 exchange-rate accounting (2026-07-14).** Naively 25,871 LUT / 55
+LUT-per-fabric-mult "should" equal ~470 freed DSPs, but only 233 were freed —
+the ratio is biased on both sides. Numerator: the LUT delta is ~420 dot mults
+× ~55 ≈ 23k PLUS the adder/register logic the DSP48s had been absorbing for
+free (pre-adder, post-adder, pipeline regs → +2.2k CARRY8 and glue) — a DSP48
+implements a mult+add+regs bundle, not a bare multiplier, so evicting one
+dumps MORE than 55 LUT into fabric. Denominator: ~420 mults left HLS's DSP
+binding, but Vivado re-spends ~190 of the freed DSPs on other arithmetic at
+netlist level (measured directly at pmu-9: csynth 752 → vsynth 998), so the
+NET DSP drop understates the migration. Same ~420 multipliers on both sides;
+the apparent inefficiency is glue (numerator) + re-spend (denominator).
+Conclusion the numbers force: total effective resources are strictly worse
+below 12 bits — but this is a TOOL DEFAULT, not physics: the dot mults are
+variable×variable, so `BIND_OP variable=dots op=mul impl=dsp` would keep
+them in DSP48s at 10 bits and reverse the entire LUT penalty, if a sub-12
+width were ever wanted despite the accuracy cost. The extra DSPs are NOT dot mults — they're the ~250 BN1 multiplies
 (`nPELICAN.cpp:187`, `dots × batch1_2to2[1]`, i.e. 6-bit dot × loader-derived
 BN1 scale constant; a real mult because the constant lives in an array, which
 blocks constant-folding). In the pmu-9 build that constant's type is 10 bits →
