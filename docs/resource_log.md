@@ -107,6 +107,21 @@ silicon (identical LUT/FF/DSP/BRAM/URAM totals), so counts are directly comparab
 | monolith, pmu-10 weights (2026-07-13) | 94,983 (5.50%) | 21,504 (0.62%) | 936 (7.6%) | 9,254 | 49 | 0 |
 | Δ pmu-10 − pmu-12 | **+25,871 (+37%)** | −3,311 | **−233 (−20%)** | +2,222 | | |
 
+| monolith, pmu-8 weights (2026-07-13) | 98,863 (5.72%) | 21,271 (0.62%) | 977 (8.0%) | 10,618 | 64 | 0 |
+| Δ pmu-8 − pmu-10 | +3,880 | −233 | **+41** | +1,364 | | |
+
+pmu-8 row (`reports/vsynth_monolith_pmu8.rpt` + `csynth_monolith_pmu8.rpt`,
+`input_t = ap_fixed<8,8>`, integer-GeV momenta): csynth 981 DSP / 51,338 FF /
+262,165 LUT, 15 cyc **II=1**. The fabric-spill regime is NON-MONOTONIC: vs
+pmu-10, LUT rose again (+3.9k) and DSP rose too (+41) — below the DSP-inference
+threshold, resource counts are tool-choice noise around different netlists, not
+a function you can dial. Calibration held: DSP csynth→vsynth −4 for the third
+consecutive build; FF ratio 0.41; LUT ratio 0.38 (csynth is LESS pessimistic
+for fabric-arithmetic-heavy netlists than the 0.30 of DSP-heavy ones).
+Verdict: pmu-8 is worse than pmu-10 on BOTH resources and worse than
+everything ≥9 on accuracy (AUC 0.9075) — the sub-10 branch is closed;
+**pmu-12 remains the resource-accuracy optimum**.
+
 pmu-10 row (`reports/vsynth_monolith_pmu10.rpt`, `input_t = ap_fixed<10,9>`): at
 10-bit momenta the tools started moving dot-front-end multiplies out of DSP48s
 into fabric — DSP −233 but LUT +25.9k and CARRY8 +2.2k, i.e. ~111 LUT paid per

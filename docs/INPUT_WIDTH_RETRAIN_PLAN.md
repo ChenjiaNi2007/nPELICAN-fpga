@@ -143,7 +143,7 @@ measured; golden gate + csynth owed per width.
 | 12 | 2 | <12,10> (±512 / 2⁻²) | 0.9519 | owed | csynth 229.3k / 61.4k / 1173 (14 cyc, II=1); **vsynth 69.1k / 24.8k / 1169** | post-hoc collapse ≤ here — retrained costs only ~0.005 AUC; dot scale 2⁴; best ep 3, final/best loss gap 0.295/0.274 (least stable run) |
 | 10 | 1 | <10,9> (±256 / 2⁻¹) | 0.9305 | owed | **vsynth 95.0k / 21.5k / 936** (csynth latency 15 cyc) | real degradation — the retrained cliff is between 12 and 10. vsynth: DSP −233 but LUT +25.9k vs pmu-12 (mults spill DSP→fabric below the DSP-inference threshold) + 1 extra latency cycle — dominated by pmu-12, curve datapoint only |
 | 9 | 1 | <9,8> (±128 / 2⁻¹) | 0.9320 | owed | owed | ≈ pmu-10 (curve plateaus 10→9); k=W−9 trend BROKE — model tightened clip to ±128 rather than coarsen the LSB; dot scale 2²; best ep 5 |
-| 8 | 0 | <8,8> (±128 / 1) | 0.9075 | owed | owed | model chose k=0 (LSB 1, beams ±1 ON-grid) over the predicted k=−1 — protected the spurions, paid in clip range; −0.023 AUC below the 10/9 plateau; dot scale 2²; best ep 7 |
+| 8 | 0 | <8,8> (±128 / 1) | 0.9075 | owed | csynth 262.2k / 51.3k / 981 (15 cyc, II=1); **vsynth 98.9k / 21.3k / 977** | model chose k=0 (LSB 1, beams ±1 ON-grid) over the predicted k=−1 — protected the spurions, paid in clip range; −0.023 AUC below the 10/9 plateau; dot scale 2². vsynth: worse than pmu-10 on BOTH LUT (+3.9k) and DSP (+41) — sub-threshold resource counts are non-monotonic tool noise; no payoff anywhere |
 
 ### Analysis (2026-07-09)
 
