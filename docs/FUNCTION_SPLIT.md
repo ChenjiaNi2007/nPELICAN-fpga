@@ -156,6 +156,14 @@ Reading the result (compare csynth/vsynth totals vs split=1 and the monolith):
   it at the netlist and the csynth gap was pure estimation); look harder at
   bit-range/scheduling effects.
 
+**RESULT (2026-07-17, 5 ns, resource_log.md "split=2 result"): mechanism
+confirmed.** At the netlist split=2 lands most of the way back to the
+monolith: LUT gap +25.3k → +10.5k (58% closed), FF gap +16.0k → +4.2k (73%
+closed), latency 20 → 19 cyc, DSP unchanged. The split overhead was dominated
+by the symmetric arrays crossing as full "independent"-element ports. split=2
+is therefore the preferred attribution build; the residual +10.5k LUT / +4.2k
+FF is the irreducible cost of the six boundaries themselves.
+
 Not combinable with `split_only` (isolation runs force plain split=1 so the
 marginal-cost table keeps one convention). C-sim output must stay
 byte-identical to the monolith in BOTH modes — gate split AND split2 after any

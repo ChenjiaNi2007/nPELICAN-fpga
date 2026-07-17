@@ -293,6 +293,42 @@ Takeaways:
 - Latency: mono 13 → split 20 cyc at 5 ns (the +7 boundary stages), II=1 in all
   six runs.
 
+### split=2 result — lost symmetry-CSE CONFIRMED as the dominant mechanism (2026-07-17)
+
+`split=2` (triangular symmetric crossings, `NPELICAN_SPLIT_TRI`; FUNCTION_SPLIT.md)
+changes ONLY the port representation of `dots`/`batch1` (253-element upper
+triangle, `NP_SYMIDX` maps (i,j)/(j,i) to the same element). Byte-identical
+csim vs monolith and split=1. Reports:
+`reports/clock_sweep/{csynth,vsynth}_split_tri_5ns.rpt`. All @5 ns, same tree:
+
+| build (5 ns) | csynth FF | csynth LUT | vsynth LUT | vsynth FF | vsynth SRL | DSP | lat |
+|--------------|-----------|------------|------------|-----------|------------|-----|-----|
+| monolith | 51,395 | 199,410 | 48,962 | 21,631 | 27 | 1,049 | 13 |
+| split=1  | 89,662 | 304,424 | 74,219 | 37,593 | 3,425 | 1,049 | 20 |
+| split=2  | 66,985 | 234,241 | 59,460 | 25,863 | 2,345 | 1,049 | 19 |
+| Δ split=1 − mono | +38.3k | +105.0k | **+25,257 (+52%)** | **+15,962 (+74%)** | +3,398 | 0 | +7 |
+| Δ split=2 − mono | +15.6k | +34.8k | **+10,498 (+21%)** | **+4,232 (+20%)** | +2,318 | 0 | +6 |
+
+Takeaways:
+
+- **The port-representation change alone closes 58% of the netlist LUT gap,
+  73% of the FF gap (64% of LUT+FF combined: 41.2k → 14.7k)** — with zero
+  arithmetic change and byte-identical outputs. The split overhead was mostly
+  the two symmetric arrays crossing as 484 "independent" scalars: duplicated
+  CSE-able MAC products (LUT) + boundary registers for 231 redundant mirror
+  elements per array per consumer (FF).
+- Direct answer to "HLS is sensitive to how these things are written": yes —
+  measurably. Same math, same types, one representational change at two ports,
+  −14.8k LUT / −11.7k FF at the netlist.
+- **Residual split=2 overhead (+10.5k LUT / +4.2k FF / +6 cyc) is the true
+  irreducible boundary cost** of this 6-way split: interface/control for the
+  non-symmetric crossings (Tp_q 968 elems dominates), remaining cross-boundary
+  sharing (mask products, range narrowing), and per-stage FSMs.
+- DSP 1,049 / csynth 1,053 (−4 rule), II=1, timing met — invariant again.
+- Attribution guidance updated: split=2 is now the PREFERRED attribution build
+  (closest-to-monolith per-stage proportions); split=1 remains for continuity
+  with the existing isolation table.
+
 ## Phase 2 bit-exactness — interpretation
 
 Zero-tolerance 200/200 csim vs the PyTorch quant logits is **not achievable for this
