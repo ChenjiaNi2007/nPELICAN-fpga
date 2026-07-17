@@ -182,7 +182,9 @@ if {$opt(split)} {
     if {$split_only_stage ne ""} {
         set prj_dir ${project_name}_split_${split_only_stage}_prj
     } elseif {$opt(split) == 2} {
-        set prj_dir ${project_name}_split_tri_prj
+        # _prj_tri (not _tri_prj) so vivado_synth_split.tcl reaches it via
+        # -tclargs _tri (and _tri_4ns etc. with period=N).
+        set prj_dir ${project_name}_split_prj_tri
     } else {
         set prj_dir ${project_name}_split_prj
     }

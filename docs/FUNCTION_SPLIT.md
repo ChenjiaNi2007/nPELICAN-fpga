@@ -139,10 +139,11 @@ to the consumer's scope. nobjmask stays a full port on purpose (its symmetric
 products are 1-bit gates on scalars; change one thing at a time).
 
 ```bash
-# remote csynth (own project dir nPELICAN_split_tri_prj; combines with period=N)
+# remote csynth (own project dir nPELICAN_split_prj_tri; combines with period=N)
 vitis_hls -f build_prj.tcl reset=1 csim=0 cosim=0 validation=0 export=0 vsynth=0 split=2
-# netlist: add_files nPELICAN_split_tri_prj/solution/syn/vhdl by hand, or copy
-# vivado_synth_split.tcl and point it at the _tri_ project dir.
+# netlist (reads nPELICAN_split_prj_tri, writes vivado_synth_split_tri.rpt);
+# with period=4 use -tclargs _tri_4ns:
+vivado -mode batch -source vivado_synth_split.tcl -tclargs _tri
 # local gate + build
 ./build_local.sh split2 -DRUN_GOLDEN_GATE   # -> ./tb_local_split_tri
 ```
