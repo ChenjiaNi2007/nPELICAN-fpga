@@ -174,10 +174,15 @@ if {$opt(split_only) ne "0"} {
 # project dir so the monolith's project/reports are never clobbered. Reporting
 # flow only: csim + synth are supported; cosim/validation/export/vsynth path
 # plumbing assumes the monolith project dir, so they are forced off here.
+# split=2: same, plus -DNPELICAN_SPLIT_TRI (dots/batch1 cross the stage
+# boundaries as upper triangles — lost-symmetry-CSE mechanism test, see
+# docs/FUNCTION_SPLIT.md). split_only forces plain split=1.
 if {$opt(split)} {
     set src_file firmware/${project_name}_split.cpp
     if {$split_only_stage ne ""} {
         set prj_dir ${project_name}_split_${split_only_stage}_prj
+    } elseif {$opt(split) == 2} {
+        set prj_dir ${project_name}_split_tri_prj
     } else {
         set prj_dir ${project_name}_split_prj
     }
@@ -214,6 +219,7 @@ if {$opt(period) != 0} {
 set fw_cflags "-std=c++0x"
 if {$opt(const_beams)} { append fw_cflags " -DNPELICAN_CONST_BEAMS" }
 if {$opt(mac_dsp)}     { append fw_cflags " -DNPELICAN_MAC_DSP" }
+if {$opt(split) == 2 && $split_only_stage eq ""} { append fw_cflags " -DNPELICAN_SPLIT_TRI" }
 if {$split_only_stage ne ""} {
     append fw_cflags " -DNPELICAN_SPLIT_ONLY_[string toupper $split_only_stage]"
 }

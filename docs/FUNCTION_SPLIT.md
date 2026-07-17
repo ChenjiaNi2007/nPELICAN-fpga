@@ -119,6 +119,47 @@ output stages are refinements. Record results in the isolation table in
 strengthened: isolating one stage per run makes each measurement independent
 of the order in which boundaries are introduced.)
 
+## split=2 — triangular symmetric crossings (lost-CSE mechanism test)
+
+The 2026-07-16 clock sweep (resource_log.md) showed the split-vs-monolith
+LUT+FF gap is structural (~47k, clock-invariant, DSP untouched). The leading
+suspect for the LUT half: `dots` and `batch1` are symmetric, and in the
+monolith the mirror write (`batch1[j*N+i] = v`) makes (i,j) and (j,i) the SAME
+value node, so HLS CSE shares the 2->2 MAC products that appear identically at
+both index orders (e.g. `w1[h*6+0]*batch1[i,j]`). Across a non-inlined port
+that identity is invisible — the consumer sees 484 independent scalars — and
+the shared products get duplicated hardware.
+
+`split=2` (`-DNPELICAN_SPLIT_TRI`) tests exactly that mechanism: the two
+symmetric arrays cross the boundaries as 253-element upper triangles, and
+every access goes through `NP_SYMIDX(i,j)`, which maps both index orders to
+the same element. Arithmetic, types, rounding, stage structure: identical to
+split=1 — only the port representation changes, restoring the value-identity
+to the consumer's scope. nobjmask stays a full port on purpose (its symmetric
+products are 1-bit gates on scalars; change one thing at a time).
+
+```bash
+# remote csynth (own project dir nPELICAN_split_tri_prj; combines with period=N)
+vitis_hls -f build_prj.tcl reset=1 csim=0 cosim=0 validation=0 export=0 vsynth=0 split=2
+# netlist: add_files nPELICAN_split_tri_prj/solution/syn/vhdl by hand, or copy
+# vivado_synth_split.tcl and point it at the _tri_ project dir.
+# local gate + build
+./build_local.sh split2 -DRUN_GOLDEN_GATE   # -> ./tb_local_split_tri
+```
+
+Reading the result (compare csynth/vsynth totals vs split=1 and the monolith):
+
+- **split=2 ≈ monolith LUT** → lost symmetry-CSE is the dominant LUT
+  mechanism; the residual gap is boundary registers + range-narrowing loss.
+- **split=2 ≈ split=1** → the CSE story is wrong (or Vivado already recovers
+  it at the netlist and the csynth gap was pure estimation); look harder at
+  bit-range/scheduling effects.
+
+Not combinable with `split_only` (isolation runs force plain split=1 so the
+marginal-cost table keeps one convention). C-sim output must stay
+byte-identical to the monolith in BOTH modes — gate split AND split2 after any
+datapath edit.
+
 ## Resource-overhead watchlist (why splitting can cost resources)
 
 The known mechanisms by which "same design, more functions" inflates HLS

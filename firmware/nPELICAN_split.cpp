@@ -77,6 +77,33 @@ dot_t* npelican_dots_override = nullptr;
   #define NP_SPLIT_OUT2TO0 0
 #endif
 
+// ---------------------------------------------------------------------------
+// split=2: triangular symmetric crossings (NPELICAN_SPLIT_TRI; FUNCTION_SPLIT.md).
+// Mechanism test for the split's lost symmetry-CSE: dots and batch1 are
+// symmetric, but as full 484-element ports the consumers cannot know element
+// (i,j) equals (j,i) — the identity lives in the PRODUCER's mirror write, and
+// HLS's expression analysis stops at a non-inlined boundary. So the shared
+// 2->2 MAC products (w1[h*6+0]*batch1[i,j] is the same value for (i,j) and
+// (j,i)) get duplicated hardware in split=1. Under this flag the two arrays
+// cross as 253-element upper triangles and EVERY access goes through
+// NP_SYMIDX, which maps (i,j) and (j,i) to the SAME element — the identity is
+// back in the consumer's scope, arithmetic completely unchanged (csim output
+// stays byte-identical to the monolith; gate it like any datapath edit).
+// If split=2 closes most of the split-vs-monolith LUT gap, lost-CSE is the
+// dominant mechanism. Not combinable with split_only (isolation runs stay
+// plain split=1). nobjmask is left as a full port on purpose: its symmetric
+// products are 1-bit gates on scalars (cheap), and changing one boundary at a
+// time is the point.
+// ---------------------------------------------------------------------------
+#define NP_UT(i, j) ((i)*NPARTICLES2 - ((i)*((i)-1))/2 + ((j)-(i)))
+#ifdef NPELICAN_SPLIT_TRI
+  #define NP_SYMSZ ((NPARTICLES2)*((NPARTICLES2)+1)/2)
+  #define NP_SYMIDX(i, j) ((i) <= (j) ? NP_UT(i, j) : NP_UT(j, i))
+#else
+  #define NP_SYMSZ ((NPARTICLES2)*(NPARTICLES2))
+  #define NP_SYMIDX(i, j) ((i)*NPARTICLES2 + (j))
+#endif
+
 void dot4(input_t p1[4], input_t p2[4], dot_t& dot) {
 // Input in the form E, px, py, pz. The Minkowski dot is computed in HLS's exact
 // promoted type (products/sums of fixed-point are exact) and rounded once into
@@ -90,7 +117,7 @@ void np_dots(
     input_t model_input[(NPARTICLES)*4],
     input_t beam_input[2*4],
     ap_uint<1> nobjmask[NPARTICLES2][NPARTICLES2],
-    dot_t dots[(NPARTICLES2)*(NPARTICLES2)]
+    dot_t dots[NP_SYMSZ]
 ) {
 #if NP_SPLIT_DOTS
     #pragma HLS INLINE off
@@ -133,12 +160,15 @@ void np_dots(
 #endif
 
     //dot4 is symmetric: compute only the upper triangle and mirror (pure wiring).
+    //Under NPELICAN_SPLIT_TRI there is nothing to mirror: (j,i) IS element (i,j).
     for(unsigned int i = 0; i < NPARTICLES2; i++){
       #pragma HLS unroll
       for(unsigned int j = i; j < NPARTICLES2; j++){
         #pragma HLS unroll
-        Dot: dot4(p1[i], p1[j], dots[i*NPARTICLES2+j]);
-        if (j != i) dots[j*NPARTICLES2+i] = dots[i*NPARTICLES2+j];
+        Dot: dot4(p1[i], p1[j], dots[NP_SYMIDX(i, j)]);
+#ifndef NPELICAN_SPLIT_TRI
+        if (j != i) dots[NP_SYMIDX(j, i)] = dots[NP_SYMIDX(i, j)];
+#endif
       }
     }
 }
@@ -147,9 +177,9 @@ void np_dots(
 // batch1 stays WIDE (bn1out_t) — see nPELICAN.cpp for why (PyTorch sums the
 // unquantized BN output; only the basis op T0 sees the post_agg quantizer).
 void np_bn1(
-    dot_t dots[(NPARTICLES2)*(NPARTICLES2)],
+    dot_t dots[NP_SYMSZ],
     ap_uint<1> nobjmask[NPARTICLES2][NPARTICLES2],
-    bn1out_t batch1[(NPARTICLES2)*(NPARTICLES2)]
+    bn1out_t batch1[NP_SYMSZ]
 ) {
 #if NP_SPLIT_BN1
     #pragma HLS INLINE off
@@ -167,9 +197,11 @@ void np_bn1(
       #pragma HLS unroll
       for(unsigned int j = i; j < NPARTICLES2; j++){
         #pragma HLS unroll
-        bn1out_t v = (bn1out_t)((dots[i*NPARTICLES2+j] * batch1_2to2[1] + bn1_beta)*nobjmask[i][j]);
-        batch1[i*NPARTICLES2+j] = v;
-        if (j != i) batch1[j*NPARTICLES2+i] = v;
+        bn1out_t v = (bn1out_t)((dots[NP_SYMIDX(i, j)] * batch1_2to2[1] + bn1_beta)*nobjmask[i][j]);
+        batch1[NP_SYMIDX(i, j)] = v;
+#ifndef NPELICAN_SPLIT_TRI
+        if (j != i) batch1[NP_SYMIDX(j, i)] = v;
+#endif
       }
     }
 }
@@ -177,7 +209,7 @@ void np_bn1(
 // Stage 3: 2->2 aggregation (parameter-free), normalize-late: raw sums in the
 // widened accumulators, then ONE rescale rounding onto the post_agg (t2) grid.
 void np_agg2to2(
-    bn1out_t batch1[(NPARTICLES2)*(NPARTICLES2)],
+    bn1out_t batch1[NP_SYMSZ],
     t2_t &jmass,
     t2_t jdotp[NPARTICLES2]
 ) {
@@ -203,8 +235,8 @@ void np_agg2to2(
     #pragma HLS unroll
       for (unsigned int j = 0; j < NPARTICLES2; j++) {
       #pragma HLS unroll
-        AggMJ:   jmass_acc    += batch1[i*NPARTICLES2+j];
-        AggJdot: jdotp_acc[j] += batch1[i*NPARTICLES2+j];
+        AggMJ:   jmass_acc    += batch1[NP_SYMIDX(i, j)];
+        AggJdot: jdotp_acc[j] += batch1[NP_SYMIDX(i, j)];
       }
     }
 
@@ -219,7 +251,7 @@ void np_agg2to2(
 // act_layer quantization. MAC accumulates in mac2_t (exact product width), so
 // the only rounding is the relu_t cast.
 void np_eq2to2(
-    bn1out_t batch1[(NPARTICLES2)*(NPARTICLES2)],
+    bn1out_t batch1[NP_SYMSZ],
     t2_t jmass,
     t2_t jdotp[NPARTICLES2],
     ap_uint<1> nobjmask[NPARTICLES2][NPARTICLES2],
@@ -257,7 +289,7 @@ void np_eq2to2(
     #pragma HLS unroll
       for (unsigned int j = 0; j < NPARTICLES2; j++) {
       #pragma HLS unroll
-        LinEq2to2_0: T[i][j][0] = (t2_t)batch1[i*NPARTICLES2+j];   // post_agg quant of batch1
+        LinEq2to2_0: T[i][j][0] = (t2_t)batch1[NP_SYMIDX(i, j)];   // post_agg quant of batch1
         LinEq2to2_1: T[i][j][4] = jmass*nobjmask[i][j];
         LinEq2to2_4: T[i][j][3] = jdotp[i];
         LinEq2to2_5: T[i][j][2] = jdotp[j];
@@ -470,20 +502,27 @@ void nPELICAN(
       }
     }
 
-    dot_t dots[(NPARTICLES2)*(NPARTICLES2)];
+    dot_t dots[NP_SYMSZ];
     #pragma HLS ARRAY_PARTITION variable=dots complete dim=0
     np_dots(model_input, beam_input, nobjmask, dots);
 
 #ifndef __SYNTHESIS__
     // DOTS-LEVEL injection (csim only): same hook/placement as the monolith —
-    // after the dot4 front-end, before BN1.
+    // after the dot4 front-end, before BN1. The override buffer is always full
+    // 484 row-major; under NPELICAN_SPLIT_TRI only the upper triangle is stored
+    // (the golden dots are symmetric, and np_bn1 reads only j>=i anyway).
     if (npelican_dots_override) {
-      for (unsigned int k = 0; k < NPARTICLES2*NPARTICLES2; k++)
-        dots[k] = npelican_dots_override[k];
+      for (unsigned int i = 0; i < NPARTICLES2; i++)
+        for (unsigned int j = i; j < NPARTICLES2; j++) {
+          dots[NP_SYMIDX(i, j)] = npelican_dots_override[i*NPARTICLES2+j];
+#ifndef NPELICAN_SPLIT_TRI
+          if (j != i) dots[NP_SYMIDX(j, i)] = npelican_dots_override[j*NPARTICLES2+i];
+#endif
+        }
     }
 #endif
 
-    bn1out_t batch1[(NPARTICLES2)*(NPARTICLES2)];
+    bn1out_t batch1[NP_SYMSZ];
     #pragma HLS ARRAY_PARTITION variable=batch1 complete dim=0
     np_bn1(dots, nobjmask, batch1);
 
@@ -512,18 +551,19 @@ void nPELICAN(
     if (npelican_dump_fp) {
         FILE* fp = npelican_dump_fp;
 
-        // dots: 484 values, row-major i*22+j
+        // dots: 484 values, row-major i*22+j (NP_SYMIDX keeps the dump full-size
+        // and byte-identical under NPELICAN_SPLIT_TRI: (j,i) reads element (i,j))
         fprintf(fp, "dots:");
         for (unsigned int i = 0; i < NPARTICLES2; i++)
             for (unsigned int j = 0; j < NPARTICLES2; j++)
-                fprintf(fp, " %.17g", (double)dots[i*NPARTICLES2+j]);
+                fprintf(fp, " %.17g", (double)dots[NP_SYMIDX(i, j)]);
         fprintf(fp, "\n");
 
         // batch1: 484 values, row-major (t2-grid; approx)
         fprintf(fp, "batch1:");
         for (unsigned int i = 0; i < NPARTICLES2; i++)
             for (unsigned int j = 0; j < NPARTICLES2; j++)
-                fprintf(fp, " %.17g", (double)batch1[i*NPARTICLES2+j]);
+                fprintf(fp, " %.17g", (double)batch1[NP_SYMIDX(i, j)]);
         fprintf(fp, "\n");
 
         // jmass: 1 value (post-normalization, t2-grid; approx)
@@ -545,7 +585,7 @@ void nPELICAN(
                         T[i][j][b] = 0;
             for (unsigned int i = 0; i < NPARTICLES2; i++)
                 for (unsigned int j = 0; j < NPARTICLES2; j++) {
-                    T[i][j][0] = (t2_t)batch1[i*NPARTICLES2+j];
+                    T[i][j][0] = (t2_t)batch1[NP_SYMIDX(i, j)];
                     T[i][j][4] = jmass*nobjmask[i][j];
                     T[i][j][3] = jdotp[i];
                     T[i][j][2] = jdotp[j];
