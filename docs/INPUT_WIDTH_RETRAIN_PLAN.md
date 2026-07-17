@@ -184,6 +184,25 @@ failure at 8 bits never materialized; the 8-bit damage (−0.023 vs the plateau)
 comes from clipping the constituent tail at 128 GeV and the coarse 1-GeV grid,
 not from the beams.
 
+**Wider-internals control (2026-07-16, professor-requested):** hypothesis was
+that raising weight/act/dot widths could buy back the narrow-input AUC loss.
+Reran pmu 9 and 8 at **w8/a8/i8** (same DATADIR/EPOCHS/SEED as the main sweep):
+
+| pmu W | w6a6i6 AUC | w8a8i8 AUC | Δ | learned scales (w8a8i8) |
+|---|---|---|---|---|
+| 9 | 0.9320 | 0.9255 | −0.0065 | pmu k=1 (LSB 0.5), dot scale 2⁰; best ep 4 |
+| 8 | 0.9075 | 0.9043 | −0.0032 | pmu k=0 (LSB 1), dot scale 2⁰; best ep 6 |
+
+**Hypothesis refuted.** No recovery — both points at/below the w6a6i6 curve
+(deltas within single-seed noise). Consistent with the mechanism: the damage is
+clipping/rounding at the input quantizer (clip ±128 GeV), i.e. information is
+destroyed before any weight multiplies it; downstream precision cannot restore
+it. The learned pmu scales reproduced the w6a6i6 behavior exactly (k=1 at 9
+bits, k=0 at 8 — spurion-protection regime). Per the sub-threshold vsynth data
+above there is also no hardware payoff at these widths, so the
+wider-internals + narrow-input branch is CLOSED; no synthesis run queued.
+Checkpoints: `model/fpga_model_qat_w8a8i8p{9,8}_best.pt` (JupyterHub).
+
 **Recommendation:** take **12 bits** as the resource-work target (12×12 dot
 mults → LUT-implementable, per "What success buys") if ~0.005 AUC is
 acceptable; **14 bits** is the zero-cost fallback. The sub-10 points are
