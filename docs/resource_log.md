@@ -235,6 +235,64 @@ Takeaways:
 - These are utilization-only runs (no XDC/timing in the report); timing status remains
   the csynth estimate (II=1, slack −0.02 ns at 5 ns).
 
+## Clock sweep — is the split overhead a scheduling artifact? (2026-07-16)
+
+Hypothesis (prof): at 5 ns the monolith skips the boundary registers the split is
+forced to have; tighten the clock (`build_prj.tcl period=4|3`, per-period project
+dirs) and the monolith must "buffer" at the same places, so the split−mono gap
+should shrink if it's a scheduling artifact. **Answer: NO — the gap is structural.**
+All runs: current 6:6:6 pmu-12 tree, xcu250 (same VU13P silicon), II=1, timing met
+at every period (csynth est 4.345 / 3.48–3.49 / 2.56–2.57 ns incl. uncertainty).
+Reports archived in `reports/clock_sweep/` (csynth 4/3 ns pairs live on the pod in
+`nPELICAN{,_split}_prj_{4,3}ns/`); vsynth via
+`vivado -mode batch -source vivado_synth[_split].tcl -tclargs _<N>ns`.
+
+csynth estimates:
+
+| clock | build | DSP | FF | LUT | Δ split−mono |
+|-------|-------|-----|-----|------|--------------|
+| 5 ns | mono  | 1,053 | 51,395 | 199,410 | |
+| 5 ns | split | 1,053 | 89,662 | 304,424 | +38.3k FF / **+105.0k LUT** |
+| 4 ns | mono  | 1,053 | 63,250 | 200,210 | |
+| 4 ns | split | 1,053 | 120,096 | 304,440 | +56.8k FF / **+104.2k LUT** |
+| 3 ns | mono  | 1,053 | 82,673 | 201,041 | |
+| 3 ns | split | 1,053 | 136,778 | 304,542 | +54.1k FF / **+103.5k LUT** |
+
+vsynth (netlist ground truth):
+
+| clock | build | LUT | FF | DSP | CARRY8 | SRL16E | Δ split−mono (LUT / FF) |
+|-------|-------|-----|-----|-----|--------|--------|--------------------------|
+| 5 ns | mono  | 48,962 | 21,631 | 1,049 | 3,668 | 27 | |
+| 5 ns | split | 74,219 | 37,593 | 1,049 | 6,328 | 3,425 | **+25.3k (+52%) / +16.0k (+74%)** |
+| 4 ns | mono  | 46,176 | 21,575 | 1,049 | 3,774 | 1,555 | |
+| 4 ns | split | 67,270 | 47,362 | 1,049 | 6,493 | 3,114 | **+21.1k (+46%) / +25.8k (+120%)** |
+| 3 ns | mono  | 45,509 | 33,199 | 1,049 | 3,814 | 1,568 | |
+| 3 ns | split | 71,949 | 53,580 | 1,049 | 6,504 | 3,150 | **+26.4k (+58%) / +20.4k (+61%)** |
+
+Takeaways:
+
+- **The combined LUT+FF gap does not shrink with clock: 41.2k → 46.9k → 46.8k**
+  (5→4→3 ns). Tightening the clock DID force buffers into the monolith (mono FF
+  +54% at 3 ns) and that narrows the FF gap 4→3 ns (25.8k→20.4k), but the LUT gap
+  widens in step (21.1k→26.4k) — overhead shifts columns, total is conserved. The
+  split penalty is per-boundary interface registers + lost cross-boundary sharing,
+  NOT a relaxed-schedule artifact. "Split for attribution, monolith for shipping"
+  survives a 5→3 ns sweep.
+- **The forced buffers are visible and cheap-to-see in the SRL column**: the mono
+  absorbed 4 ns almost entirely as SRL16E (27→1,555, FF flat 21.6k) and only at
+  3 ns spilled into real FFs (+11.6k). The split can't do this — its boundary
+  registers are architectural.
+- **DSP: 1,049 everywhere** (both builds, all three clocks; csynth 1,053 → −4
+  rule holds again). Per-stage DSP attribution is exact and clock-invariant.
+- **csynth grossly overstates the split penalty**: ΔLUT ~104–105k estimated vs
+  21–26k at the netlist (~80% is estimation artifact — Vivado's cross-hierarchy
+  flattening recovers the sharing HLS's per-instance estimate can't see). Never
+  quote split overhead from csynth.
+- csynth LUT is clock-flat in BOTH builds (mono 199–201k, split 304.4–304.5k) —
+  csynth LUT simply doesn't see scheduling; only its FF column responds to clock.
+- Latency: mono 13 → split 20 cyc at 5 ns (the +7 boundary stages), II=1 in all
+  six runs.
+
 ## Phase 2 bit-exactness — interpretation
 
 Zero-tolerance 200/200 csim vs the PyTorch quant logits is **not achievable for this
