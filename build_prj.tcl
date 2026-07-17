@@ -14,6 +14,7 @@ array set opt {
     split_only 0
     const_beams 0
     mac_dsp    0
+    period     0
 }
 
 set tcldir [file dirname [info script]]
@@ -189,6 +190,17 @@ if {$opt(split)} {
 } else {
     set src_file firmware/${project_name}.cpp
     set prj_dir  ${project_name}_prj
+}
+
+# period=<ns>: override the clock period from project.tcl (clock-sweep
+# experiment: does tightening the clock force the monolith to register its
+# stage boundaries, shrinking the split-vs-monolith resource gap?). Uses a
+# per-period project dir so the default-period reports are never clobbered.
+# clock_uncertainty stays the project.tcl percentage, so it scales with the
+# period.
+if {$opt(period) != 0} {
+    set clock_period $opt(period)
+    set prj_dir ${prj_dir}_${opt(period)}ns
 }
 
 # Resource-lever build flags (docs/RESOURCE_REDUCTION_LEVERS.md). Both are
