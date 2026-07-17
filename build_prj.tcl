@@ -113,9 +113,12 @@ proc add_vcd_instructions_tcl {} {
     file rename -force $temp $filename
 }
 
+# Anchored so one option name can't match inside another's argument: the old
+# unanchored pattern made "vsynth=0" also set synth=0 (silent no-op builds
+# unless a later synth=1 arg re-overrode it).
 foreach arg $::argv {
     foreach o [lsort [array names opt]] {
-        regexp "$o=+(\\w+)" $arg unused opt($o)
+        regexp "^${o}=(\\w+)$" $arg unused opt($o)
     }
 }
 
