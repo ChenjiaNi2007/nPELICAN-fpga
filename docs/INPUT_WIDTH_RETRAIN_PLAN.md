@@ -200,8 +200,28 @@ destroyed before any weight multiplies it; downstream precision cannot restore
 it. The learned pmu scales reproduced the w6a6i6 behavior exactly (k=1 at 9
 bits, k=0 at 8 — spurion-protection regime). Per the sub-threshold vsynth data
 above there is also no hardware payoff at these widths, so the
-wider-internals + narrow-input branch is CLOSED; no synthesis run queued.
+wider-internals + narrow-input branch is CLOSED.
 Checkpoints: `model/fpga_model_qat_w8a8i8p{9,8}_best.pt` (JupyterHub).
+
+Synthesis @ w8a8i8p9 was run anyway (2026-07-16,
+`reports/{csynth,vsynth}_monolith_w8a8i8p9.rpt`) and confirms the verdict in
+hardware — dominated by pmu12 on every axis except non-binding DSP:
+
+| build | vsynth LUT | FF | DSP | CARRY8 | csynth cyc | AUC |
+|---|---|---|---|---|---|---|
+| w6a6i6 pmu12 (op point) | 69,112 | 24,815 | 1169 | 7,032 | 14 | 0.9519 |
+| w6a6i6 pmu9 | 97,174 | 22,514 | 998 | 9,263 | 15 | 0.9320 |
+| **w8a8i8 pmu9** | 100,669 | 26,626 | 918 | 10,531 | 15 | 0.9255 |
+
+vs the pmu12 operating point: +31.6k LUT (+46%), +1 latency cycle, −0.026 AUC,
+for −251 DSP in a design at 7.5% DSP / 5.8% LUT of device. Widening internals
+6→8 itself (pmu9 row vs row): +3.5k LUT, +4.1k FF, +1.3k CARRY8, −80 DSP
+(sub-threshold DSP counts are noise), −0.0065 AUC — the wider eq2to2/BN fabric
+costs real LUT and buys nothing. Calibration notes: csynth 922 DSP → vsynth
+918 (the −4 rule HELD here, unlike w6a6i6p9's +246 re-inference — at w8 HLS
+bound the surviving mults explicitly, e.g. 22× mul_17s_21ns_38 @ 1 DSP, while
+8s×6s MAC mults went to fabric @ 40 LUT); csynth LUT 263k → vsynth 101k
+(ratio 0.38, matching the fabric-heavy pmu8 calibration).
 
 **Recommendation:** take **12 bits** as the resource-work target (12×12 dot
 mults → LUT-implementable, per "What success buys") if ~0.005 AUC is
