@@ -60,7 +60,10 @@ stage_and_launch() {
   rm -rf "$D"; mkdir -p "$D"
   rm -f "$RPT_DIR/csynth_nhid${N}.rpt" "$RPT_DIR/vsynth_nhid${N}.rpt"   # drop stale
   # Invariant sources (skip the 544M tb_data + any *_prj); symlink tb_data (unused, csim=0).
-  cp -R "$FW/firmware" "$FW/third_party" "$D/"
+  cp -R "$FW/firmware" "$D/"
+  # third_party (open-source ap_types) is only for the local g++ csim; Vitis HLS
+  # supplies its own ap_* headers for synthesis, so copy it only if it exists.
+  if [[ -d "$FW/third_party" ]]; then cp -R "$FW/third_party" "$D/"; fi
   cp "$FW/nPELICAN_tb.cpp" "$FW/build_prj.tcl" "$FW/project.tcl" "$FW/vivado_synth.tcl" "$D/"
   ln -s "$FW/tb_data" "$D/tb_data"
   # Correct per-N weights INTO firmware/weights/ (the include location), + NHIDDEN.
