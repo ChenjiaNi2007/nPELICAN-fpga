@@ -99,7 +99,10 @@ for N in $NS; do
   "$PY" "$TOOLS" set-nhidden --header "$HDR" --n "$N"
 
   # 4) Export snapped weights + per-quantizer generated types for THIS checkpoint.
-  ( cd "$FW" && "$PY" model_loader.py --model "$CKPT" --quant --repo "$PN" )
+  #    MUST target firmware/weights/ — the firmware includes "weights/weights.h"
+  #    relative to firmware/, so the repo-root weights/ (loader default) is ignored.
+  ( cd "$FW" && "$PY" model_loader.py --model "$CKPT" --quant --repo "$PN" \
+        --out firmware/weights/weights.h )
 
   # 5) Regenerate golden vectors from the PyTorch quant model (checkpoint-specific).
   ( cd "$PN" && "$PY" scripts/export_golden.py \

@@ -51,16 +51,40 @@ model size. Defaults: `WBITS=6 ABITS=6 IBITS=6 PMU=12`, `SEED=42`,
 - `sweep_pareto.png` — AUC vs DSP, annotated with `h=N`
 - per-N csynth reports copied to `../reports/csynth_nhid<N>.rpt`
 
-## Split accuracy (local) from resources (remote Vitis)
+## Resources: parallel csynth over the trained checkpoints
 
-If the box has no Vitis, `DO_SYNTH=auto` completes the accuracy half and stages the
-firmware per N. Later, on the Vitis box, run `vitis_hls -f build_prj.tcl` for each
-staged N and backfill:
+`sweep_nhidden.sh` completes the accuracy half anywhere; run resources separately on
+the Vitis box with **`synth_sweep.sh`**. It stages an isolated per-N tree under
+`synth_builds/nhid<N>/` (each with the correct `firmware/weights/` and `NHIDDEN`),
+launches `vitis_hls` concurrently, then backfills `sweep_results.csv` and re-plots.
 
 ```bash
-python sweep_tools.py parse-csynth --rpt <path>/nPELICAN_csynth.rpt
-python sweep_plot.py --csv sweep_results.csv   # re-render with resources
+# on the Vitis box, after sweep_nhidden.sh has trained the checkpoints:
+export XILINX_HLS=/tools/Xilinx/Vitis_HLS/2023.2
+export XILINX_VIVADO=/tools/Xilinx/Vivado/2023.2
+export PATH=$XILINX_HLS/bin:$XILINX_VIVADO/bin:$PATH
+
+PY=../../PELICAN-nano/.venv/bin/python NS="1 2 3 4 6" ./synth_sweep.sh
+# knobs: VSYNTH=1 (Vivado post-synth LUT/FF), JOBS=3 (throttle concurrency)
 ```
+
+Each run uses `reset=1 csim=0 synth=1 cosim=0 validation=0 export=0 vsynth=$VSYNTH`.
+Manual single-N backfill is also available:
+
+```bash
+python sweep_tools.py backfill --csv sweep_results.csv --n 4 \
+    --rpt synth_builds/nhid4/nPELICAN_prj/solution/syn/report/nPELICAN_csynth.rpt
+python sweep_plot.py --csv sweep_results.csv
+```
+
+### The firmware/weights gotcha (why csim can read `fail`)
+
+The firmware includes `"weights/weights.h"` **relative to `firmware/`**, i.e.
+`firmware/weights/weights.h` — NOT the repo-root `weights/`. `model_loader.py`'s
+default `--out weights/weights.h` writes to the wrong place, so the firmware keeps
+compiling stale weights while `NHIDDEN` changes → out-of-bounds indexing → `csim=fail`
+and invalid synthesis. Both `sweep_nhidden.sh` and `synth_sweep.sh` pass
+`--out .../firmware/weights/weights.h` to fix this. If you export by hand, do the same.
 
 ## Notes
 

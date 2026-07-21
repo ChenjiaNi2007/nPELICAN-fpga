@@ -11,6 +11,8 @@ Subcommands (each prints one line to stdout so the bash driver can capture it):
   set-nhidden   --header H --n N        -> rewrites `#define NHIDDEN N` in nPELICAN.h
   parse-csynth  --rpt F                 -> LUT,FF,DSP,BRAM,lat_cycles,lat_ns,II
                                           (top-level module row of a Vitis csynth rpt)
+  backfill      --csv C --n N --rpt F   -> fill the resource columns of the n_hidden==N
+                                          row in an existing sweep_results.csv
 
 Only count-params imports torch/Brevitas (and only under --quant checkpoints).
 """
@@ -108,6 +110,28 @@ def parse_csynth(rpt):
     return "NA,NA,NA,NA,NA,NA,NA"
 
 
+def backfill(csv_path, n, rpt):
+    import csv as _csv
+    res = parse_csynth(rpt).split(",")  # LUT,FF,DSP,BRAM,lat_cycles,lat_ns,II
+    cols = ["LUT", "FF", "DSP", "BRAM", "lat_cycles", "lat_ns", "II"]
+    with open(csv_path) as f:
+        rows = list(_csv.reader(f))
+    header = rows[0]
+    idx = {name: i for i, name in enumerate(header)}
+    nh = idx["n_hidden"]
+    hit = False
+    for r in rows[1:]:
+        if r and r[nh] == str(n):
+            for name, val in zip(cols, res):
+                r[idx[name]] = val
+            hit = True
+    if not hit:
+        return f"no row with n_hidden={n} in {csv_path}"
+    with open(csv_path, "w", newline="") as f:
+        _csv.writer(f).writerows(rows)
+    return f"n_hidden={n}: {','.join(res)}"
+
+
 def main():
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -116,6 +140,7 @@ def main():
     s = sub.add_parser("metrics"); s.add_argument("--prefix", required=True); s.add_argument("--logdir", required=True)
     s = sub.add_parser("set-nhidden"); s.add_argument("--header", required=True); s.add_argument("--n", type=int, required=True)
     s = sub.add_parser("parse-csynth"); s.add_argument("--rpt", required=True)
+    s = sub.add_parser("backfill"); s.add_argument("--csv", required=True); s.add_argument("--n", required=True); s.add_argument("--rpt", required=True)
 
     a = p.parse_args()
     if a.cmd == "count-params":
@@ -126,6 +151,8 @@ def main():
         print(set_nhidden(a.header, a.n))
     elif a.cmd == "parse-csynth":
         print(parse_csynth(a.rpt))
+    elif a.cmd == "backfill":
+        print(backfill(a.csv, a.n, a.rpt))
 
 
 if __name__ == "__main__":
