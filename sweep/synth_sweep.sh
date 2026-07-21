@@ -47,11 +47,18 @@ fi
 mkdir -p "$BUILD" "$RPT_DIR"
 FLAGS="reset=1 csim=0 synth=1 cosim=0 validation=0 export=0 vsynth=${VSYNTH}"
 
+# Each N is fully isolated in $BUILD/nhid<N>/, so the per-tree nPELICAN_prj and
+# vivado_synth.rpt never collide across parallel jobs. Belt-and-suspenders: the job
+# copies its OWN reports into uniquely-named reports/{csynth,vsynth}_nhid<N>.rpt the
+# instant it finishes (before any re-run could rm -rf the tree), and stale copies are
+# cleared up front so a failed job can't leave an old report to be mis-recorded.
+# The CSV backfill stays in the serial post-wait loop (one writer, no corruption).
 stage_and_launch() {
   local N="$1" PREFIX="nhid$1" CKPT="$PN/model/nhid$1_best.pt" D="$BUILD/nhid$1"
   [[ -f "$CKPT" ]] || { echo "  [$N] SKIP: no checkpoint $CKPT"; return 0; }
   echo "  [$N] staging $D"
   rm -rf "$D"; mkdir -p "$D"
+  rm -f "$RPT_DIR/csynth_nhid${N}.rpt" "$RPT_DIR/vsynth_nhid${N}.rpt"   # drop stale
   # Invariant sources (skip the 544M tb_data + any *_prj); symlink tb_data (unused, csim=0).
   cp -R "$FW/firmware" "$FW/third_party" "$D/"
   cp "$FW/nPELICAN_tb.cpp" "$FW/build_prj.tcl" "$FW/project.tcl" "$FW/vivado_synth.tcl" "$D/"
@@ -61,7 +68,15 @@ stage_and_launch() {
   ( cd "$FW" && "$PY" model_loader.py --model "$CKPT" --quant --repo "$PN" \
         --out "$D/firmware/weights/weights.h" ) >"$D/export.log" 2>&1
   echo "  [$N] launching csynth (log: $D/synth_run.log)"
-  ( cd "$D" && vitis_hls -f build_prj.tcl "$FLAGS" >"$D/synth_run.log" 2>&1 ) &
+  (
+    cd "$D"
+    vitis_hls -f build_prj.tcl "$FLAGS" >synth_run.log 2>&1 || true
+    # Capture reports immediately into unique per-N files (no cross-job overwrite).
+    cp -f nPELICAN_prj/solution/syn/report/nPELICAN_csynth.rpt \
+          "$RPT_DIR/csynth_nhid${N}.rpt" 2>/dev/null || true
+    [[ "$VSYNTH" == 1 ]] && cp -f vivado_synth.rpt \
+          "$RPT_DIR/vsynth_nhid${N}.rpt" 2>/dev/null || true
+  ) &
 }
 
 # Launch, with optional concurrency throttle.
@@ -74,22 +89,19 @@ done
 wait
 echo "All synth jobs finished."
 
-# Backfill + copy reports.
+# Serial backfill from the per-N report copies captured by each job (single CSV writer).
 for N in $NS; do
-  D="$BUILD/nhid$N"
-  RPT="$D/nPELICAN_prj/solution/syn/report/nPELICAN_csynth.rpt"
+  RPT="$RPT_DIR/csynth_nhid${N}.rpt"
   if [[ -f "$RPT" ]]; then
-    cp "$RPT" "$RPT_DIR/csynth_nhid${N}.rpt"
     echo "  [$N] HLS   $("$PY" "$TOOLS" backfill --csv "$RESULTS" --n "$N" --rpt "$RPT")"
   else
-    echo "  [$N] NO HLS REPORT — check $D/synth_run.log"
+    echo "  [$N] NO HLS REPORT — check $BUILD/nhid$N/synth_run.log"
   fi
-  VRPT="$D/vivado_synth.rpt"
+  VRPT="$RPT_DIR/vsynth_nhid${N}.rpt"
   if [[ "$VSYNTH" == 1 && -f "$VRPT" ]]; then
-    cp "$VRPT" "$RPT_DIR/vsynth_nhid${N}.rpt"
     echo "  [$N] vsyn  $("$PY" "$TOOLS" backfill-vsynth --csv "$RESULTS" --n "$N" --rpt "$VRPT")"
   elif [[ "$VSYNTH" == 1 ]]; then
-    echo "  [$N] NO VSYNTH REPORT — check $D/synth_run.log (vivado step)"
+    echo "  [$N] NO VSYNTH REPORT — check $BUILD/nhid$N/synth_run.log (vivado step)"
   fi
 done
 

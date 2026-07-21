@@ -58,6 +58,11 @@ the Vitis box with **`synth_sweep.sh`**. It stages an isolated per-N tree under
 `synth_builds/nhid<N>/` (each with the correct `firmware/weights/` and `NHIDDEN`),
 launches `vitis_hls` concurrently, then backfills `sweep_results.csv` and re-plots.
 
+Concurrency safety: each N has its own tree, so per-tree `nPELICAN_prj/` and
+`vivado_synth.rpt` never collide. Each job copies its own reports into unique
+`reports/{csynth,vsynth}_nhid<N>.rpt` the moment it finishes (stale copies cleared at
+stage time), and the CSV backfill runs serially after `wait` — one writer, no races.
+
 ```bash
 # on the Vitis box, after sweep_nhidden.sh has trained the checkpoints:
 export XILINX_HLS=/tools/Xilinx/Vitis_HLS/2023.2
