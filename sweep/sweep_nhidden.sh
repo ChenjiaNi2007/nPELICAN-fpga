@@ -9,10 +9,20 @@
 #   remote Vitis csynth (if available) -> append one row to sweep_results.csv ->
 #   render figures.
 #
+# The quant config + regularization are PINNED to the production recipe
+# (PELICAN-nano/scripts/sweep_pmu_width.sh: w/a/i = 6/6/6, pmu = 12) and held fixed
+# so every point differs ONLY in --n-hidden. Do not rely on argparse defaults here:
+# they are 8/8/8 with pmu=None (== float, UN-quantized momenta), which does not match
+# the firmware input_t.
+#
 # Config via env:
 #   NS="1 2 3 4 6"      widths to sweep
 #   EPOCHS=8            training epochs  (cos LR needs >=8; set DECAY=flat for >=5)
 #   DECAY=cos           --lr-decay-type
+#   WBITS=6 ABITS=6 IBITS=6 PMU=12   weight / act / input(dot) / momentum bit widths
+#   SEED=42             fixed across widths for comparability
+#   DROP=0.05 DROP_OUT=0.05 WD=0.005 NOBJ=20 NOBJ_AVG=49 BATCH=256   production recipe
+#   DEVICE="--no-reproducible"       extra train flags (e.g. "--cuda --no-reproducible")
 #   GOLDEN_N=200        events for golden-vector regen / csim
 #   DATADIR=data/sample_data  h5 dir (globbed for *train/valid/test*.h5), rel. to PELICAN-nano
 #   DO_SYNTH=auto       auto|yes|no  (auto = run csynth only if `vitis_hls` on PATH)
@@ -30,6 +40,20 @@ PN="${PN:-$WS/PELICAN-nano}"                      # training repo (sibling by de
 NS="${NS:-1 2 3 4 6}"
 EPOCHS="${EPOCHS:-8}"
 DECAY="${DECAY:-cos}"
+# Quant config (production recipe: 6/6/6/12), held fixed across the sweep.
+WBITS="${WBITS:-6}"
+ABITS="${ABITS:-6}"
+IBITS="${IBITS:-6}"
+PMU="${PMU:-12}"
+# Regularization / data recipe, held fixed; SEED fixed for comparability.
+SEED="${SEED:-42}"
+DROP="${DROP:-0.05}"
+DROP_OUT="${DROP_OUT:-0.05}"
+WD="${WD:-0.005}"
+NOBJ="${NOBJ:-20}"
+NOBJ_AVG="${NOBJ_AVG:-49}"
+BATCH="${BATCH:-256}"
+DEVICE="${DEVICE:---no-reproducible}"   # QAT on GPU needs --no-reproducible (kthvalue calib)
 GOLDEN_N="${GOLDEN_N:-200}"
 DATADIR="${DATADIR:-data/sample_data}"
 DO_SYNTH="${DO_SYNTH:-auto}"
@@ -55,11 +79,16 @@ for N in $NS; do
   echo ""
   echo "================ n_hidden = $N ($PREFIX) ================"
 
-  # 1) Train (QAT). --no-reproducible required for QAT on GPU (kthvalue calibration).
+  # 1) Train (QAT) at the pinned production config; only --n-hidden varies.
   ( cd "$PN" && "$PY" train_pelican_nano.py \
         --prefix "$PREFIX" --n-hidden "$N" --datadir "$DATADIR" \
-        --quant --po2-scales --no-reproducible \
-        --num-epoch "$EPOCHS" --lr-decay-type "$DECAY" )
+        --target is_signal --nobj "$NOBJ" --nobj-avg "$NOBJ_AVG" \
+        --num-epoch "$EPOCHS" --lr-decay-type "$DECAY" --batch-size "$BATCH" \
+        --quant --po2-scales \
+        --weight-bit-width "$WBITS" --act-bit-width "$ABITS" \
+        --input-bit-width "$IBITS" --pmu-bit-width "$PMU" \
+        --drop-rate "$DROP" --drop-rate-out "$DROP_OUT" --weight-decay "$WD" \
+        --seed "$SEED" $DEVICE )
 
   # 2) Parameter count + accuracy from this checkpoint.
   PARAMS="$("$PY" "$TOOLS" count-params --ckpt "$CKPT" --repo "$PN")"

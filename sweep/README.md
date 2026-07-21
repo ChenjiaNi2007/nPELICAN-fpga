@@ -23,7 +23,21 @@ Vitis csynth (if `vitis_hls` on PATH) → append a row → render figures.
 
 Env knobs: `NS`, `EPOCHS` (cos LR needs ≥8; `DECAY=flat` allows ≥5), `GOLDEN_N`,
 `DATADIR` (h5 dir globbed for train/valid/test, **rel. to PELICAN-nano**; default
-`data/sample_data`), `DO_SYNTH` (`auto`/`yes`/`no`), `PN`, `PY`.
+`data/sample_data`), `DO_SYNTH` (`auto`/`yes`/`no`), `PN`, `PY`, plus the pinned
+quant/recipe knobs below.
+
+### Pinned quant + training config (only `--n-hidden` varies)
+
+The bit widths and regularization are **fixed** to the production recipe
+(`PELICAN-nano/scripts/sweep_pmu_width.sh`) so every sweep point differs only in
+model size. Defaults: `WBITS=6 ABITS=6 IBITS=6 PMU=12`, `SEED=42`,
+`DROP=0.05 DROP_OUT=0.05 WD=0.005 NOBJ=20 NOBJ_AVG=49 BATCH=256`,
+`DEVICE="--no-reproducible"`.
+
+> **Do not** drop the bit-width flags: argparse defaults are `8/8/8` with
+> `pmu=None`, and `pmu=None` leaves the momenta **un-quantized (float)** — which
+> does not match the firmware `input_t`. Override e.g. `PMU=9` to move the momentum
+> grid, but keep every knob identical across the whole sweep.
 
 > The trainer globs `--datadir/*.h5` and picks files by `train`/`valid`/`test` in
 > the name — it does **not** recurse. Point `DATADIR` at the dir that directly holds
