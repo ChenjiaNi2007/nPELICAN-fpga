@@ -11,8 +11,12 @@ Subcommands (each prints one line to stdout so the bash driver can capture it):
   set-nhidden   --header H --n N        -> rewrites `#define NHIDDEN N` in nPELICAN.h
   parse-csynth  --rpt F                 -> LUT,FF,DSP,BRAM,lat_cycles,lat_ns,II
                                           (top-level module row of a Vitis csynth rpt)
-  backfill      --csv C --n N --rpt F   -> fill the resource columns of the n_hidden==N
+  parse-vsynth  --rpt F                 -> vLUT,vFF,vDSP,vBRAM  (Vivado post-synth
+                                          report_utilization; the REAL resource counts)
+  backfill      --csv C --n N --rpt F   -> fill HLS resource columns of the n_hidden==N
                                           row in an existing sweep_results.csv
+  backfill-vsynth --csv C --n N --rpt F -> fill the vLUT/vFF/vDSP/vBRAM columns (adds
+                                          them if the csv predates vsynth support)
 
 Only count-params imports torch/Brevitas (and only under --quant checkpoints).
 """
@@ -110,26 +114,62 @@ def parse_csynth(rpt):
     return "NA,NA,NA,NA,NA,NA,NA"
 
 
-def backfill(csv_path, n, rpt):
+def parse_vsynth(rpt):
+    # Vivado report_utilization; grab the summary rows. Real counts (post-synth),
+    # typically much lower than the HLS csynth estimate.
+    labels = {
+        "CLB LUTs": "vLUT", "CLB Registers": "vFF",
+        "DSPs": "vDSP", "Block RAM Tile": "vBRAM",
+    }
+    out = {v: "NA" for v in labels.values()}
+    with open(rpt) as f:
+        for line in f:
+            cells = [c.strip() for c in line.split("|")]
+            if len(cells) < 3:
+                continue
+            key = labels.get(cells[1].rstrip("*"))
+            if key and out[key] == "NA":
+                m = re.search(r"\d+", cells[2])
+                if m:
+                    out[key] = m.group(0)
+    return "{vLUT},{vFF},{vDSP},{vBRAM}".format(**out)
+
+
+def _backfill(csv_path, n, cols, vals, add_missing=False):
     import csv as _csv
-    res = parse_csynth(rpt).split(",")  # LUT,FF,DSP,BRAM,lat_cycles,lat_ns,II
-    cols = ["LUT", "FF", "DSP", "BRAM", "lat_cycles", "lat_ns", "II"]
     with open(csv_path) as f:
         rows = list(_csv.reader(f))
     header = rows[0]
+    for c in cols:
+        if c not in header:
+            if not add_missing:
+                raise SystemExit(f"column {c} not in {csv_path}")
+            header.append(c)
+            for r in rows[1:]:
+                r.append("NA")
     idx = {name: i for i, name in enumerate(header)}
     nh = idx["n_hidden"]
     hit = False
     for r in rows[1:]:
         if r and r[nh] == str(n):
-            for name, val in zip(cols, res):
+            for name, val in zip(cols, vals):
                 r[idx[name]] = val
             hit = True
     if not hit:
         return f"no row with n_hidden={n} in {csv_path}"
     with open(csv_path, "w", newline="") as f:
         _csv.writer(f).writerows(rows)
-    return f"n_hidden={n}: {','.join(res)}"
+    return f"n_hidden={n}: {','.join(vals)}"
+
+
+def backfill(csv_path, n, rpt):
+    cols = ["LUT", "FF", "DSP", "BRAM", "lat_cycles", "lat_ns", "II"]
+    return _backfill(csv_path, n, cols, parse_csynth(rpt).split(","))
+
+
+def backfill_vsynth(csv_path, n, rpt):
+    cols = ["vLUT", "vFF", "vDSP", "vBRAM"]
+    return _backfill(csv_path, n, cols, parse_vsynth(rpt).split(","), add_missing=True)
 
 
 def main():
@@ -140,7 +180,9 @@ def main():
     s = sub.add_parser("metrics"); s.add_argument("--prefix", required=True); s.add_argument("--logdir", required=True)
     s = sub.add_parser("set-nhidden"); s.add_argument("--header", required=True); s.add_argument("--n", type=int, required=True)
     s = sub.add_parser("parse-csynth"); s.add_argument("--rpt", required=True)
+    s = sub.add_parser("parse-vsynth"); s.add_argument("--rpt", required=True)
     s = sub.add_parser("backfill"); s.add_argument("--csv", required=True); s.add_argument("--n", required=True); s.add_argument("--rpt", required=True)
+    s = sub.add_parser("backfill-vsynth"); s.add_argument("--csv", required=True); s.add_argument("--n", required=True); s.add_argument("--rpt", required=True)
 
     a = p.parse_args()
     if a.cmd == "count-params":
@@ -151,8 +193,12 @@ def main():
         print(set_nhidden(a.header, a.n))
     elif a.cmd == "parse-csynth":
         print(parse_csynth(a.rpt))
+    elif a.cmd == "parse-vsynth":
+        print(parse_vsynth(a.rpt))
     elif a.cmd == "backfill":
         print(backfill(a.csv, a.n, a.rpt))
+    elif a.cmd == "backfill-vsynth":
+        print(backfill_vsynth(a.csv, a.n, a.rpt))
 
 
 if __name__ == "__main__":

@@ -14,7 +14,8 @@
 #
 # Env:
 #   NS="1 2 3 4 6"   widths (must have model/nhid<N>_best.pt already)
-#   VSYNTH=0         1 = also run Vivado post-synth (real LUT/FF; slower)
+#   VSYNTH=1         also run Vivado post-synth -> real vLUT/vFF/vDSP/vBRAM columns
+#                    (needs `vivado` on PATH too; set 0 for HLS estimates only, faster)
 #   JOBS=0           max concurrent synth jobs (0 = all at once)
 #   PN=... PY=...    training repo / python (for model_loader export)
 set -euo pipefail
@@ -25,7 +26,7 @@ WS="$(cd "$FW/.." && pwd)"
 PN="${PN:-$WS/PELICAN-nano}"
 PY="${PY:-python}"
 NS="${NS:-1 2 3 4 6}"
-VSYNTH="${VSYNTH:-0}"
+VSYNTH="${VSYNTH:-1}"
 JOBS="${JOBS:-0}"
 
 TOOLS="$SWEEP_DIR/sweep_tools.py"
@@ -37,6 +38,10 @@ command -v vitis_hls >/dev/null 2>&1 || {
   echo "ERROR: vitis_hls not on PATH. Source your Xilinx env first (see header)." >&2
   exit 1
 }
+if [[ "$VSYNTH" == 1 ]] && ! command -v vivado >/dev/null 2>&1; then
+  echo "ERROR: VSYNTH=1 but 'vivado' not on PATH. Add \$XILINX_VIVADO/bin, or set VSYNTH=0." >&2
+  exit 1
+fi
 [[ -f "$RESULTS" ]] || { echo "ERROR: $RESULTS not found (run sweep_nhidden.sh first)." >&2; exit 1; }
 
 mkdir -p "$BUILD" "$RPT_DIR"
@@ -71,12 +76,20 @@ echo "All synth jobs finished."
 
 # Backfill + copy reports.
 for N in $NS; do
-  RPT="$BUILD/nhid$N/nPELICAN_prj/solution/syn/report/nPELICAN_csynth.rpt"
+  D="$BUILD/nhid$N"
+  RPT="$D/nPELICAN_prj/solution/syn/report/nPELICAN_csynth.rpt"
   if [[ -f "$RPT" ]]; then
     cp "$RPT" "$RPT_DIR/csynth_nhid${N}.rpt"
-    echo "  [$N] $("$PY" "$TOOLS" backfill --csv "$RESULTS" --n "$N" --rpt "$RPT")"
+    echo "  [$N] HLS   $("$PY" "$TOOLS" backfill --csv "$RESULTS" --n "$N" --rpt "$RPT")"
   else
-    echo "  [$N] NO REPORT — check $BUILD/nhid$N/synth_run.log"
+    echo "  [$N] NO HLS REPORT — check $D/synth_run.log"
+  fi
+  VRPT="$D/vivado_synth.rpt"
+  if [[ "$VSYNTH" == 1 && -f "$VRPT" ]]; then
+    cp "$VRPT" "$RPT_DIR/vsynth_nhid${N}.rpt"
+    echo "  [$N] vsyn  $("$PY" "$TOOLS" backfill-vsynth --csv "$RESULTS" --n "$N" --rpt "$VRPT")"
+  elif [[ "$VSYNTH" == 1 ]]; then
+    echo "  [$N] NO VSYNTH REPORT — check $D/synth_run.log (vivado step)"
   fi
 done
 

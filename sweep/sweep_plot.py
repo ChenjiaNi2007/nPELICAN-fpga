@@ -74,13 +74,17 @@ def main():
     fig.savefig(p1, dpi=150)
     print("wrote", p1)
 
-    # ---- resources vs params (only rows with numeric synth data) ----
-    res_rows = [r for r in rows if _f(r.get("LUT")) is not None]
+    # ---- resources vs params ----
+    # Prefer Vivado post-synth (vLUT/...) when present; else HLS estimate (LUT/...).
+    use_v = any(_f(r.get("vLUT")) is not None for r in rows)
+    lut_c, ff_c, dsp_c = ("vLUT", "vFF", "vDSP") if use_v else ("LUT", "FF", "DSP")
+    src = "Vivado post-synth" if use_v else "HLS estimate"
+    res_rows = [r for r in rows if _f(r.get(lut_c)) is not None]
     if res_rows:
         rp = [_f(r["params"]) for r in res_rows]
-        lut = [_f(r["LUT"]) for r in res_rows]
-        ff = [_f(r["FF"]) for r in res_rows]
-        dsp = [_f(r["DSP"]) for r in res_rows]
+        lut = [_f(r[lut_c]) for r in res_rows]
+        ff = [_f(r[ff_c]) for r in res_rows]
+        dsp = [_f(r[dsp_c]) for r in res_rows]
 
         fig, ax = plt.subplots(figsize=(6, 4))
         ax.plot(rp, lut, "o-", label="LUT", color="tab:red")
@@ -93,7 +97,7 @@ def main():
         ax2.set_ylabel("DSP")
         lines = ax.get_lines() + ax2.get_lines()
         ax.legend(lines, [ln.get_label() for ln in lines], loc="upper left")
-        ax.set_title("nPELICAN FPGA resources vs model size")
+        ax.set_title(f"nPELICAN FPGA resources vs model size ({src})")
         fig.tight_layout()
         p2 = os.path.join(a.outdir, "sweep_resources.png")
         fig.savefig(p2, dpi=150)
@@ -108,7 +112,7 @@ def main():
                 if x is not None and y is not None:
                     ax.annotate(f"h={n}", (x, y), textcoords="offset points",
                                 xytext=(5, 5), fontsize=8)
-            ax.set_xlabel("DSP")
+            ax.set_xlabel(f"DSP ({src})")
             ax.set_ylabel("AUC")
             ax.set_title("Accuracy / DSP Pareto front")
             ax.grid(True, alpha=0.3)

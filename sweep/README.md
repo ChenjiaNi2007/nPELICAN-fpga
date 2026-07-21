@@ -65,15 +65,24 @@ export XILINX_VIVADO=/tools/Xilinx/Vivado/2023.2
 export PATH=$XILINX_HLS/bin:$XILINX_VIVADO/bin:$PATH
 
 PY=../../PELICAN-nano/.venv/bin/python NS="1 2 3 4 6" ./synth_sweep.sh
-# knobs: VSYNTH=1 (Vivado post-synth LUT/FF), JOBS=3 (throttle concurrency)
+# knobs: VSYNTH=1 (default; adds Vivado post-synth cols), JOBS=3 (throttle concurrency)
 ```
 
 Each run uses `reset=1 csim=0 synth=1 cosim=0 validation=0 export=0 vsynth=$VSYNTH`.
+`VSYNTH=1` (default) additionally runs `vivado` post-synthesis and adds real
+**`vLUT,vFF,vDSP,vBRAM`** columns — these are the numbers to report (the HLS
+`LUT/FF/...` columns are pre-implementation *estimates*, typically ~3× high on LUTs).
+The plots automatically prefer the `v*` columns when present. Needs `vivado` on PATH;
+set `VSYNTH=0` for HLS estimates only (faster). Does **not** retrain — reuses the
+`model/nhid<N>_best.pt` checkpoints.
+
 Manual single-N backfill is also available:
 
 ```bash
 python sweep_tools.py backfill --csv sweep_results.csv --n 4 \
     --rpt synth_builds/nhid4/nPELICAN_prj/solution/syn/report/nPELICAN_csynth.rpt
+python sweep_tools.py backfill-vsynth --csv sweep_results.csv --n 4 \
+    --rpt synth_builds/nhid4/vivado_synth.rpt
 python sweep_plot.py --csv sweep_results.csv
 ```
 
