@@ -22,7 +22,12 @@ Per N: train QAT → count params + read AUC/accuracy → set `NHIDDEN` → expo
 Vitis csynth (if `vitis_hls` on PATH) → append a row → render figures.
 
 Env knobs: `NS`, `EPOCHS` (cos LR needs ≥8; `DECAY=flat` allows ≥5), `GOLDEN_N`,
-`DO_SYNTH` (`auto`/`yes`/`no`), `PN`, `PY`.
+`DATADIR` (h5 dir globbed for train/valid/test, **rel. to PELICAN-nano**; default
+`data/sample_data`), `DO_SYNTH` (`auto`/`yes`/`no`), `PN`, `PY`.
+
+> The trainer globs `--datadir/*.h5` and picks files by `train`/`valid`/`test` in
+> the name — it does **not** recurse. Point `DATADIR` at the dir that directly holds
+> the `.h5` files (the repo default `data/` is one level too high).
 
 ## Outputs (written here)
 

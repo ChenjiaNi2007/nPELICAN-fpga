@@ -14,6 +14,7 @@
 #   EPOCHS=8            training epochs  (cos LR needs >=8; set DECAY=flat for >=5)
 #   DECAY=cos           --lr-decay-type
 #   GOLDEN_N=200        events for golden-vector regen / csim
+#   DATADIR=data/sample_data  h5 dir (globbed for *train/valid/test*.h5), rel. to PELICAN-nano
 #   DO_SYNTH=auto       auto|yes|no  (auto = run csynth only if `vitis_hls` on PATH)
 #   PN=/path/to/PELICAN-nano   override the training repo location
 #   PY=python                  python interpreter (use the QAT venv's python)
@@ -30,6 +31,7 @@ NS="${NS:-1 2 3 4 6}"
 EPOCHS="${EPOCHS:-8}"
 DECAY="${DECAY:-cos}"
 GOLDEN_N="${GOLDEN_N:-200}"
+DATADIR="${DATADIR:-data/sample_data}"
 DO_SYNTH="${DO_SYNTH:-auto}"
 PY="${PY:-python}"
 
@@ -55,7 +57,7 @@ for N in $NS; do
 
   # 1) Train (QAT). --no-reproducible required for QAT on GPU (kthvalue calibration).
   ( cd "$PN" && "$PY" train_pelican_nano.py \
-        --prefix "$PREFIX" --n-hidden "$N" \
+        --prefix "$PREFIX" --n-hidden "$N" --datadir "$DATADIR" \
         --quant --po2-scales --no-reproducible \
         --num-epoch "$EPOCHS" --lr-decay-type "$DECAY" )
 
@@ -72,7 +74,8 @@ for N in $NS; do
 
   # 5) Regenerate golden vectors from the PyTorch quant model (checkpoint-specific).
   ( cd "$PN" && "$PY" scripts/export_golden.py \
-        --checkpoint "$CKPT" --outdir "$FW/tb_data" --num "$GOLDEN_N" )
+        --checkpoint "$CKPT" --testfile "$DATADIR/test.h5" \
+        --outdir "$FW/tb_data" --num "$GOLDEN_N" )
 
   # 6) Local functional gate (free, no Vitis): firmware logits vs PyTorch golden.
   CSIM="fail"
