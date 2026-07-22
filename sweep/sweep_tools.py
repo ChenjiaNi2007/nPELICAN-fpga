@@ -92,25 +92,44 @@ def set_nhidden(header, n):
 
 
 def parse_csynth(rpt):
-    # Top-level row looks like:
-    # |+ nPELICAN | Timing| -0.02| 14| 70.000| -| 1| -| yes| -| 1347 (10%)| 63343 (1%)| 229779 (13%)| -|
+    # Header-aware parse of the "Synthesis Summary" hierarchy table. Column order and
+    # spacing vary across Vitis versions, so we locate columns by their header names
+    # (BRAM/DSP/FF/LUT/Interval/(cycles)/(ns)) and read the top-module row (first data
+    # row whose name cell starts with '+'). The header spans two lines; the second one
+    # carries the column names:
+    #   |  & Loops | Type | Slack |(cycles)|(ns)| Latency|Interval|Count|Pipelined|BRAM|DSP|FF|LUT|URAM|
+    def num(c):
+        m = re.search(r"[\d.]+", c)
+        return m.group(0) if m else "NA"
+
     with open(rpt) as f:
-        for line in f:
-            if re.match(r"\s*\|\+\s", line):
-                cells = [c.strip() for c in line.strip().strip("|").split("|")]
-                # cells: name,issue,slack,lat_cyc,lat_ns,iter,interval,trip,
-                #        pipelined,BRAM,DSP,FF,LUT,URAM
-                def num(c):
-                    m = re.search(r"[\d.]+", c)
-                    return m.group(0) if m else "NA"
-                lat_cyc = num(cells[3])
-                lat_ns = num(cells[4])
-                ii = num(cells[6])
-                bram = num(cells[9])
-                dsp = num(cells[10])
-                ff = num(cells[11])
-                lut = num(cells[12])
-                return f"{lut},{ff},{dsp},{bram},{lat_cyc},{lat_ns},{ii}"
+        lines = f.readlines()
+
+    hdr = None
+    hdr_i = None
+    for i, line in enumerate(lines):
+        cells = [c.strip() for c in line.split("|")]
+        if "BRAM" in cells and "DSP" in cells and "LUT" in cells:
+            hdr, hdr_i = cells, i
+            break
+    if hdr is None:
+        return "NA,NA,NA,NA,NA,NA,NA"
+
+    def col(name):
+        return hdr.index(name) if name in hdr else None
+
+    ci = {k: col(k) for k in ("(cycles)", "(ns)", "Interval", "BRAM", "DSP", "FF", "LUT")}
+    for line in lines[hdr_i + 1:]:
+        cells = [c.strip() for c in line.split("|")]
+        if len(cells) <= max(v for v in ci.values() if v is not None):
+            continue
+        if len(cells) > 1 and cells[1].startswith("+"):  # top-module row (|+ name or | + name)
+            def get(k):
+                j = ci[k]
+                return num(cells[j]) if j is not None and j < len(cells) else "NA"
+            return "{},{},{},{},{},{},{}".format(
+                get("LUT"), get("FF"), get("DSP"), get("BRAM"),
+                get("(cycles)"), get("(ns)"), get("Interval"))
     return "NA,NA,NA,NA,NA,NA,NA"
 
 
