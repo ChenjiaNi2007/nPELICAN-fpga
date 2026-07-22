@@ -105,32 +105,60 @@ def parse_csynth(rpt):
     with open(rpt) as f:
         lines = f.readlines()
 
-    hdr = None
-    hdr_i = None
+    hdr = hdr_i = None
     for i, line in enumerate(lines):
         cells = [c.strip() for c in line.split("|")]
         if "BRAM" in cells and "DSP" in cells and "LUT" in cells:
             hdr, hdr_i = cells, i
             break
-    if hdr is None:
-        return "NA,NA,NA,NA,NA,NA,NA"
+    if hdr is not None:
+        ci = {k: (hdr.index(k) if k in hdr else None)
+              for k in ("(cycles)", "(ns)", "Interval", "BRAM", "DSP", "FF", "LUT")}
+        for line in lines[hdr_i + 1:]:
+            cells = [c.strip() for c in line.split("|")]
+            if len(cells) <= max(v for v in ci.values() if v is not None):
+                continue
+            if len(cells) > 1 and cells[1].startswith("+"):  # |+ name or | + name
+                def get(k):
+                    j = ci[k]
+                    return num(cells[j]) if j is not None and j < len(cells) else "NA"
+                return "{},{},{},{},{},{},{}".format(
+                    get("LUT"), get("FF"), get("DSP"), get("BRAM"),
+                    get("(cycles)"), get("(ns)"), get("Interval"))
 
-    def col(name):
-        return hdr.index(name) if name in hdr else None
-
-    ci = {k: col(k) for k in ("(cycles)", "(ns)", "Interval", "BRAM", "DSP", "FF", "LUT")}
-    for line in lines[hdr_i + 1:]:
+    # Fallback: older "Vitis HLS Report" format -- Utilization Estimates > Summary
+    # 'Total' row (| Name | BRAM_18K | DSP | FF | LUT | URAM |) + the Latency table.
+    uh = uh_i = None
+    for i, line in enumerate(lines):
         cells = [c.strip() for c in line.split("|")]
-        if len(cells) <= max(v for v in ci.values() if v is not None):
-            continue
-        if len(cells) > 1 and cells[1].startswith("+"):  # top-module row (|+ name or | + name)
-            def get(k):
-                j = ci[k]
-                return num(cells[j]) if j is not None and j < len(cells) else "NA"
-            return "{},{},{},{},{},{},{}".format(
-                get("LUT"), get("FF"), get("DSP"), get("BRAM"),
-                get("(cycles)"), get("(ns)"), get("Interval"))
-    return "NA,NA,NA,NA,NA,NA,NA"
+        if any(c.startswith("BRAM") for c in cells) and "DSP" in cells and "LUT" in cells:
+            uh, uh_i = cells, i
+            break
+    lut = ff = dsp = bram = "NA"
+    if uh is not None:
+        def ucol(pred):
+            for j, c in enumerate(uh):
+                if pred(c):
+                    return j
+            return None
+        jb = ucol(lambda c: c.startswith("BRAM")); jd = ucol(lambda c: c == "DSP")
+        jf = ucol(lambda c: c == "FF"); jl = ucol(lambda c: c == "LUT")
+        for line in lines[uh_i + 1:]:
+            cells = [c.strip() for c in line.split("|")]
+            if len(cells) > 1 and cells[1] == "Total":
+                g = lambda j: num(cells[j]) if j is not None and j < len(cells) else "NA"
+                lut, ff, dsp, bram = g(jl), g(jf), g(jd), g(jb)
+                break
+    lat_cyc = lat_ns = ii = "NA"
+    for i, line in enumerate(lines):
+        if "Latency (cycles)" in line:
+            for dl in lines[i + 1:i + 6]:
+                cells = [c.strip() for c in dl.split("|")]
+                if len(cells) >= 7 and re.match(r"^\d", cells[1]):
+                    lat_cyc, lat_ns, ii = num(cells[1]), num(cells[3]), num(cells[5])
+                    break
+            break
+    return f"{lut},{ff},{dsp},{bram},{lat_cyc},{lat_ns},{ii}"
 
 
 def parse_vsynth(rpt):
