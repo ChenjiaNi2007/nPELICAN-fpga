@@ -57,6 +57,11 @@ fi
 mkdir -p "$BUILD" "$RPT_DIR"
 FLAGS="reset=1 csim=0 synth=1 cosim=0 validation=0 export=0 vsynth=${VSYNTH}"
 
+# model_loader reads PELICAN-nano h5 files read-only; HDF5's file locking can hang
+# forever on network filesystems (JupyterHub homes) if any kernel/dead run holds a
+# lock. Locking adds nothing for our read-only access — disable it.
+export HDF5_USE_FILE_LOCKING=FALSE
+
 # Each N is fully isolated in $BUILD/nhid<N>/, so the per-tree nPELICAN_prj and
 # vivado_synth.rpt never collide across parallel jobs. Belt-and-suspenders: the job
 # copies its OWN reports into uniquely-named reports/{csynth,vsynth}_nhid<N>.rpt the
