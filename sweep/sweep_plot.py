@@ -74,6 +74,24 @@ def main():
     fig.savefig(p1, dpi=150)
     print("wrote", p1)
 
+    # ---- background rejection @ eS=0.3 vs params ----
+    br = [_f(r.get("BgRej03")) for r in rows]
+    if any(v is not None for v in br):
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.plot(params, br, "o-", color="tab:blue")
+        for x, y, n in zip(params, br, nhid):
+            if x is not None and y is not None:
+                ax.annotate(f"h={n}", (x, y), textcoords="offset points",
+                            xytext=(0, 6), fontsize=8, ha="center")
+        ax.set_xlabel("trainable parameters")
+        ax.set_ylabel(r"background rejection $1/\epsilon_B$ @ $\epsilon_S=0.3$")
+        ax.set_title("nPELICAN background rejection vs model size")
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        pb = os.path.join(a.outdir, "sweep_bgrej.png")
+        fig.savefig(pb, dpi=150)
+        print("wrote", pb)
+
     # ---- resources vs params ----
     # Prefer Vivado post-synth (vLUT/...) when present; else HLS estimate (LUT/...).
     use_v = any(_f(r.get("vLUT")) is not None for r in rows)
@@ -120,6 +138,24 @@ def main():
             p3 = os.path.join(a.outdir, "sweep_pareto.png")
             fig.savefig(p3, dpi=150)
             print("wrote", p3)
+
+        # ---- Pareto: background rejection vs DSP ----
+        pb2 = [_f(r.get("BgRej03")) for r in res_rows]
+        if any(v is not None for v in pb2):
+            fig, ax = plt.subplots(figsize=(6, 4))
+            ax.plot(dsp, pb2, "o-", color="tab:blue")
+            for x, y, n in zip(dsp, pb2, [r["n_hidden"] for r in res_rows]):
+                if x is not None and y is not None:
+                    ax.annotate(f"h={n}", (x, y), textcoords="offset points",
+                                xytext=(5, 5), fontsize=8)
+            ax.set_xlabel(f"DSP ({src})")
+            ax.set_ylabel(r"background rejection $1/\epsilon_B$ @ $\epsilon_S=0.3$")
+            ax.set_title("Background rejection / DSP Pareto front")
+            ax.grid(True, alpha=0.3)
+            fig.tight_layout()
+            p4 = os.path.join(a.outdir, "sweep_pareto_bgrej.png")
+            fig.savefig(p4, dpi=150)
+            print("wrote", p4)
     else:
         print("No numeric resource data yet (csynth not run) -> skipped resource plots.")
 
