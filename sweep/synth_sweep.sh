@@ -34,6 +34,16 @@ RESULTS="$SWEEP_DIR/sweep_results.csv"
 BUILD="$SWEEP_DIR/synth_builds"
 RPT_DIR="$FW/reports"
 
+# Resolve a relative PY (e.g. ../../PELICAN-nano/.venv/bin/python) to absolute NOW:
+# the export step cds into other dirs, where a relative path silently points elsewhere.
+if [[ "$PY" == */* ]]; then
+  if [[ ! -x "$PY" ]]; then
+    echo "ERROR: PY '$PY' not found/executable from $(pwd). Use an absolute path or plain 'python'." >&2
+    exit 1
+  fi
+  PY="$(cd "$(dirname "$PY")" && pwd)/$(basename "$PY")"
+fi
+
 command -v vitis_hls >/dev/null 2>&1 || {
   echo "ERROR: vitis_hls not on PATH. Source your Xilinx env first (see header)." >&2
   exit 1
@@ -57,7 +67,14 @@ stage_and_launch() {
   local N="$1" PREFIX="nhid$1" CKPT="$PN/model/nhid$1_best.pt" D="$BUILD/nhid$1"
   [[ -f "$CKPT" ]] || { echo "  [$N] SKIP: no checkpoint $CKPT"; return 0; }
   echo "  [$N] staging $D"
-  rm -rf "$D"; mkdir -p "$D"
+  # A previous tree holds a full nPELICAN_prj (tens of thousands of files); rm -rf
+  # on a network filesystem can grind for minutes and look like a stall. Move it
+  # aside instantly and delete in the background instead.
+  if [[ -e "$D" ]]; then
+    mv "$D" "$D.old.$$"
+    rm -rf "$D.old.$$" &
+  fi
+  mkdir -p "$D"
   rm -f "$RPT_DIR/csynth_nhid${N}.rpt" "$RPT_DIR/vsynth_nhid${N}.rpt"   # drop stale
   # Invariant sources (skip the 544M tb_data + any *_prj); symlink tb_data (unused, csim=0).
   cp -R "$FW/firmware" "$D/"
@@ -67,9 +84,21 @@ stage_and_launch() {
   cp "$FW/nPELICAN_tb.cpp" "$FW/build_prj.tcl" "$FW/project.tcl" "$FW/vivado_synth.tcl" "$D/"
   ln -s "$FW/tb_data" "$D/tb_data"
   # Correct per-N weights INTO firmware/weights/ (the include location), + NHIDDEN.
-  "$PY" "$TOOLS" set-nhidden --header "$D/firmware/nPELICAN.h" --n "$N" >/dev/null
-  ( cd "$FW" && "$PY" model_loader.py --model "$CKPT" --quant --repo "$PN" \
-        --out "$D/firmware/weights/weights.h" ) >"$D/export.log" 2>&1
+  if ! "$PY" "$TOOLS" set-nhidden --header "$D/firmware/nPELICAN.h" --n "$N" \
+        >/dev/null 2>"$D/set_nhidden.err"; then
+    echo "  [$N] SET-NHIDDEN FAILED ($PY not usable?):" >&2
+    cat "$D/set_nhidden.err" >&2
+    exit 1
+  fi
+  # Weight export imports torch+brevitas and may run a calibration pass — a minute
+  # or two of silence here is normal; the log shows progress.
+  echo "  [$N] exporting weights (log: $D/export.log)"
+  if ! ( cd "$FW" && "$PY" model_loader.py --model "$CKPT" --quant --repo "$PN" \
+        --out "$D/firmware/weights/weights.h" ) >"$D/export.log" 2>&1; then
+    echo "  [$N] EXPORT FAILED — tail of $D/export.log:" >&2
+    tail -5 "$D/export.log" >&2
+    exit 1
+  fi
   echo "  [$N] launching csynth (log: $D/synth_run.log)"
   (
     cd "$D"
