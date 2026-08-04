@@ -1,0 +1,47 @@
+blockfp_dots.py -- Lever 7 evidence
+data=/Users/chenjiani/Desktop/Rankin Research/nPELICAN-fpga/analysis/../../PELICAN-nano/data/sample_data/valid.h5  events=3000  dot_t LSB=16.0 clip=+-512.0
+
+=== 1. per-component ranges (real particles, FULL file, K=237507) ===
+comp     max|.|       p99  median|.|  int bits
+E       1946.93    542.65    13.2781        12
+px       692.63    241.36     5.0597        11
+py       835.73    237.84     5.0323        11
+pz      1874.68    469.12     6.6920        12
+-> ceiling is 1 bit on 2 of 4 multipliers; 0 bits in production
+   (trained pmu_quant clips all four at +-512 => I=10 for all).
+
+=== 2a. cancellation  max_term/|d_ij|  (i<j) ===
+  p50   : 1.110e+01   (3.5 bits lost)
+  p90   : 2.082e+02   (7.7 bits lost)
+  p99   : 4.635e+03   (12.2 bits lost)
+  p99.9 : 4.386e+04   (15.4 bits lost)
+  p100  : 5.206e+06   (22.3 bits lost)
+
+=== 2b. dot_t occupancy vs the real d_ij distribution ===
+  |d| median 6.17  p99 1303.0  max 17077.0
+  quantize to exactly 0 : 54.5%
+  saturating            : 3.01%
+  distinct levels used  : 32 of 64
+
+=== 3. dot_t cell mismatch vs float-exact (%) -- the metric that matters ===
+scheme                       W=12     W=11     W=10      W=9      W=8      W=7
+uniform (current)          17.61%   27.01%   37.53%   56.99%   63.78%   56.66%
+per-component I            17.43%   26.84%   37.38%   56.91%   63.70%   56.60%
+per-component sameW        36.36%   57.51%   63.89%   64.89%   56.13%   49.16%
+block-FP / particle         1.27%    2.40%    4.39%    7.63%   12.20%   18.32%
+block-FP / event           12.56%   19.95%   29.50%   42.43%   55.65%   59.41%
+light-cone                 42.37%   61.48%   66.30%   65.84%   56.51%   49.63%
+cancel-free (pT,y,phi)     18.51%   22.96%   29.05%   35.59%   41.37%   43.30%
+
+Headline: block-FP/particle at W=8 beats uniform at W=12 (production).
+per-component I is bit-identical to uniform -- zero-sum, see Lever 7a.
+
+=== 4. block-FP: exponent source and clamp range (mismatch %) ===
+  W   e=LZC(max|p_k|)   e=LZC(E)  | clamp sweep on e=LZC(E)
+ 12             1.27%      1.27% |  [-4,10]=1.27%  [0,10]=1.27%  [2,10]=1.32%
+ 10             4.39%      4.39% |  [-4,10]=4.38%  [0,10]=4.39%  [2,10]=4.60%
+  9             7.63%      7.63% |  [-4,10]=7.61%  [0,10]=7.63%  [2,10]=8.08%
+  8            12.20%     12.20% |  [-4,10]=12.17%  [0,10]=12.20%  [2,10]=13.00%
+  7            18.32%     18.32% |  [-4,10]=18.25%  [0,10]=18.32%  [2,10]=19.68%
+
+-> E-based exponent is free (identical), and [0,10] (4-bit field) costs nothing.

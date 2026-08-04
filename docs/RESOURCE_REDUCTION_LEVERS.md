@@ -284,7 +284,173 @@ multiplies + adder trees, 148.6k). ~1700 DSPs sit idle — trade them:
 - **Owed:** remote csynth `split=1 mac_dsp=1` vs plain `split=1`; log the
   `np_eq2to2` LUT/DSP delta in `resource_log.md`.
 
+### Lever 7 — Per-particle block floating point on the momenta  ◐ PROTOTYPED (training side), AUC sweep owed
+
+Origin: the professor's suggestion to "individually quantize parts of the dot product
+(p_x, p_y, …)". **Per-COMPONENT is provably zero-sum; per-PARTICLE is worth ~4 bits.**
+Analysis 2026-08-04, `analysis/blockfp_dots.py`, 3000 `sample_data` valid events,
+beams included, against the trained `w6a6i6p12` grid.
+
+#### 7a. Per-component quantization — ✗ DEAD (measure once, never again)
+
+Per-component ranges (237k real particles): E 1946.9 (I=12), px 692.6 (I=11),
+py 835.7 (I=11), pz 1874.7 (I=12). So the ceiling is **1 bit on 2 of 4
+multipliers** — and in the production config it is **0 bits**, because the trained
+`pmu_quant` clips every component at ±512 (`input_t = ap_fixed<12,10>`), giving
+I=10 for all four.
+
+Measured on the `dot_t` gate (see 7c for the metric), production clip:
+
+| scheme | W=12 | W=10 | W=8 |
+|---|---|---|---|
+| uniform (current) | 17.61% | 37.53% | 63.78% |
+| per-component I | 17.43% | 37.38% | 63.70% |
+| per-component, same total W | 36.36% | 63.89% | 56.13% |
+
+Per-component I buys **0.18 pp** — noise. (In an unclipped I=12 comparison it is
+*bit-identical* to uniform; the 0.18 pp here is only because px/py then clip at
+±1024 instead of ±512.) Spending the freed bits on extra fractional resolution at
+fixed total width is **actively worse** (36% vs 18%), because narrowing px/py's
+range to ±256 saturates real momenta.
+
+**Why it cannot work** (same theorem as the global-rescaling dead end, applied per
+component): dot error is `Δd ≈ Σ_k |p_k^(j)|·δ_k`. Equalizing each component's
+contribution needs `δ_k ∝ 1/max|p_k|`, i.e. `F_k = const − log₂ max|p_k|`. Since
+`I_k = log₂ max|p_k|`, the total `W_k = I_k + F_k` is **invariant**. Redistributing
+width across components is zero-sum.
+
+#### 7b. Why the dot front-end is expensive (the two facts that reframe it)
+
+1. **The Minkowski dot is catastrophically cancelling.** `max_term/|d_ij|` over i<j:
+   median 11.1 (3.5 bits lost), p99 4.6e3 (12.2 bits), p99.9 4.4e4 (15.4 bits),
+   max 5.2e6 (**22.3 bits**). 12 bits of momentum are being spent to survive a
+   cancellation that eats 3–22.
+2. **`dot_t` is far coarser than anyone assumed.** `w6a6i6p12` learns
+   `dot_t = ap_fixed<6,10>` → **LSB 16 GeV², clip ±512**. Against the real d_ij
+   (median |d| = 6.2): **54.5% of dots quantize to exactly 0**, only **32 of 64**
+   levels are ever occupied (72% live in the bottom two cells), 3.0% saturate.
+
+Momentum precision therefore matters *only* for which side of a `dot_t` boundary a
+pair lands on; because `Δd ≈ |p|·δp` with |p| up to 512, a global **absolute**
+momentum LSB throws dots across boundaries even though the target grid is crude.
+That is the mechanism behind the sub-12-bit cliff.
+
+#### 7c. The lever: per-particle po2 exponent + narrow mantissas
+
+`d_ij = 2^(e_i+e_j) · (m_i · g · m_j)`, with `e_i = clamp(⌊log₂ E_i⌋, 0, 10)` and
+W-bit signed mantissas `m_i = p_i / 2^{e_i}` at I=2. Every particle then gets full
+**relative** precision instead of a shared absolute LSB.
+
+Metric = fraction of d_ij landing in a **different `dot_t` cell** than float-exact
+(the dots-level gate already in use):
+
+| mantissa W | uniform (current) | **block-FP / particle** | block-FP / event |
+|---|---|---|---|
+| 12 | 17.61% | **1.27%** | 12.56% |
+| 10 | 37.53% | **4.38%** | 29.50% |
+| 9  | 56.99% | **7.61%** | 42.43% |
+| 8  | 63.78% | **12.17%** | 55.65% |
+| 7  | 56.66% | 18.25% | 59.41% |
+
+**8-bit block-FP mantissas (12.17%) beat the current 12-bit uniform production point
+(17.61%)** — strictly better dots on a 4-bit-narrower multiplier. At equal 12 bits
+it is a 14× reduction in dot errors. Per-*event* block-FP (one shared exponent)
+recovers only a small part of the win: the gain is genuinely per-particle.
+
+Two free simplifications, both measured:
+- **Exponent from E alone, not a 4-way max over components** — bit-for-bit the same
+  mismatch rate at every W (1.27/4.39/7.63/12.20/18.32%). No 4-way max in hardware,
+  just `LZC(E)`. Provably non-overflowing at I=2: `2^e ≤ E < 2^{e+1}` and `E ≥ |p_k|`
+  ⟹ `|m_k| < 2`.
+- **Exponent clamped to `[0,10]` (4-bit field)** costs nothing (12.17 → 12.20% at
+  W=8). Unclamped span is 53 (6 bits) because of a few ~2^-43 padding artifacts.
+
+Storage per particle **drops**: 4×8 + 4 = 36 bits vs 4×12 = 48.
+
+#### 7d. Why this survives the Lever-1 lesson, and the DSP endgame
+
+The normalization is **O(N)** — 22 leading-zero counts + 88 shifts — while the
+benefit lands on **O(N²)** = 1012 multipliers. That asymmetry is the whole trade,
+and unlike Lever 1 this is a *width* reduction, which CSE cannot undo.
+
+**The DSP endgame — and the trap the pmu8/9/10 runs already fell into.**
+⚠ Narrowing operands *by itself* is MEASURED to go the wrong way below the DSP
+inference threshold: pmu10 vsynth was −233 DSP but **+25.9k LUT** (~111 LUT per DSP
+saved), and pmu9/pmu8 were non-monotonic tool noise (936/998/977 DSP at W=10/9/8).
+Below the threshold HLS spills the mults to fabric instead of packing them. **Do not
+expect block-FP's narrower mantissas to shrink anything on their own — that path is
+already closed by measurement.** Block-FP fixes only the *accuracy* half of why
+sub-12-bit failed; it does not by itself fix the resource half.
+
+The resource win has to be taken **explicitly**: at 8-bit mantissas the shared-operand
+packing becomes *constructible* (`m_i[k]` is shared across all j) — pack `m_j, m_j'`
+into one 27-bit operand at shift 17 and multiply by the 8-bit `m_i` in the 18-bit port,
+17 + 8 = 25 ≤ 27, giving **two multiplies per DSP → ~506 dot DSP**. This is arithmetically
+unreachable at 12-bit uniform (17 + 12 = 29 > 27). But it must be *hand-written* (pack,
+one multiply, slice the two products apart), not left to `BIND_OP` — the Lever 6 lesson
+plus the pmu10 spill both say the tool will not do it for you.
+
+So the honest ordering is: block-FP buys the 4 bits of accuracy headroom that make an
+8-bit mantissa *legal*; the DSP saving is a separate, manual piece of work that is only
+worth attempting once the AUC sweep says 8 bits holds.
+
+#### 7e. Risks / owed work
+
+- **The new O(N²) cost is 253 realignment shifters** for `e_i+e_j` (range [0,20]).
+  They should be cheap because the output is only 6 bits wide into `dot_t`, but
+  **this is the one number that decides whether the lever nets out — csynth it.**
+  The resource claims in 7d are analytic, not synthesized.
+- **Resource upside is NOT automatic** (see the 7d warning): on the existing
+  sub-threshold evidence, expect narrower mantissas alone to *cost* LUT. Budget for
+  the manual DSP-packing work, or treat Lever 7 as an accuracy/robustness result
+  rather than a resource result.
+- **Against the standing "nothing is resource-bound" finding** (4.0% LUT / 9.5% DSP
+  post-vsynth on xcu250), none of this is worth spending training runs on unless
+  there is an external budget — a smaller device, an SLR cap, or a latency target.
+  Get that budget first; that caveat outranks the whole lever.
+- **All numbers above are dot-front-end only.** AUC is not measured; that needs the
+  retrain (prototype landed, see below).
+- **Breaks bit-exactness with PyTorch** unless `pmu_quant` becomes a block-FP
+  fake-quant. **Done on the training side** (2026-08-04, `PELICAN-nano`):
+  - `src/layers/blockfp.py` — `BlockFPQuant`, stateless, STE, E-based exponent.
+  - `QuantConfig.pmu_block_fp / pmu_exp_min / pmu_exp_max`; model picks it over the
+    Brevitas `QuantIdentity` when `--pmu-block-fp` is set with `--pmu-bit-width`.
+  - CLI `--pmu-block-fp / --pmu-exp-min / --pmu-exp-max`, wired through
+    `train_pelican_nano.py`, `scripts/export_golden.py`, `scripts/check_scales.py`.
+  - `tests/test_pmu_blockfp.py` (12 tests; suite 60 passed / 1 skipped).
+  - `scripts/sweep_pmu_blockfp.sh` — AUC sweep, `BASELINE=1` also retrains the
+    uniform p12 grid for an apples-to-apples comparison. Verified end-to-end on
+    `sample_data`; AUC read from the checkpoint's `best_metrics`, not the log.
+
+  Because `BlockFPQuant` is stateless the checkpoint gains no new keys — the
+  configuration lives in the run's `args`, which is how `model_loader.py` already
+  auto-detects the momentum grid.
+- **The loader + firmware side is NOT done.** `model_loader.py` must emit a
+  mantissa/exponent type pair instead of a single `input_t`, and `dot4` must take
+  `(m, e)` and realign before the `dot_t` cast. Do this only after 7e's csynth.
+- **Likely bonus for the equivariance sweep:** block-FP is scale-covariant, so a
+  boost is absorbed into the exponent and leaves mantissas nearly unchanged. The
+  existing harness can test this directly.
+- Masking invariant holds: an all-zero 4-vector gives `e = exp_min`, `m = 0`, output
+  exactly 0.
+
+#### 7f. Alternatives measured and rejected
+
+- **Light-cone linear basis (E±p_z)**: *worse* than Cartesian (median rel error
+  0.024 vs 0.018 at W=18) and needs 6 mults/pair instead of 4.
+- **Cancellation-free curvilinear** `d = 2 p_T^i p_T^j [sinh²(Δy/2) + sin²(Δφ/2)]`:
+  on raw dot error it looked as good as block-FP, but **on the `dot_t` gate it is
+  worse at every width** (18.51 / 29.05 / 41.37% at W=12/10/8 vs block-FP's
+  1.27 / 4.39 / 12.20%). It degrades far more *slowly* than uniform (43% vs 57% at
+  W=7), so it is a real effect — just dominated. Given it also costs ~506 trig LUTs
+  and a training coordinate change, it is not competitive. Its one unique property
+  (manifest invariance under longitudinal boosts, since Δy and Δφ are boost-invariant)
+  makes it worth remembering **only** if the equivariance study ever becomes the
+  binding constraint rather than resources.
+
 ## Not reducible / dead ends (don't re-investigate)
+- **Per-COMPONENT (E/px/py/pz) bit-width tuning** — zero-sum by the width-invariance
+  theorem in Lever 7a; measured bit-identical to uniform. Split per-PARTICLE instead.
 - **2→2 dense MAC is not symmetric** — `T[i][j]` carries `jdotp[i]` vs `jdotp[j]`
   (channels 2/3) which swap under i↔j, so it can't be halved like the dots.
 - **bias_t_gen / norm_t / accumulator widths** — already minimized and flag-tracking
@@ -329,6 +495,16 @@ multiplies + adder trees, 148.6k). ~1700 DSPs sit idle — trade them:
       distinct — BUT fully-unrolled CSE may already share them (Lever-1 lesson)
       and δ-zeros likely constant-fold. Cheap to test on the split build; expect
       the adder trees (the real cost) to survive factoring.
-6. **The two big decisions, unchanged:** Lever 3 (relax II=1 — time-multiplexing
+6. **Lever 7 (block-FP momenta)** — the only remaining lever that cuts the DOT
+   front-end, and the first with a real sub-18-bit DSP boundary (2 mults/DSP at
+   8-bit mantissas → ~506 dot DSP). Training prototype landed; next steps in order:
+   a. Run `PELICAN-nano/scripts/sweep_pmu_blockfp.sh` (AUC vs mantissa width) —
+      the go/no-go. Baseline `p12` uniform: best_metrics AUC **0.9515**
+      (full-dataset test AUC 0.9519). Use `BASELINE=1` for a controlled
+      same-seed/epochs/data comparison before trusting a small delta.
+   b. If AUC holds at W≈8–10: csynth the 253 realignment shifters (Lever 7e) —
+      that number decides whether the lever nets out.
+   c. Only then do the loader + `dot4` (m, e) firmware work.
+7. **The two big decisions, unchanged:** Lever 3 (relax II=1 — time-multiplexing
    genuinely SHARES the adder trees, the only structural LUT fix) or fewer
    particles ((N+2)² scaling on ~90% of LUT, ~97% of DSP, per the split report).
