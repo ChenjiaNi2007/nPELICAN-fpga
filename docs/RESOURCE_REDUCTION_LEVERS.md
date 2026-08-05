@@ -284,12 +284,18 @@ multiplies + adder trees, 148.6k). ~1700 DSPs sit idle — trade them:
 - **Owed:** remote csynth `split=1 mac_dsp=1` vs plain `split=1`; log the
   `np_eq2to2` LUT/DSP delta in `resource_log.md`.
 
-### Lever 7 — Per-particle block floating point on the momenta  ◐ PROTOTYPED (training side), AUC sweep owed
+### Lever 7 — Per-particle block floating point on the momenta  ✓ SWEPT — accuracy win, resource path REJECTED
 
 Origin: the professor's suggestion to "individually quantize parts of the dot product
-(p_x, p_y, …)". **Per-COMPONENT is provably zero-sum; per-PARTICLE is worth ~4 bits.**
+(p_x, p_y, …)". **Per-COMPONENT is provably zero-sum; per-PARTICLE is worth ~2–3 bits.**
 Analysis 2026-08-04, `analysis/blockfp_dots.py`, 3000 `sample_data` valid events,
 beams included, against the trained `w6a6i6p12` grid.
+
+> **→ READ 7g FIRST.** The AUC sweep (2026-08-05) has since run. Summary: block-FP is a
+> real and free **accuracy** win at equal width (+18% bgRej@0.5 at W=12), but the 8-bit
+> DSP-packing endgame in 7d/7e is **dead** — 8-bit mantissas cost 12.4% bgRej, and
+> packing is arithmetically 8-bit-or-nothing. The ~4-bit estimate below came from the
+> `dot_t` gate metric and was optimistic; the measured figure is 2–3 bits.
 
 #### 7a. Per-component quantization — ✗ DEAD (measure once, never again)
 
@@ -390,9 +396,16 @@ unreachable at 12-bit uniform (17 + 12 = 29 > 27). But it must be *hand-written*
 one multiply, slice the two products apart), not left to `BIND_OP` — the Lever 6 lesson
 plus the pmu10 spill both say the tool will not do it for you.
 
-So the honest ordering is: block-FP buys the 4 bits of accuracy headroom that make an
+So the honest ordering is: block-FP buys the accuracy headroom that would make an
 8-bit mantissa *legal*; the DSP saving is a separate, manual piece of work that is only
 worth attempting once the AUC sweep says 8 bits holds.
+
+⚠ **UPDATE 2026-08-05 — the sweep says 8 bits does NOT hold (7g).** Block-FP buys 2–3
+bits, not 4, so W=8 lands *below* the uniform-12 baseline on background rejection
+(−12.4%). And the packing is 8-bit-or-nothing: the shared-operand shift must satisfy
+`s ≥ 2W+1` (product width plus a sign guard) with `s + W ≤ 27`, so W=8 → 17+8=25 ✓ but
+W=9 → 19+9=28 ✗ and W=10 → 21+10=31 ✗. There is no width that is both accurate enough
+and packable. **The 2-mults/DSP endgame in this section is abandoned.**
 
 #### 7e. Risks / owed work
 
@@ -400,6 +413,9 @@ worth attempting once the AUC sweep says 8 bits holds.
   They should be cheap because the output is only 6 bits wide into `dot_t`, but
   **this is the one number that decides whether the lever nets out — csynth it.**
   The resource claims in 7d are analytic, not synthesized.
+  ⚠ **SUPERSEDED by 7g:** with the packing endgame dead there is no DSP saving for the
+  shifters to be weighed against, so this csynth is no longer on the critical path.
+  Run it only if Lever 7 is ever revived as a *resource* play.
 - **Resource upside is NOT automatic** (see the 7d warning): on the existing
   sub-threshold evidence, expect narrower mantissas alone to *cost* LUT. Budget for
   the manual DSP-packing work, or treat Lever 7 as an accuracy/robustness result
@@ -448,6 +464,66 @@ worth attempting once the AUC sweep says 8 bits holds.
   makes it worth remembering **only** if the equivariance study ever becomes the
   binding constraint rather than resources.
 
+#### 7g. AUC sweep result — THE ANSWER (2026-08-05)
+
+`PELICAN-nano/scripts/sweep_pmu_blockfp.sh`, full `data/toptag`, 16 epochs, seed 42,
+`BASELINE=1` (controlled: the uniform-12 row is retrained under identical
+seed/epochs/data, *not* the old 35-epoch production number). All figures are the
+checkpoint's `best_metrics` (validation).
+
+| grid    | W  | AUC    | acc    | bgRej@0.5 | vs uniform-12 |
+|---------|----|--------|--------|-----------|---------------|
+| uniform | 12 | 0.9544 | 0.8963 | 39.6      | baseline      |
+| blockfp | 12 | 0.9603 | 0.9055 | 46.7      | **+17.9%** bgRej |
+| blockfp | 10 | 0.9573 | 0.9051 | 41.7      | +5.3%         |
+| blockfp | 9  | 0.9589 | 0.9027 | 39.2      | −1.0%         |
+| blockfp | 8  | 0.9527 | 0.8944 | 34.7      | **−12.4%**    |
+| blockfp | 7  | 0.9429 | 0.8821 | 26.2      | −33.8%        |
+
+**CONFIRMED — the premise holds.** At *identical* mantissa width, block-FP strictly beats
+the uniform grid: +0.0059 AUC and +17.9% background rejection at W=12. The dot's problem
+was never total bits, it was that one global scale must cover both a 500 GeV jet core and
+a 0.5 GeV constituent. Per-particle exponents make the same 12 bits do more work.
+
+**Worth 2–3 bits, not 4.** W=10 is strictly better than the baseline and W=9 is a wash;
+W=8 is where it breaks. The `dot_t` gate metric (7c) was directionally right but
+quantitatively optimistic.
+
+**Read bgRej, not AUC.** AUC is non-monotonic (W=9's 0.9589 > W=10's 0.9573), which puts
+the AUC noise floor at ≈±0.002 for a 16-epoch single-seed run — that inversion is not
+real. bgRej@0.5 is monotone across all five widths and is the better-conditioned metric.
+
+**VERDICT on the DSP endgame (7d/7e): dead.** Packing requires W=8 exactly (see the
+`s ≥ 2W+1`, `s+W ≤ 27` update in 7d). W=8 costs 12.4% bgRej, and the pmu10 vsynth
+precedent (−233 DSP / **+25.9k LUT**) applies here with 253 realignment shifters added on
+top — i.e. strictly worse LUT risk than the experiment that already failed. Do not spend
+the manual packing effort.
+
+**REDIRECT — bank it as accuracy, spend it on particle count.** Lever 7 is a *free
+accuracy win* at W=10–12 (the mantissa is no wider than today's uniform grid). The
+productive use of that surplus is the "fewer particles" decision already listed in
+sequence item 7: pair count is quadratic in N, and 253 = 22·23/2 for nobj=20 + 2 beams.
+
+| nobj + beams | pairs | dot DSP vs today |
+|---|---|---|
+| 20 + 2 | 253 | — |
+| 16 + 2 | 171 | −32% |
+| 12 + 2 | 105 | −58% |
+
+Quadratic truncation dominates a 2× packing factor, and block-FP has just produced the
+accuracy headroom to pay for it. **Next sweep: nobj at block-FP W=10/12**, run down until
+AUC/bgRej returns to the uniform-12 baseline.
+
+**OPEN — `dot_t` may now be the bottleneck.** The learned `input_quant` scale moved from
+8.0 (baseline) to **16.0 on every block-FP run** except W=7. At 6 bits that means `dot_t`
+got *coarser* exactly as the momenta got finer, so some of the block-FP gain is being
+discarded downstream. Two consequences:
+1. The exported `dot_t` typedef differs between baseline and block-FP checkpoints —
+   any csim/vsynth comparison must re-export from the chosen checkpoint, **not** reuse
+   the existing `weights.h` / `types_generated.h`.
+2. Sweep block-FP W=10 × `dot_t` 7/8 bits. Unlike the pmu width, `dot_t` width costs
+   no DSP, so this is a cheap shot at recovering the discarded headroom.
+
 ## Not reducible / dead ends (don't re-investigate)
 - **Per-COMPONENT (E/px/py/pz) bit-width tuning** — zero-sum by the width-invariance
   theorem in Lever 7a; measured bit-identical to uniform. Split per-PARTICLE instead.
@@ -495,16 +571,20 @@ worth attempting once the AUC sweep says 8 bits holds.
       distinct — BUT fully-unrolled CSE may already share them (Lever-1 lesson)
       and δ-zeros likely constant-fold. Cheap to test on the split build; expect
       the adder trees (the real cost) to survive factoring.
-6. **Lever 7 (block-FP momenta)** — the only remaining lever that cuts the DOT
-   front-end, and the first with a real sub-18-bit DSP boundary (2 mults/DSP at
-   8-bit mantissas → ~506 dot DSP). Training prototype landed; next steps in order:
-   a. Run `PELICAN-nano/scripts/sweep_pmu_blockfp.sh` (AUC vs mantissa width) —
-      the go/no-go. Baseline `p12` uniform: best_metrics AUC **0.9515**
-      (full-dataset test AUC 0.9519). Use `BASELINE=1` for a controlled
-      same-seed/epochs/data comparison before trusting a small delta.
-   b. If AUC holds at W≈8–10: csynth the 253 realignment shifters (Lever 7e) —
-      that number decides whether the lever nets out.
-   c. Only then do the loader + `dot4` (m, e) firmware work.
+6. **Lever 7 (block-FP momenta)** — ✓ SWEPT 2026-08-05, see **7g**. Outcome: a free
+   **accuracy** win (+17.9% bgRej@0.5 at equal 12-bit width), but the 8-bit DSP-packing
+   endgame is **dead** (W=8 costs 12.4% bgRej; packing is 8-bit-or-nothing). It is no
+   longer a lever that cuts the dot front-end. Remaining work, in order:
+   a. ~~Run the AUC sweep~~ — done, 7g.
+   b. ~~csynth the 253 realignment shifters~~ — off the critical path now that there is
+      no DSP saving to weigh them against.
+   c. Sweep block-FP W=10 × `dot_t` 7/8 bits — the learned dot scale doubled under
+      block-FP, so `dot_t` is likely discarding part of the gain, and its width costs
+      no DSP.
+   d. Loader + `dot4` (m, e) firmware work — only if block-FP is adopted for accuracy.
 7. **The two big decisions, unchanged:** Lever 3 (relax II=1 — time-multiplexing
    genuinely SHARES the adder trees, the only structural LUT fix) or fewer
    particles ((N+2)² scaling on ~90% of LUT, ~97% of DSP, per the split report).
+   **Lever 7 has now made the second one cheaper to take:** block-FP at W=10–12 buys
+   +5–18% bgRej at no width cost, which is accuracy that can be spent on truncating N.
+   Run the nobj sweep on top of a block-FP checkpoint, not the uniform one (7g).
