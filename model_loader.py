@@ -48,6 +48,13 @@ parser.add_argument('--pmu-bit-width', type=int, default=None,
                          'trained with --pmu-bit-width (default: read from checkpoint args). '
                          'When present, input_t is the TRAINED momentum grid and both the '
                          'analytic width bound and --max-input-bits are bypassed.')
+parser.add_argument('--input-unsigned', action=argparse.BooleanOptionalAction, default=None,
+                    help='Override the d_ij grid signedness (default: read from the '
+                         'checkpoint args). Trained with --input-unsigned, dot_t is '
+                         'ap_ufixed and one bit moves from sign to magnitude. Brevitas '
+                         'derives scale() from the SAME stored stat divided by a '
+                         'signedness-dependent threshold, so rebuilding with the wrong '
+                         'signedness loads cleanly but silently yields a 2x-off scale.')
 parser.add_argument('--no-po2', action='store_true',
                     help='Set if trained WITHOUT --po2-scales')
 parser.add_argument('--split-types', action='store_true', default=False,
@@ -273,12 +280,43 @@ def _extract_quant_weights():
         sys.exit('ERROR: checkpoint has pmu_quant keys (trained momentum quantizer) but no '
                  'recorded bit width; pass --pmu-bit-width matching the training flag.')
 
+    # Lever 7 block-FP momenta need a mantissa/exponent type PAIR and a dot4 that
+    # realigns before the dot_t cast — firmware work that is not done. Exporting such
+    # a checkpoint would silently emit a single input_t describing a grid the model
+    # never used, so refuse rather than produce a wrong header.
+    if _arg('pmu_block_fp', False):
+        sys.exit('ERROR: checkpoint was trained with --pmu-block-fp (per-particle block '
+                 'floating point). The loader emits a single uniform input_t, which does '
+                 'not describe that grid, and firmware dot4 cannot yet consume (m, e). '
+                 'See nPELICAN-fpga/docs/RESOURCE_REDUCTION_LEVERS.md Lever 7.')
+
+    # Signedness of the d_ij grid. MUST match training: Brevitas derives scale() from the
+    # same stored stat divided by a signedness-dependent int threshold (2^(b-1)-1 signed
+    # vs 2^b-1 unsigned), so a wrong rebuild still load_state_dict's cleanly and then
+    # reports a scale that is off by ~2x — a silent bit-exactness break. Verified below.
+    # The checkpoint's own record is authoritative; checkpoints predating the flag have
+    # no such arg and were signed, which the False fallback gives. An explicit override
+    # that contradicts the record is refused — it is exactly how you get a header that
+    # describes a grid the model never trained on.
+    ck_iuns = bool(_arg('input_unsigned', False))
+    iuns = ck_iuns if args.input_unsigned is None else bool(args.input_unsigned)
+    if margs is not None and args.input_unsigned is not None and iuns != ck_iuns:
+        sys.exit(f'ERROR: --{"" if iuns else "no-"}input-unsigned contradicts the '
+                 f'checkpoint, which records input_unsigned={ck_iuns}. dot_t and every '
+                 f'type derived from it would describe a grid the model never used. '
+                 f'Omit the flag to follow the checkpoint.')
+
     qkw = dict(enabled=True, weight_bit_width=wbw, act_bit_width=abw,
                input_bit_width=ibw, po2_scales=po2)
     if pbw is not None:
         # only when set, so the loader still works against an older PELICAN-nano
         # checkout whose QuantConfig has no pmu_bit_width field
         qkw['pmu_bit_width'] = pbw
+    if iuns:
+        if 'input_unsigned' not in QuantConfig.__dataclass_fields__:
+            sys.exit('ERROR: checkpoint needs input_unsigned but the PELICAN-nano checkout '
+                     f'at --repo has no such QuantConfig field. Update it.')
+        qkw['input_unsigned'] = True
     qcfg = QuantConfig(**qkw)
 
     def _build():
@@ -289,6 +327,14 @@ def _extract_quant_weights():
     model = _build()
     model.load_state_dict(sd)
     model.eval()
+
+    # Guard the silent failure described above: the rebuilt input quantizer must have the
+    # signedness we asked for. A mismatch here means every dot_t-derived type is wrong.
+    got_signed = bool(model.input_quant.act_quant.is_signed)
+    if got_signed == iuns:
+        sys.exit(f'ERROR: rebuilt input_quant is signed={got_signed} but input_unsigned='
+                 f'{iuns} was requested. dot_t and every type derived from it would be '
+                 f'wrong. Pass --input-unsigned/--no-input-unsigned to match training.')
 
     # Act-quantizer scales (and signedness) off the rebuilt model.
     act_info = _read_act_quant(model, qnn)
@@ -393,6 +439,10 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     relu_F = relu_W - relu_I                  # act_layer (ReLU) grid fractional bits
     out_F = out_W - out_I                     # output_quant grid fractional bits
     dot_F = dot_W - dot_I                      # input_quant (dots) grid fractional bits
+    # Magnitude bits of the dot range: ap_fixed<W,I> spans +-2^(I-1), ap_ufixed<W,I>
+    # spans [0, 2^I). Downstream sizing (BN_F, bn1out_t) bounds |dots|, so it must
+    # follow the signedness or an unsigned dot_t under-sizes them by a full bit.
+    dot_mag = dot_I - 1 if dot_s else dot_I
 
     # --- input_t: raw-momentum / IO type feeding dot4 (the 36x36 multipliers that
     # dominate DSP). NOT a learned quantizer (input_quant grids the DOTS, dot_t), so it
@@ -464,7 +514,7 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     # error stays under half the t2 LSB even for dots spanning the full dot_t range
     # (data-independent / robust to the learned mean). +2 is margin.
     BN_I = _int_bits(bn_max)
-    BN_F = t2_F + (dot_I - 1) + 2
+    BN_F = t2_F + dot_mag + 2
     BN_W = BN_I + BN_F
 
     # --- accumulator headroom from NPARTICLES2 (NPARTICLES + 2 spurions).
@@ -487,7 +537,7 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
 
     # batch1 = BatchNorm1(dots): range bound from the dot_t span and the BN1 constants.
     bn1 = np.asarray(batch1).reshape(-1)                 # [mean, scale, beta]
-    dot_max = 2.0 ** (dot_I - 1)
+    dot_max = 2.0 ** dot_mag
     bn1_bound = (dot_max + abs(bn1[0])) * abs(bn1[1]) + abs(bn1[2])
     bn1_I = int(math.ceil(math.log2(bn1_bound))) + 1     # +1 sign bit
     bn1_W = bn1_I + AGG_F
