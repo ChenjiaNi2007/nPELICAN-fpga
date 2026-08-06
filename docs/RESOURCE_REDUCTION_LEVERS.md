@@ -514,19 +514,74 @@ Quadratic truncation dominates a 2× packing factor, and block-FP has just produ
 accuracy headroom to pay for it. **Next sweep: nobj at block-FP W=10/12**, run down until
 AUC/bgRej returns to the uniform-12 baseline.
 
-**OPEN — `dot_t` may now be the bottleneck.** The learned `input_quant` scale moved from
-8.0 (baseline) to **16.0 on every block-FP run** except W=7. At 6 bits that means `dot_t`
-got *coarser* exactly as the momenta got finer, so some of the block-FP gain is being
-discarded downstream. Two consequences:
-1. The exported `dot_t` typedef differs between baseline and block-FP checkpoints —
-   any csim/vsynth comparison must re-export from the chosen checkpoint, **not** reuse
-   the existing `weights.h` / `types_generated.h`.
-2. Sweep block-FP W=10 × `dot_t` 7/8 bits. Unlike the pmu width, `dot_t` width costs
-   no DSP, so this is a cheap shot at recovering the discarded headroom.
+**Note on export:** the `dot_t` typedef differs between baseline and block-FP
+checkpoints, so any csim/vsynth comparison must re-export from the chosen checkpoint,
+**not** reuse the existing `weights.h` / `types_generated.h`.
+
+#### 7h. `dot_t` is RANGE-limited, not resolution-limited — CLOSED (2026-08-05)
+
+The learned `input_quant` scale doubled (8.0 → 16.0) under block-FP, i.e. `dot_t` got
+*coarser* exactly as the momenta got finer. That looked like the block-FP gain being
+discarded at the cast, so two more arms were run at 16 epochs / seed 42 / full toptag:
+**B** = `IUNSIGNED=1` at `i6` (the sign bit is provably dead — see below — so this is a
+free bit), **C** = plain `i7` (the paid version of the same resolution).
+
+Sorting all **12** runs by CLIP POINT rather than by width shows the actual variable
+(clip = 2^(W−1)·scale signed, (2^W−1)·scale unsigned):
+
+| clip | runs | AUC range | bgRej range |
+|------|------|-----------|-------------|
+| **128**  | 2  | **0.9294 – 0.9332** | **12.9 – 13.1** |
+| 256  | 4  | 0.9429 – 0.9592 | 26.2 – 42.0 |
+| 512  | 6  | 0.9527 – 0.9603 | 34.7 – 46.7 |
+
+Two independent runs — different arm, different grid, different width — both landed at
+clip 128 and both collapsed to nearly the same numbers. That is a threshold, not noise.
+
+Three checks, all agreeing:
+- **Doubling resolution at constant range is a wash.** Arm C uniform-12 vs arm A
+  uniform-12: identical clip (256), LSB 8→4, AUC 0.9544 → 0.9530.
+- **Halving range is catastrophic at any width**, including at 7 bits, which has *more*
+  total bits than the arm that worked.
+- **The best row in the study has the coarsest LSB.** blockfp-12 at clip 512 / LSB 16 —
+  widest range, crudest grid — wins both metrics (0.9603 / 46.7).
+
+Mechanism: dots reach 1.1×10⁴ with p99.9 = 1279, so clipping at 128 destroys the
+hard-pair tail that carries jet mass. The 8→16 scale move was the optimizer correctly
+*buying range*, not a bottleneck. **Both dot_t levers are dead as accuracy plays.**
+
+**7h-i. `--input-unsigned` — implemented, measured, NOT adopted.** The premise is sound
+and verified: on `tb_data/10k_pmu_test.dat`, of 2.28M masked i<j dots only 0.11% are
+negative, all particle–particle, **max |d| = 2⁻⁶ — 512× below one `dot_t` LSB** (float32
+cancellation noise on near-collinear pairs; every one rounds to 0 anyway). So the sign
+bit really does encode nothing, and `ap_ufixed<6,9>` really is the same range at half the
+LSB. It still lost, because the scale is **learned**: freeing a bit does not hand you
+resolution at constant range, it hands the optimizer a different range/resolution
+tradeoff, and on a Pareto tail it took resolution. Arm B's uniform row is the clearest
+case — clip 256 → 128, AUC 0.9544 → 0.9294. Flag kept (default off) for reproducing this.
+
+**7h-ii. The fix that IS worth taking: `--input-clip-min`.** 2 of 12 runs fell into the
+clip-128 basin — a ~17% failure rate on a free learned parameter over a heavy tail, which
+also means single-seed comparisons elsewhere in this study are shakier than they look.
+`QuantConfig.input_clip_min` floors the saturation point (Brevitas `scaling_min_val`,
+derived as clip_min/threshold and rounded UP to a power of two so the po2 firmware
+contract holds). Costs nothing in hardware — `dot_t` is a RESULT width, not a multiplier
+operand, so it never touches the 1012 dot DSPs. `sweep_pmu_blockfp.sh` now defaults
+`CLIP_MIN=512`.
+
+⚠ **It is NOT training-only.** Brevitas stores the raw runtime stat in
+`scaling_impl.value` and applies the clamp on every forward, so every tool that REBUILDS
+the model (`model_loader.py`, `check_scales.py`, `export_golden.py`) must replay it or it
+reports a scale the model never used. Same silent failure mode as the signedness bug in
+`8e1088d`. Both are now read from the checkpoint's own args and asserted.
 
 ## Not reducible / dead ends (don't re-investigate)
 - **Per-COMPONENT (E/px/py/pz) bit-width tuning** — zero-sum by the width-invariance
   theorem in Lever 7a; measured bit-identical to uniform. Split per-PARTICLE instead.
+- **Widening or unsigning `dot_t` for accuracy** — 12 runs across 3 arms say `dot_t` is
+  RANGE-limited, not resolution-limited (Lever 7h). Extra resolution at fixed range is a
+  wash; losing range is catastrophic. Floor the clip (`--input-clip-min 512`) and move
+  on. Note `dot_t` is a RESULT width, so it never moved DSP in either direction anyway.
 - **2→2 dense MAC is not symmetric** — `T[i][j]` carries `jdotp[i]` vs `jdotp[j]`
   (channels 2/3) which swap under i↔j, so it can't be halved like the dots.
 - **bias_t_gen / norm_t / accumulator widths** — already minimized and flag-tracking
@@ -578,9 +633,10 @@ discarded downstream. Two consequences:
    a. ~~Run the AUC sweep~~ — done, 7g.
    b. ~~csynth the 253 realignment shifters~~ — off the critical path now that there is
       no DSP saving to weigh them against.
-   c. Sweep block-FP W=10 × `dot_t` 7/8 bits — the learned dot scale doubled under
-      block-FP, so `dot_t` is likely discarding part of the gain, and its width costs
-      no DSP.
+   c. ~~Sweep block-FP W=10 × `dot_t` 7/8 bits~~ — done, **7h**. `dot_t` is
+      range-limited, not resolution-limited; both the unsigned and the wider-`dot_t`
+      levers are dead. Use `--input-clip-min 512` from now on (7h-ii) — 2 of 12 runs
+      fell into a clip-128 basin and collapsed.
    d. Loader + `dot4` (m, e) firmware work — only if block-FP is adopted for accuracy.
 7. **The two big decisions, unchanged:** Lever 3 (relax II=1 — time-multiplexing
    genuinely SHARES the adder trees, the only structural LUT fix) or fewer

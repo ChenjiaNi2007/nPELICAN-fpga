@@ -317,6 +317,18 @@ def _extract_quant_weights():
             sys.exit('ERROR: checkpoint needs input_unsigned but the PELICAN-nano checkout '
                      f'at --repo has no such QuantConfig field. Update it.')
         qkw['input_unsigned'] = True
+
+    # input_clip_min floors the d_ij saturation point. It is NOT a training-only
+    # constraint: Brevitas stores the raw runtime stat and applies the clamp on every
+    # forward, so a rebuild that omits it reports the unclamped scale and every derived
+    # type is wrong — same silent failure as the signedness above. Always replay it.
+    icm = _arg('input_clip_min', None)
+    if icm is not None:
+        if 'input_clip_min' not in QuantConfig.__dataclass_fields__:
+            sys.exit('ERROR: checkpoint was trained with --input-clip-min but the '
+                     'PELICAN-nano checkout at --repo has no such QuantConfig field. '
+                     'Update it, or the emitted dot_t will use an unclamped scale.')
+        qkw['input_clip_min'] = float(icm)
     qcfg = QuantConfig(**qkw)
 
     def _build():
