@@ -84,13 +84,29 @@ void np_dots_only(
     }
 #endif
 
+#ifdef NPELICAN_BLOCK_FP
+    // Lever 7: per-particle block-FP encode, then mantissa dot + realign. Mirrors
+    // np_dots in nPELICAN_split.cpp, so the isolated numbers stay comparable. The
+    // encoder (22 priority encoders + 88 shifts) IS counted here — it is part of
+    // the dot front end's cost under block-FP. See firmware/np_blockfp.h.
+    mant_t p1m[NPARTICLES2][4];
+    bexp_t p1e[NPARTICLES2];
+    #pragma HLS ARRAY_PARTITION variable=p1m complete dim=0
+    #pragma HLS ARRAY_PARTITION variable=p1e complete dim=0
+    np_bfp_encode_all(p1, p1m, p1e);
+#endif
+
     // Symmetric dot4: compute the upper triangle (j>=i) and mirror into the
     // lower triangle (pure wiring, no hardware) — halves the dot4 multipliers.
     for (unsigned int i = 0; i < NPARTICLES2; i++) {
         #pragma HLS unroll
         for (unsigned int j = i; j < NPARTICLES2; j++) {
             #pragma HLS unroll
+#ifdef NPELICAN_BLOCK_FP
+            Dot: np_bfp_dot4(p1m[i], p1e[i], p1m[j], p1e[j], dots_out[i*NPARTICLES2+j]);
+#else
             Dot: dot4_local(p1[i], p1[j], dots_out[i*NPARTICLES2+j]);
+#endif
             if (j != i) dots_out[j*NPARTICLES2+i] = dots_out[i*NPARTICLES2+j];
         }
     }

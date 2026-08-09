@@ -84,6 +84,12 @@ static void lut_pslog_init(data_T table_out[N_TABLE])
 // dots carry the input_quant grid → dot_t (was an internal_t/input_t mismatch before).
 void dot4(input_t p1[4], input_t p2[4], dot_t& dot);
 
+// Lever 7: per-particle block-FP encode + (m, e) dot4. Inert unless the exported
+// checkpoint was trained with --pmu-block-fp (types_generated.h defines
+// NPELICAN_BLOCK_FP and the mant_t/bexp_t/mdot_t/dotalign_t pair). Needs input_t,
+// dot_t and NPARTICLES2, so it is included here rather than at the top.
+#include "np_blockfp.h"
+
 // nobj is a PARTICLE COUNT (0..NPARTICLES2), not a momentum: it must not share
 // input_t. With input_t capped below 12 bits (negative F, momentum LSB > 1 GeV)
 // an input_t nobj would round odd counts to even, corrupting the mask and the

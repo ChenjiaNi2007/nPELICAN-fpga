@@ -159,13 +159,27 @@ void np_dots(
     }
 #endif
 
+#ifdef NPELICAN_BLOCK_FP
+    //Lever 7: encode each particle once into (mantissa[4], exponent), then dot the
+    //mantissas and realign. Mirrors nPELICAN.cpp; see firmware/np_blockfp.h.
+    mant_t p1m[(NPARTICLES2)][4];
+    bexp_t p1e[(NPARTICLES2)];
+    #pragma HLS ARRAY_PARTITION variable=p1m complete dim=0
+    #pragma HLS ARRAY_PARTITION variable=p1e complete dim=0
+    np_bfp_encode_all(p1, p1m, p1e);
+#endif
+
     //dot4 is symmetric: compute only the upper triangle and mirror (pure wiring).
     //Under NPELICAN_SPLIT_TRI there is nothing to mirror: (j,i) IS element (i,j).
     for(unsigned int i = 0; i < NPARTICLES2; i++){
       #pragma HLS unroll
       for(unsigned int j = i; j < NPARTICLES2; j++){
         #pragma HLS unroll
+#ifdef NPELICAN_BLOCK_FP
+        Dot: np_bfp_dot4(p1m[i], p1e[i], p1m[j], p1e[j], dots[NP_SYMIDX(i, j)]);
+#else
         Dot: dot4(p1[i], p1[j], dots[NP_SYMIDX(i, j)]);
+#endif
 #ifndef NPELICAN_SPLIT_TRI
         if (j != i) dots[NP_SYMIDX(j, i)] = dots[NP_SYMIDX(i, j)];
 #endif

@@ -213,6 +213,11 @@ def _extract_float_weights():
 # learned per-quantizer scales/signedness off the SAME rebuilt Brevitas model.
 _quant_info = {}
 
+# Guard bits below the finest block-FP mantissa LSB carried by the input_t PORT.
+# See the derivation at the block-FP branch of _emit_types_header for why 3 (the
+# analytic minimum) is not enough and 8 is. Costs wires, never DSP.
+NPELICAN_BFP_GUARD_BITS = 8
+
 
 def _po2_k(scale, who):
     """k = -log2(scale); hard error if the learned scale is not an exact po2."""
@@ -280,15 +285,37 @@ def _extract_quant_weights():
         sys.exit('ERROR: checkpoint has pmu_quant keys (trained momentum quantizer) but no '
                  'recorded bit width; pass --pmu-bit-width matching the training flag.')
 
-    # Lever 7 block-FP momenta need a mantissa/exponent type PAIR and a dot4 that
-    # realigns before the dot_t cast — firmware work that is not done. Exporting such
-    # a checkpoint would silently emit a single input_t describing a grid the model
-    # never used, so refuse rather than produce a wrong header.
-    if _arg('pmu_block_fp', False):
-        sys.exit('ERROR: checkpoint was trained with --pmu-block-fp (per-particle block '
-                 'floating point). The loader emits a single uniform input_t, which does '
-                 'not describe that grid, and firmware dot4 cannot yet consume (m, e). '
-                 'See nPELICAN-fpga/docs/RESOURCE_REDUCTION_LEVERS.md Lever 7.')
+    # --- Lever 7: per-particle block floating point on the momenta ---------------
+    # BlockFPQuant is STATELESS (no params, no buffers), so it leaves no trace in the
+    # state_dict and _read_act_quant() cannot see it — it is neither a QuantIdentity
+    # nor a QuantReLU. The checkpoint's own `args` are therefore the ONLY record of
+    # the momentum grid, and they must be replayed both into the rebuilt model and
+    # into the emitted types. Same class of silent failure as input_unsigned /
+    # input_clip_min: a rebuild that drops the flag load_state_dict's cleanly and then
+    # describes a grid the model never used.
+    bfp = bool(_arg('pmu_block_fp', False))
+    bfp_emin = int(_arg('pmu_exp_min', 0))
+    bfp_emax = int(_arg('pmu_exp_max', 10))
+    if bfp:
+        if pbw is None:
+            sys.exit('ERROR: checkpoint records --pmu-block-fp but no pmu_bit_width; the '
+                     'mantissa width is not recoverable. Pass --pmu-bit-width.')
+        if pbw < 3:
+            sys.exit(f'ERROR: block-FP mantissa width {pbw} < 3 (needs sign + I=2).')
+        if bfp_emin > bfp_emax:
+            sys.exit(f'ERROR: pmu_exp_min ({bfp_emin}) > pmu_exp_max ({bfp_emax}).')
+        # The firmware encoder realigns with a RIGHT shift only (p >> e). A negative
+        # exponent would need a left shift and extra integer headroom in mraw_t — not
+        # implemented, and never used (momenta are in GeV, the trained clamp is [0,10]).
+        # Refuse rather than emit a header the firmware would silently mis-scale.
+        if bfp_emin < 0:
+            sys.exit(f'ERROR: pmu_exp_min={bfp_emin} < 0 is not supported by the firmware '
+                     f'block-FP encoder (right-shift realign only). See '
+                     f'firmware/np_blockfp.h.')
+        if 'pmu_block_fp' not in QuantConfig.__dataclass_fields__:
+            sys.exit('ERROR: checkpoint was trained with --pmu-block-fp but the '
+                     'PELICAN-nano checkout at --repo has no such QuantConfig field. '
+                     'Update it, or the rebuilt model uses a uniform momentum grid.')
 
     # Signedness of the d_ij grid. MUST match training: Brevitas derives scale() from the
     # same stored stat divided by a signedness-dependent int threshold (2^(b-1)-1 signed
@@ -312,6 +339,14 @@ def _extract_quant_weights():
         # only when set, so the loader still works against an older PELICAN-nano
         # checkout whose QuantConfig has no pmu_bit_width field
         qkw['pmu_bit_width'] = pbw
+    if bfp:
+        # Replayed so the rebuilt model runs the SAME momentum grid it trained on.
+        # (Field presence was asserted above.) BlockFPQuant is stateless, so this
+        # changes no stored scale — but a rebuild that silently used a uniform
+        # QuantIdentity here would make every calibration/verification forward wrong.
+        qkw['pmu_block_fp'] = True
+        qkw['pmu_exp_min'] = bfp_emin
+        qkw['pmu_exp_max'] = bfp_emax
     if iuns:
         if 'input_unsigned' not in QuantConfig.__dataclass_fields__:
             sys.exit('ERROR: checkpoint needs input_unsigned but the PELICAN-nano checkout '
@@ -339,6 +374,25 @@ def _extract_quant_weights():
     model = _build()
     model.load_state_dict(sd)
     model.eval()
+
+    # Same guard for the momentum grid: the rebuilt pmu_quant must actually BE the
+    # block-FP module, with the mantissa width and exponent clamp the run recorded.
+    # BlockFPQuant leaves nothing in the state_dict, so this assertion is the only
+    # thing standing between a dropped flag and a header describing the wrong grid.
+    if bfp:
+        pq = getattr(model, 'pmu_quant', None)
+        if pq is None or type(pq).__name__ != 'BlockFPQuant':
+            sys.exit(f'ERROR: checkpoint records --pmu-block-fp but the rebuilt model\'s '
+                     f'pmu_quant is {type(pq).__name__ if pq is not None else "None"}, not '
+                     f'BlockFPQuant. The emitted mantissa/exponent types would describe a '
+                     f'grid the model never used.')
+        if (int(pq.bit_width), int(pq.exp_min), int(pq.exp_max)) != (pbw, bfp_emin, bfp_emax):
+            sys.exit(f'ERROR: rebuilt BlockFPQuant is W={pq.bit_width} exp=[{pq.exp_min},'
+                     f'{pq.exp_max}] but the checkpoint records W={pbw} exp=[{bfp_emin},'
+                     f'{bfp_emax}].')
+        _quant_info['blockfp'] = dict(bits=int(pq.bit_width), exp_min=int(pq.exp_min),
+                                      exp_max=int(pq.exp_max),
+                                      from_energy=bool(pq.from_energy))
 
     # Guard the silent failure described above: the rebuilt input quantizer must have the
     # signedness we asked for. A mismatch here means every dot_t-derived type is wrong.
@@ -468,7 +522,95 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     #      -> narrower input_t -> each 36x36 dot multiply shrinks (4 DSP -> fewer/1 DSP).
     pmax = _momentum_absmax(args.repo)
     pmu = act.get('pmu_quant')
-    if pmu is not None:
+    bfp = _quant_info.get('blockfp')
+    if bfp is not None:
+        # --- Lever 7: PER-PARTICLE BLOCK FLOATING POINT ---------------------------
+        # p_k = m_k * 2^e with ONE exponent shared by a particle's four components:
+        #   e   = clamp(floor(log2|E|), EXP_MIN, EXP_MAX)   -- one LZC on the energy
+        #   m_k = p_k * 2^-e  on a signed W-bit, I=2 grid   -- LSB 2^-(W-2)
+        # I=2 is provably sufficient: for a physical particle E >= |p_k| and
+        # 2^e <= E < 2^(e+1), so |m_k| < 2 always (blockfp.py "Representation").
+        #
+        # The momentum grid is therefore RELATIVE, not absolute, and no single
+        # input_t can describe it — hence the mantissa/exponent type pair below.
+        # input_t survives as the raw-momentum PORT type feeding the on-chip
+        # encoder (firmware/np_blockfp.h); it is not a multiplier operand any more,
+        # so its width costs wires, not DSP. The dot4 multipliers are W x W.
+        if not bfp.get('from_energy', True):
+            sys.exit('ERROR: checkpoint uses BlockFPQuant(from_energy=False) (4-way max '
+                     'over |p_k|); firmware/np_blockfp.h implements the E-based exponent '
+                     'only. They are measured identical, but the header must not claim a '
+                     'grid the firmware does not build.')
+        MANT_W = int(bfp['bits'])
+        MANT_I = 2
+        MANT_F = MANT_W - MANT_I
+        EXP_MIN = int(bfp['exp_min'])
+        EXP_MAX = int(bfp['exp_max'])
+        # Unsigned exponent field (EXP_MIN >= 0 is enforced at rebuild time).
+        EXP_BITS = max(1, int(EXP_MAX).bit_length())
+        SHIFT_BITS = max(1, int(2 * EXP_MAX).bit_length())
+
+        INPUT_I = _int_bits(pmax)
+        # The encoder rounds p*2^-e onto the mantissa grid, but p has ALREADY been
+        # rounded into input_t at the port. For that double rounding to land where
+        # PyTorch's single rounding of the float momenta lands, input_t's LSB must sit
+        # well under the FINEST mantissa LSB, which occurs at the smallest exponent:
+        #   mantissa LSB(e) = 2^(e-(W-2))  ->  finest at e = EXP_MIN
+        #   need 2^-(F+1) <= (1/4) * 2^(EXP_MIN-(W-2))  =>  F >= (W-2) - EXP_MIN + 3.
+        #
+        # 3 guard bits is the ANALYTIC minimum and it is not enough in practice. Two
+        # boundary effects survive it, both driven by the port rounding rather than by
+        # the mantissa grid:
+        #   (a) EXPONENT boundaries. e is decided from |E| AFTER it lands in input_t, so
+        #       a float energy just under a power of two (1023.999 at F=8 -> 1024.0)
+        #       picks e one higher than PyTorch did and lands the particle on a
+        #       different mantissa grid entirely.
+        #   (b) MANTISSA ties. PyTorch rounds the float momentum once; the firmware
+        #       rounds float -> input_t -> mant_t, and a value near a mant_t half-grid
+        #       point can be pushed across by the first rounding.
+        # Both shrink by 2x per guard bit. NPELICAN_BFP_GUARD_BITS was raised to 8 after
+        # measuring the golden gate on a W=7 checkpoint: at 3 guard bits the block-FP
+        # front end contributed 7 mismatching events / 500 over the dots-injected
+        # baseline; at 8 it contributes 0. This is FREE in DSP -- input_t feeds the
+        # encoder, not the dot multipliers, so the extra width costs wires and a wider
+        # shifter, never a multiplier bit.
+        INPUT_F = max(0, MANT_F - EXP_MIN + NPELICAN_BFP_GUARD_BITS)
+        INPUT_W = INPUT_I + INPUT_F
+
+        # mraw_t: p >> e held EXACTLY (no bits shifted off the bottom), so the ONLY
+        # rounding on the encode path is the final cast to mant_t. Right shift by up
+        # to EXP_MAX needs EXP_MAX extra fractional bits; the integer part is unchanged.
+        MRAW_I = INPUT_I
+        MRAW_W = INPUT_W + EXP_MAX
+        # mdot_t: the mantissa Minkowski dot, EXACT. mant_t^2 = <2W,4>; summing four
+        # of them adds 2 integer bits -> <2W+2,6>. True bound |md| < 4*2*2 = 16 < 2^5,
+        # and ap_fixed<.,6> spans +-2^5, so nothing saturates and nothing rounds.
+        MDOT_I = 6
+        MDOT_W = 2 * MANT_W + 2
+        # dotalign_t: md << (e1+e2), still EXACT — the realignment that has to happen
+        # BEFORE the dot_t cast, so the whole front end rounds exactly once (at dot_t,
+        # AP_RND_CONV), matching PyTorch's single input_quant rounding of the dot.
+        ALIGN_F = MDOT_W - MDOT_I
+        ALIGN_I = MDOT_I + 2 * EXP_MAX
+        ALIGN_W = ALIGN_I + ALIGN_F
+
+        _quant_info['blockfp'].update(
+            mant_W=MANT_W, mant_I=MANT_I, exp_bits=EXP_BITS, shift_bits=SHIFT_BITS,
+            mraw_W=MRAW_W, mraw_I=MRAW_I, mdot_W=MDOT_W, mdot_I=MDOT_I,
+            align_W=ALIGN_W, align_I=ALIGN_I)
+
+        print(f'  (input_t from TRAINED BLOCK-FP pmu grid: mantissa W={MANT_W} I=2 '
+              f'(LSB 2^{-MANT_F:+d} of 2^e), exponent [{EXP_MIN},{EXP_MAX}] in '
+              f'{EXP_BITS} bits)')
+        print(f'   mant_t=ap_fixed<{MANT_W},{MANT_I}>  mdot_t=ap_fixed<{MDOT_W},{MDOT_I}> '
+              f'(exact)  dotalign_t=ap_fixed<{ALIGN_W},{ALIGN_I}> (exact)')
+        print(f'   input_t=ap_fixed<{INPUT_W},{INPUT_I}> is the raw-momentum PORT + '
+              f'encoder input only (|p|max={pmax:.1f}); dot multipliers are '
+              f'{MANT_W}x{MANT_W}, not {INPUT_W}x{INPUT_W}')
+        if args.max_input_bits is not None:
+            print('  (--max-input-bits IGNORED under block-FP: the mantissa width is the '
+                  'trained knob, and input_t no longer feeds the dot multipliers)')
+    elif pmu is not None:
         # --- Phase A* (INPUT_WIDTH_RETRAIN_PLAN.md): the momentum grid was TRAINED
         # (QuantIdentity on Pmu before dot4). input_t IS that learned grid: PyTorch
         # and the firmware quantize momenta identically, so dots are bit-exact by
@@ -604,6 +746,7 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     L.append('// yet wired into the datapath (Phase 2 swaps usage and retires the old types).')
     L.append('')
     L.append('#include "ap_fixed.h"')
+    L.append('#include "ap_int.h"')
     L.append('')
     L.append('#define NPELICAN_GENERATED_TYPES 1')
     L.append('')
@@ -631,7 +774,15 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     L.append(_pt_line('w2_gen_t', w2_W,   w2_I,   w2_s,   wgt['agg_2to0']['scale'], w2_k, '2->0 weights'))
     L.append('')
     L.append('// ---- Raw-momentum / IO interface type (input_t): operand of the dot4')
-    if pmu is not None:
+    if bfp is not None:
+        L.append('//      encoder, NOT of the dot multipliers. Lever 7 block-FP: the momentum')
+        L.append('//      grid is PER-PARTICLE relative (p_k = m_k * 2^e), so no single uniform')
+        L.append('//      type describes it. input_t carries the raw momenta to the on-chip')
+        L.append('//      encoder (firmware/np_blockfp.h); the multipliers are mant_t x mant_t.')
+        L.append('//      F is sized so the port rounding sits >=2 bits under the FINEST')
+        L.append('//      mantissa LSB (at e=EXP_MIN), i.e. the encode lands where PyTorch\'s')
+        L.append('//      single rounding of the float momenta lands.')
+    elif pmu is not None:
         L.append('//      multipliers. TRAINED grid (Phase A*): pmu_quant = QuantIdentity on Pmu')
         L.append('//      before dot4, learned po2 scale. PyTorch and firmware grid the momenta')
         L.append('//      identically, so dots are bit-exact by construction (no analytic bound,')
@@ -645,7 +796,11 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
         L.append('//      QAT bits -> smaller F -> narrower input_t -> cheaper dot multipliers.')
     L.append('//      Guard macro lets nPELICAN.h keep a hand fallback for the float path.')
     L.append('#define NPELICAN_INPUT_T_GENERATED 1')
-    if pmu is not None:
+    if bfp is not None:
+        L.append(f'typedef ap_fixed<{INPUT_W}, {INPUT_I}, AP_RND_CONV, AP_SAT> input_t;'
+                 f'  // raw momenta into the block-FP encoder; |p|max={pmax:.1f} '
+                 f'(I={INPUT_I}), F={INPUT_F}')
+    elif pmu is not None:
         L.append(f'typedef ap_fixed<{INPUT_W}, {INPUT_I}, AP_RND_CONV, AP_SAT> input_t;'
                  f'  // raw momenta; TRAINED pmu_quant grid (I={INPUT_I}, F={INPUT_F}); '
                  f'|p|max={pmax:.1f}')
@@ -653,6 +808,37 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
         L.append(f'typedef ap_fixed<{INPUT_W}, {INPUT_I}, AP_RND_CONV, AP_SAT> input_t;'
                  f'  // raw momenta; |p|max={pmax:.1f} (I={INPUT_I}), F={INPUT_F} (dot_F={dot_F})')
     L.append('')
+
+    if bfp is not None:
+        L.append('// ---- Lever 7: per-particle BLOCK FLOATING POINT momentum grid ----------')
+        L.append('// p_k = m_k * 2^e, ONE exponent per particle, shared by its 4 components:')
+        L.append('//   e   = clamp(floor(log2|E|), EXP_MIN, EXP_MAX)   (one LZC on the energy)')
+        L.append(f'//   m_k = p_k * 2^-e on a signed {MANT_W}-bit I=2 grid (LSB 2^{-MANT_F:+d} of 2^e)')
+        L.append('// I=2 cannot overflow: E >= |p_k| and 2^e <= E < 2^(e+1) => |m_k| < 2.')
+        L.append('// Masking invariant holds: a zeroed particle gives e = EXP_MIN, m = 0, dot 0.')
+        L.append('// The dot is d = 2^(e1+e2) * (m1 . g . m2): mantissa dot EXACT in mdot_t,')
+        L.append('// realigned EXACTLY in dotalign_t, then rounded ONCE into dot_t (AP_RND_CONV)')
+        L.append('// -- the same single rounding PyTorch applies with input_quant.')
+        L.append('#define NPELICAN_BLOCK_FP 1')
+        L.append(f'#define NPELICAN_BFP_MANT_W {MANT_W}')
+        L.append(f'#define NPELICAN_BFP_EXP_MIN {EXP_MIN}')
+        L.append(f'#define NPELICAN_BFP_EXP_MAX {EXP_MAX}')
+        L.append(f'typedef ap_fixed<{MANT_W}, {MANT_I}, AP_RND_CONV, AP_SAT> mant_t;'
+                 f'  // mantissa; the dot multiplier operand ({MANT_W}x{MANT_W})')
+        L.append(f'typedef ap_uint<{EXP_BITS}> bexp_t;'
+                 f'  // per-particle exponent, [{EXP_MIN},{EXP_MAX}]')
+        L.append(f'typedef ap_uint<{SHIFT_BITS}> bshift_t;'
+                 f'  // e1+e2 realign amount, [{2*EXP_MIN},{2*EXP_MAX}]')
+        L.append(f'typedef ap_fixed<{MRAW_W}, {MRAW_I}> mraw_t;'
+                 f'  // p >> e held EXACTLY (F = input F + EXP_MAX), so the encode rounds'
+                 f' only once, at the mant_t cast')
+        L.append(f'typedef ap_fixed<{MDOT_W}, {MDOT_I}> mdot_t;'
+                 f'  // EXACT mantissa Minkowski dot: <2W,4> products, +2 int bits for the'
+                 f' 4-term sum; |md| < 16')
+        L.append(f'typedef ap_fixed<{ALIGN_W}, {ALIGN_I}> dotalign_t;'
+                 f'  // EXACT mdot << (e1+e2); I = {MDOT_I} + 2*EXP_MAX so the realign never'
+                 f' saturates')
+        L.append('')
     L.append('// ---- Float-trained biases / BatchNorm constants / normalization constants ----')
     L.append('// These are NOT PyTorch quantization points (PyTorch keeps them in float), so')
     L.append('// per CLAUDE.md/plan they are WIDENED, not snapped: their fixed-point rounding')

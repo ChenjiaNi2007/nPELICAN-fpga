@@ -441,9 +441,9 @@ and packable. **The 2-mults/DSP endgame in this section is abandoned.**
   Because `BlockFPQuant` is stateless the checkpoint gains no new keys — the
   configuration lives in the run's `args`, which is how `model_loader.py` already
   auto-detects the momentum grid.
-- **The loader + firmware side is NOT done.** `model_loader.py` must emit a
-  mantissa/exponent type pair instead of a single `input_t`, and `dot4` must take
-  `(m, e)` and realign before the `dot_t` cast. Do this only after 7e's csynth.
+- **The loader + firmware side is DONE** (2026-08-08), so a block-FP checkpoint now
+  exports and c-sims like any other. See 7i below for the export/vsynth commands and
+  the verification evidence.
 - **Likely bonus for the equivariance sweep:** block-FP is scale-covariant, so a
   boost is absorbed into the exponent and leaves mantissas nearly unchanged. The
   existing harness can test this directly.
@@ -574,6 +574,88 @@ operand, so it never touches the 1012 dot DSPs. `sweep_pmu_blockfp.sh` now defau
 the model (`model_loader.py`, `check_scales.py`, `export_golden.py`) must replay it or it
 reports a scale the model never used. Same silent failure mode as the signedness bug in
 `8e1088d`. Both are now read from the checkpoint's own args and asserted.
+
+#### 7i. Export + firmware path for block-FP checkpoints — LANDED (2026-08-08)
+
+`--pmu-block-fp` checkpoints used to be refused by `model_loader.py` (a deliberate guard:
+one uniform `input_t` cannot describe a per-particle grid). Both halves are now built.
+
+**Loader** (`model_loader.py`). `BlockFPQuant` is stateless, so the momentum grid leaves
+NO trace in the state_dict and `_read_act_quant()` cannot see it — the checkpoint's `args`
+are the only record. They are replayed into the rebuilt model and then **asserted** against
+it (`pmu_quant` must actually be a `BlockFPQuant` with the recorded W and exponent clamp),
+the same discipline `input_unsigned` and `input_clip_min` needed. `types_generated.h` gains:
+
+| typedef | for W=7, exp [0,10] | role |
+|---|---|---|
+| `mant_t` | `ap_fixed<7,2>` | mantissa — **the dot multiplier operand** |
+| `bexp_t` / `bshift_t` | `ap_uint<4>` / `ap_uint<5>` | per-particle exponent; `e1+e2` |
+| `mraw_t` | `ap_fixed<30,12>` | `p >> e` held EXACTLY, so the encode rounds only once |
+| `mdot_t` | `ap_fixed<16,6>` | EXACT mantissa dot (`<2W,4>` products, +2 bits for the 4-term sum) |
+| `dotalign_t` | `ap_fixed<36,26>` | EXACT `mdot << (e1+e2)`; realign never saturates |
+| `input_t` | `ap_fixed<25,12>` | raw-momentum PORT into the encoder — **not** a multiplier operand |
+
+**Firmware** (`firmware/np_blockfp.h`, guarded by `NPELICAN_BLOCK_FP`, called from
+`nPELICAN.cpp`, `nPELICAN_split.cpp` and `np_dots_only.cpp`). Encode is a priority
+cascade on |E| (= one LZC) plus a shift; the dot is
+`d = 2^(e_i+e_j)·(m_i·g·m_j)` with the mantissa dot and the realign both exact, so the
+front end rounds **once**, at the `dot_t` cast, exactly as PyTorch's `input_quant` does.
+Rounding before the shift would quantize on a grid `2^(e_i+e_j)` too fine — that is the
+one way to get this wrong. Uniform checkpoints never define the macro and are unaffected.
+
+**`input_t` needs 8 guard bits, not the analytic 3.** The port rounds before the encoder
+sees the momenta, and two boundary effects survive the analytic minimum: an energy just
+under a power of two can round UP across an exponent boundary and land the particle on a
+different mantissa grid entirely, and a momentum near a `mant_t` half-grid point can be
+pushed across by the first rounding. Measured on a W=7 checkpoint: at 3 guard bits the
+front end contributed 7 mismatching events / 500; at 8 it contributes **0**. Free — the
+extra width is wires and a wider shifter, never a multiplier bit
+(`NPELICAN_BFP_GUARD_BITS` in `model_loader.py`).
+
+**Verification** (local g++ c-sim, `smoke_bfp7` = W=7 block-FP on `sample_data`, 8 epochs,
+plus a `smoke_unif12` control trained on the identical recipe):
+
+| checkpoint | golden gate | dots-injected (bypasses dot4) | front-end contribution |
+|---|---|---|---|
+| uniform p12 control | 109 / 500 mismatch | 109 | 0 |
+| block-FP W=7 | 87 / 500 mismatch | 87 | **0** |
+
+The block-FP dot front end is **bit-exact vs PyTorch on all 500 events**. The residual 87
+is a PRE-EXISTING downstream gap on these short 6-bit smoke checkpoints — it shows up
+identically with the dots injected, and the uniform control is worse (109), so it is not
+block-FP's. ⚠ Chase it before reading any block-FP *accuracy* number off firmware.
+Also verified: split build byte-identical to the monolith; `np_dots_only` gate
+484/484 on-grid, 0 asymmetric, with and without `const_beams`; and re-exporting three
+uniform checkpoints (`w6a6i6p12`, `w6a6i6p14`, `w24a24i14`) through the new loader is
+byte-identical except one added `#include "ap_int.h"` — zero regression.
+
+**Commands** (Vitis/Vivado are remote-only; steps 1–2 run anywhere):
+
+```bash
+# 1. export from the block-FP checkpoint. dot_t DIFFERS from the uniform baseline,
+#    so never reuse an existing weights.h / types_generated.h for a comparison.
+python model_loader.py --model ../PELICAN-nano/model/fpga_model_qat_w6a6i6bfp7_best.pt \
+    --quant --repo ../PELICAN-nano --out firmware/weights/weights.h
+# 2. local bit-exactness gate (no Vitis needed)
+python ../PELICAN-nano/scripts/export_golden.py \
+    --checkpoint ../PELICAN-nano/model/fpga_model_qat_w6a6i6bfp7_best.pt \
+    --testfile ../PELICAN-nano/data/toptag/test.h5 --num 500
+./build_local.sh -DRUN_GOLDEN_GATE && ./tb_local
+# 3. dots-only front end: csim + csynth, then the netlist-level number. csynth's DSP
+#    estimate is unreliable below the DSP48 inference threshold, and a 7-bit mantissa
+#    is far below it — vsynth is the trustworthy figure here.
+vitis_hls -f build_dots_only.tcl
+vivado -mode batch -source vivado_synth_dots.tcl -tclargs _bfp7   # -> vivado_synth_dots_bfp7.rpt
+# 4. whole model
+vitis_hls -f build_prj.tcl reset=1 csim=1 synth=1 cosim=0 validation=0 export=0 vsynth=0
+vivado -mode batch -source vivado_synth.tcl
+```
+
+**Read the result against 7g's prediction, which is that this LOSES.** The pmu10
+precedent was −233 DSP / **+25.9k LUT**, and block-FP adds 22 encoders and 253 realign
+shifters on top. The encoder cost IS counted in `np_dots_only` (it is part of the front
+end under block-FP). W=7 is also the worst accuracy row in the sweep (−33.8% bgRej), so
+treat this as a resource data point, not an operating point.
 
 ## Not reducible / dead ends (don't re-investigate)
 - **Per-COMPONENT (E/px/py/pz) bit-width tuning** — zero-sum by the width-invariance

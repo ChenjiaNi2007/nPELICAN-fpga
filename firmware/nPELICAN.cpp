@@ -128,6 +128,17 @@ void nPELICAN(
     }
 #endif
 
+#ifdef NPELICAN_BLOCK_FP
+    //Lever 7: encode each particle once into (mantissa[4], exponent), then dot the
+    //mantissas and realign. p1 is already masked, so a padded particle encodes to
+    //e=EXP_MIN, m=0 and its dots stay exactly 0. See firmware/np_blockfp.h.
+    mant_t p1m[(NPARTICLES2)][4];
+    bexp_t p1e[(NPARTICLES2)];
+    #pragma HLS ARRAY_PARTITION variable=p1m complete dim=0
+    #pragma HLS ARRAY_PARTITION variable=p1e complete dim=0
+    np_bfp_encode_all(p1, p1m, p1e);
+#endif
+
     //fill input array (each dot rounded into dot_t = input_quant grid).
     //dot4 is symmetric (p_i·p_j == p_j·p_i), so compute only the upper triangle
     //(j>=i, incl. diagonal) and mirror the result into the lower triangle. The
@@ -137,7 +148,11 @@ void nPELICAN(
       #pragma HLS unroll
       for(unsigned int j = i; j < NPARTICLES2; j++){
         #pragma HLS unroll
+#ifdef NPELICAN_BLOCK_FP
+        Dot: np_bfp_dot4(p1m[i], p1e[i], p1m[j], p1e[j], dots[i*NPARTICLES2+j]);
+#else
         Dot: dot4(p1[i], p1[j], dots[i*NPARTICLES2+j]);
+#endif
         if (j != i) dots[j*NPARTICLES2+i] = dots[i*NPARTICLES2+j];
       }
     }
