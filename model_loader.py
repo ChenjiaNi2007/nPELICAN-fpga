@@ -60,6 +60,13 @@ parser.add_argument('--no-po2', action='store_true',
 parser.add_argument('--split-types', action='store_true', default=False,
                     help='Emit w1_t / w2_t array types instead of weight_t (typedefs must exist in nPELICAN.h)')
 parser.add_argument('--out', type=str, default='weights/weights.h')
+parser.add_argument('--bn-frac-bits', type=int, default=None,
+                    help='Cap the fractional width of bn_t_gen (default: derived as '
+                         't2_F + dot_mag + 2). The BN1 scale is a scalar constant '
+                         'multiplying every dot, so its literal width binds every BN1 '
+                         'multiplier at once: <=10 bits strength-reduces into fabric, 11+ '
+                         'takes a DSP48 and adds pipeline depth. Report the printed BN1 '
+                         'literal width before trusting a resource number.')
 parser.add_argument('--bn-eps', type=float, default=1e-5,
                     help='BatchNorm eps used in the scale weight/sqrt(var+eps); must match '
                          'the training MaskedBatchNorm eps (default 1e-5).')
@@ -669,7 +676,29 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     # (data-independent / robust to the learned mean). +2 is margin.
     BN_I = _int_bits(bn_max)
     BN_F = t2_F + dot_mag + 2
+    # --- BN1 DSP threshold cap (--bn-frac-bits) ---
+    # The BN1 scale gamma/sigma is a SCALAR constant multiplying every dot, so its snapped
+    # literal width decides the binding of NPARTICLES2*(NPARTICLES2+1)/2 multipliers at once.
+    # Vitis strength-reduces a constant multiply into fabric up to a 10-bit operand and
+    # binds a DSP48 at 11+. Crossing that line costs 171 DSP at 16 particles (253 at 20)
+    # AND ~2 pipeline stages, because DSP48 clock-to-out lengthens the dot->BN1->aggregate
+    # path (see docs/resource_log.md, 2026-08-21). Lowering BN_F shifts the literal right;
+    # when the scale is exactly representable at the lower F (often true -- it is 5/128 on
+    # the pmu-12 checkpoint) the VALUE is unchanged and the eviction is free.
+    if args.bn_frac_bits is not None:
+        if args.bn_frac_bits > BN_F:
+            raise SystemExit(f'--bn-frac-bits {args.bn_frac_bits} exceeds the derived '
+                             f'BN_F={BN_F}; the cap may only reduce it.')
+        BN_F = int(args.bn_frac_bits)
     BN_W = BN_I + BN_F
+    # Report the snapped BN1 scale literal so the DSP binding is visible without synthesis.
+    _bn1_scale = float(np.asarray(batch1).reshape(-1)[1])
+    _bn1_lit = round(_bn1_scale * (2 ** BN_F))
+    _bn1_bits = int(_bn1_lit).bit_length()
+    _bn1_err = abs(_bn1_lit / (2 ** BN_F) - _bn1_scale)
+    print(f'  BN1 scale gamma/sigma = {_bn1_scale:.12g} -> literal {_bn1_lit} at F={BN_F} '
+          f'({_bn1_bits} bits, snap err {_bn1_err:.3g})')
+    print(f'   BN1 multiplier binding: {"FABRIC (<=10 bits)" if _bn1_bits <= 10 else "DSP48 (11+ bits) -- see --bn-frac-bits"}')
 
     # --- accumulator headroom from NPARTICLES2 (NPARTICLES + 2 spurions).
     # NPARTICLES2 is a firmware constant the loader already mirrors (NPELICAN.h:
