@@ -518,6 +518,78 @@ AUC/bgRej returns to the uniform-12 baseline.
 checkpoints, so any csim/vsynth comparison must re-export from the chosen checkpoint,
 **not** reuse the existing `weights.h` / `types_generated.h`.
 
+#### 7k. Particle count 20 → 16 — MEASURED 2026-08-21, the law holds
+
+First N-sweep ever run at a current operating point. Reports: `16pt-vivado_synth.rpt`
+and `16pt-csynth.rpt` at the workspace root, xcu250, 5 ns. The build is **block-FP W=7**
+(confirmed from the report: 200-bit `beam_input` → 25-bit `input_t`, and
+`mul_7s_7s`/`mac_mulsub_7s_7s` in the Bind Op table), so the honest comparison is against
+the 20p block-FP row of 7j, not against pmu-12.
+
+| vsynth (xcu250) | LUT | FF | DSP | CARRY8 |
+|---|---|---|---|---|
+| block-FP W=7, 20p | 123,543 (7.15%) | 25,288 | 1,090 (8.9%) | 9,034 |
+| block-FP W=7, **16p** | **84,302 (4.88%)** | 17,928 | **751 (6.1%)** | 6,043 |
+| Δ | −31.8% | −29.1% | **−31.1%** | −33.1% |
+
+Predicted from `(18/22)² = 0.6694`: LUT 82,702 (+1.9% error), DSP 730 (+2.9%), CARRY8
+6,048 (−0.1%). **The quadratic law is quantitatively right**, and CARRY8 — pure per-pair
+adder tree — tracks it to a tenth of a percent. The few-percent positive bias is the
+N-independent tail (output stage, nobj comparators, realign `am_addmul`).
+
+Per-pair module counts confirm the mechanism directly: `mul_6s_11ns_16` (BN1) 253→171
+= s(s+1)/2, `mul_6s_6ns_11` 231→153 = s(s−1)/2. II=1 and 16-cycle latency both survive.
+
+**This is now the best-measured lever in the document.** Unlike every width lever, it
+moves DSP *and* LUT *and* CARRY8 together, in the same direction, by ~⅓ — because it
+removes work rather than relocating it between resource classes. Contrast 7j (block-FP
+W=7 at fixed N): −79 DSP bought with **+54k LUT**.
+
+**Caveat — this is a resource result, not an accuracy result.** The run reused the
+existing weights, which is valid for counting DSP/LUT (structure, not values) but says
+nothing about what truncating to 16 constituents costs in AUC/bgRej. The paired accuracy
+sweep at block-FP W=10/12 is still owed, and is the thing that decides whether 16p is
+shippable.
+
+**Next:** 12 particles (14 slots, 105 pairs) predicts ×0.405 → ~440 DSP / ~50k LUT.
+Same command, `16→12` and `18→14`.
+
+#### 7l. pmu-12 at 16 particles — the 2×2 closes, and block-FP loses on both axes (2026-08-21)
+
+`12pmu-16pt-{vivado_synth,csynth}.rpt`. Re-exported from
+`fpga_model_qat_w6a6i6p12_best.pt`; uniform 12-bit momenta, no block-FP.
+
+| vsynth (xcu250) | 20 particles | 16 particles |
+|---|---|---|
+| pmu-12 | 1,169 DSP / 69,112 LUT (4.00%) | **941 DSP / 48,419 LUT (2.80%)** |
+| block-FP W=7 | 1,090 DSP / 123,543 LUT (7.15%) | 751 DSP / 84,302 LUT (4.88%) |
+
+**pmu-12 @ 16p is the lowest-LUT point ever measured on this design.** Holding N=16,
+block-FP costs **+35,883 LUT to save 190 DSP (189 LUT/DSP)** — the same losing exchange
+rate as pmu-10 and 7j. Particle count reduces DSP *and* LUT *and* CARRY8 together; every
+width lever only moves work between them.
+
+Two anomalies, both traced to one cause — see `resource_log.md` for the full inventory:
+
+1. **DSP 941 vs 782 predicted.** Not a scaling failure. The re-export snapped the BN1
+   scale to an 11-bit constant, moving 171 `mul_6s_11ns_16` from fabric onto DSP48s; the
+   20p baseline had none. Net that out and dots land at 684 + tail ≈ 770 ≈ prediction.
+2. **15 cycles and a timing violation** (`Issue Type: Timing`, slack −0.00) vs 13 cycles
+   at 4.345 ns for the 20p baseline. Same cause: DSP48 clock-to-out on the
+   dot→BN1→aggregate path. Every BN1-on-DSP build on file runs 15–16 cycles; the one
+   BN1-in-fabric build runs 13.
+
+**Fix implemented — `model_loader.py --bn-frac-bits N` (2026-08-21).** Caps `bn_t_gen`'s
+fractional width and prints the snapped BN1 literal + its predicted binding, so the DSP
+decision is visible without synthesising. On the pmu-12 checkpoint γ/σ = 0.039063068444 is
+**exactly 5/128**, so F=15→14 moves the literal 1280 (11 bits, DSP48) → 640 (10 bits,
+fabric) with a **bit-identical value** (snap error unchanged at 5.68e-07) and a
+**byte-identical `weights.h`** — only the typedef changes. Worst-case cost across all nine
+BN constants is two β terms going 1.36e-05 → 1.70e-05, against a half-LSB budget of
+3.1e-02: four orders of margin. Expected recovery: 171 DSP at 16p (253 at 20p) and the two
+pipeline stages. **Verify with the printed `BN1 multiplier binding: FABRIC` line before
+every synthesis run.**
+
 #### 7h. `dot_t` is RANGE-limited, not resolution-limited — CLOSED (2026-08-05)
 
 The learned `input_quant` scale doubled (8.0 → 16.0) under block-FP, i.e. `dot_t` got
@@ -657,7 +729,78 @@ shifters on top. The encoder cost IS counted in `np_dots_only` (it is part of th
 end under block-FP). W=7 is also the worst accuracy row in the sweep (−33.8% bgRej), so
 treat this as a resource data point, not an operating point.
 
+#### 7j. Whole-model csynth + vsynth at W=7 — MEASURED 2026-08-09, **LOSES as predicted**
+
+Reports: `bfp7_reports/` at the workspace root (`vivado_synth.rpt`, `vitis_hls.log`,
+`nPELICAN_prj/solution/syn/report/nPELICAN_csynth.rpt`, plus the exported
+`firmware/weights/types_generated.h`). Block-FP path confirmed live in the log: 22
+`BfpEncodeAll` encoders unrolled, `mant_t = ap_fixed<7,2>`, `input_t = ap_fixed<25,12>`.
+
+**vsynth, xcu250-figd2104-2L-e, Vivado 2023.2 — the number that counts:**
+
+| build | LUT | FF | DSP | CARRY8 |
+|---|---|---|---|---|
+| uniform pmu-12 (2026-07-10) | 69,112 (4.00%) | 24,815 | 1,169 (9.5%) | 7,032 |
+| **block-FP W=7 (2026-08-09)** | **123,543 (7.15%)** | 25,288 | **1,090 (8.9%)** | **9,034** |
+| Δ | **+54,431 (+79%)** | +473 | −79 (−6.8%) | +2,002 (+29%) |
+
+csynth (both 5 ns): DSP 1,053 → 1,097, FF 51,395 → 58,784, LUT 199,410 → 343,761,
+latency 13 → 16 cycles, II=1 in both. ⚠ The pmu-12 csynth row is the Jul-17 clock-sweep
+build, NOT the one behind the Jul-10 vsynth (that one csynth'd 1,173), so no
+csynth→vsynth calibration is claimed across this pair — read the vsynth row.
+
+**Why the DSP count barely moved — the finding worth keeping.** The Minkowski dot is one
+bare multiply plus three multiply-SUBTRACTS, and only the bare multiply ever leaves the
+DSP array. Per-instance tables, both builds:
+
+| per-pair op | uniform pmu-12 | block-FP W=7 |
+|---|---|---|
+| bare mul (the `E·E` term) | 253 × `mul_12s_12s_24` → **253 DSP**, 1,265 LUT | 253 × `mul_7s_7s_14` → **0 DSP, 8,349 LUT** |
+| the 3 spatial terms | 759 × `mac_mulsub_12s_12s_*` → **759 DSP** | 759 × `mac_mulsub_7s_7s_*` → **759 DSP** |
+| dot front end | **1,012 DSP** (96% of the design's 1,053) | **759 DSP** |
+
+A DSP48E2 natively computes `(A±D)×B + C`, so it does the subtraction for free: HLS binds
+a mulsub to a DSP for its ACCUMULATE STRUCTURE, not because the operands are wide.
+Narrowing 12 → 7 does not touch that decision, and a 7×7 multiply occupies a whole 27×18
+site exactly like a 12×12 does. **Only 253 of the 1,012 dot DSPs — one in four — were
+ever addressable by narrowing the mantissa.**
+
+Two consequences that generalise past block-FP:
+- **The abandoned 8-bit DSP-packing endgame (7g) was aimed at the wrong multipliers.**
+  Packing two products per DSP would have had to pack the `mac_mulsub`s, i.e. give up the
+  free pre/post-adder that is the whole reason they sit on DSP. It was dead on accuracy
+  (W=8 costs 12.4% bgRej); it was structurally dead as well.
+- **The one freed multiply is a wrong-direction trade on its own terms:** 253 DSP + 1,265
+  LUT → 0 DSP + 8,349 LUT, i.e. −1 DSP for +28 LUT each. Not a block-FP effect — the
+  uniform narrow builds do the same (pmu-9 `mul_9s_9s_18`: 0 DSP / 10,290 LUT; pmu-8
+  `mul_8s_8s_16`: 0 DSP / 8,400 LUT). It is the sub-threshold regime already recorded in
+  the resource_log "multiplier-inventory receipt", nothing new.
+
+**The −79 net DSP is not the dots getting cheaper.** The 253 DSPs freed from the bare
+mantissa multiply are handed straight back: this checkpoint's BN1 constant needs 11 bits,
+so all 253 BN1 multiplies bind to DSP (`mul_6s_11ns_16` = 1 DSP / 6 LUT each) — the exact
+module and per-instance binding `resource_log.md` already documents for pmu-8, i.e. the
+checkpoint-specific threshold crossing, unrelated to block-FP. Plus 22
+`am_addmul_15s_15s_16ns_33` (22 = NPARTICLES2 = the encoders) and 44
+`mac_muladd_6s_5ns_11s_12`.
+
+**Where the +54k LUT goes:** the 253 mantissa mults now in fabric (+8.3k), 231 ×
+`mul_6s_6ns_11` (+5.3k), and block-FP's own machinery — 22 exponent cascades, 88 variable
+right-shifters on 35-bit `mraw_t` for `p >> e`, and 253 realign shifters on 36-bit
+`dotalign_t`. The +2,002 CARRY8 (+29%) is that shifter/adder signature.
+
+**Verdict: block-FP was never capable of being a DSP lever**, because three of the four
+products per pair sit on DSP for their MAC structure rather than their operand width.
+W=7 is also the worst accuracy row in the 7g sweep (−33.8% bgRej), so it loses on both
+axes. Lever 7 stands as an ACCURACY lever (+17.9% bgRej at equal 12-bit width) and
+nothing else. **No further block-FP width needs synthesising for resources.**
+
 ## Not reducible / dead ends (don't re-investigate)
+- **Narrowing the dot multiplier operands to save DSP** — 3 of the 4 products per pair
+  are `mac_mulsub` and stay on DSP48 at ANY operand width, because the DSP is bound for
+  its free pre/post-adder, not its width (Lever 7j, measured 12-bit vs 7-bit). Only 1 in
+  4 dot DSPs is width-addressable at all, and evicting that one costs ~+28 LUT per DSP
+  saved. This closes block-FP AND uniform narrowing as DSP levers.
 - **Per-COMPONENT (E/px/py/pz) bit-width tuning** — zero-sum by the width-invariance
   theorem in Lever 7a; measured bit-identical to uniform. Split per-PARTICLE instead.
 - **Widening or unsigning `dot_t` for accuracy** — 12 runs across 3 arms say `dot_t` is
@@ -719,7 +862,12 @@ treat this as a resource data point, not an operating point.
       range-limited, not resolution-limited; both the unsigned and the wider-`dot_t`
       levers are dead. Use `--input-clip-min 512` from now on (7h-ii) — 2 of 12 runs
       fell into a clip-128 basin and collapsed.
-   d. Loader + `dot4` (m, e) firmware work — only if block-FP is adopted for accuracy.
+   d. ~~Loader + `dot4` (m, e) firmware work~~ — done, **7i** (2026-08-08).
+   e. ~~Whole-model csynth + vsynth at W=7~~ — done, **7j** (2026-08-09). **+79% LUT for
+      −79 DSP**; and the structural reason lands harder than the totals: 3 of the 4
+      products per pair are `mac_mulsub` and never leave DSP at any width, so only 1 in
+      4 dot DSPs was ever addressable. **The block-FP resource question is CLOSED** —
+      Lever 7 is accuracy-only from here.
 7. **The two big decisions, unchanged:** Lever 3 (relax II=1 — time-multiplexing
    genuinely SHARES the adder trees, the only structural LUT fix) or fewer
    particles ((N+2)² scaling on ~90% of LUT, ~97% of DSP, per the split report).

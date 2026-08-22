@@ -111,6 +111,111 @@ silicon (identical LUT/FF/DSP/BRAM/URAM totals), so counts are directly comparab
 | monolith, pmu-8 weights (2026-07-13) | 98,863 (5.72%) | 21,271 (0.62%) | 977 (8.0%) | 10,618 | 64 | 0 |
 | Δ pmu-8 − pmu-10 | +3,880 | −233 | **+41** | +1,364 | | |
 
+| monolith, block-FP W=7 (2026-08-09) | 123,543 (7.15%) | 25,288 (0.73%) | 1,090 (8.9%) | 9,034 | 134 | 0 |
+| Δ block-FP W=7 − pmu-12 | **+54,431 (+79%)** | +473 | −79 (−6.8%) | +2,002 (+29%) | | |
+
+| monolith, block-FP W=7, **16 particles** (2026-08-21) | 84,302 (4.88%) | 17,928 (0.52%) | 751 (6.1%) | 6,043 | 114 | 0 |
+| Δ 16p − 20p (both block-FP W=7) | **−39,241 (−31.8%)** | −7,360 (−29.1%) | **−339 (−31.1%)** | −2,991 (−33.1%) | −20 | 0 |
+| Δ 16p block-FP − pmu-12 20p | +15,190 (+22.0%) | −6,887 (−27.8%) | **−418 (−35.8%)** | −989 (−14.1%) | | |
+| monolith, **pmu-12, 16 particles** (2026-08-21) | **48,419 (2.80%)** | 15,487 (0.45%) | 941 (7.7%) | 4,111 | 54 | 0 |
+| Δ pmu-12 16p − pmu-12 20p | **−20,693 (−29.9%)** | −9,328 (−37.6%) | −228 (−19.5%) | −2,921 (−41.5%) | | |
+| Δ pmu-12 16p − block-FP 16p | **−35,883 (−42.6%)** | −2,441 (−13.6%) | **+190 (+25.3%)** | −1,932 (−32.0%) | −60 | 0 |
+
+**pmu-12 @ 16 particles (2026-08-21, `12pmu-16pt-{vivado_synth,csynth}.rpt` at the
+workspace root).** Re-exported from `fpga_model_qat_w6a6i6p12_best.pt` (`input_t =
+ap_fixed<12,10>`, `dot_t = ap_fixed<6,10>`, no `NPELICAN_BLOCK_FP`). csynth: 945 DSP /
+37,844 FF / 164,172 LUT, **15 cycles**, II=1.
+
+**Lowest-LUT build measured to date — 2.80% of the xcu250**, beating the previous best
+(pmu-12 20p, 4.00%) by a quarter. Completes the 2×2:
+
+| vsynth | 20 particles | 16 particles |
+|--------|--------------|--------------|
+| pmu-12      | 1,169 DSP / 69,112 LUT | **941 DSP / 48,419 LUT** |
+| block-FP W=7| 1,090 DSP / 123,543 LUT | 751 DSP / 84,302 LUT |
+
+At fixed N=16 the block-FP trade is **+35,883 LUT to save 190 DSP = 189 LUT/DSP** —
+the same wrong-direction exchange rate as pmu-10 (111 LUT/DSP) and 7j. Particle count
+moves both together; width levers only shuffle between them.
+
+⚠ **DSP came in 20% over the (N+2)² prediction (941 vs 782) — and it is NOT a scaling-law
+failure.** The DSP inventory reconciles exactly:
+
+| contribution | count | 20p baseline had |
+|---|---|---|
+| dot: `mul_12s_12s` ×171 + 3× `mac_mulsub_12s_12s` ×513 | 684 | 1,012 (scales ✓) |
+| BN1: `mul_6s_11ns_16` ×171 | **171** | **0 — was fabric** |
+| aggregation `am_addmul_16s_16s` ×18 + `mac_muladd_6s_5*` ×54 | 72 | — |
+| output-stage tail | 18 | — |
+| **total** | **945** | |
+
+The 20p pmu-12 baseline (`6:6:6_pmu12_5ns`) has **no `mul_6s_11ns_16` at all** — its BN1
+scale constant fit in ≤10 bits and strength-reduced into LUTs. This re-export snapped
+γ/σ to an **11-bit** constant (`bn_t_gen = ap_fixed<21,6>`), crossing the same threshold
+documented for pmu-8 above, and 171 multiplies moved fabric → DSP48. Net out the BN1 term
+and the dots land at 684 + ~86 tail ≈ 770, against the 782 prediction. **The law holds;
+the baseline moved.**
+
+⚠ **TIMING VIOLATION — read before quoting the latency.** The 16p pmu-12 build reports
+`Issue Type: Timing`, **slack −0.00 ns**, and **15 cycles** vs the 20p baseline's 13
+cycles at a comfortable 4.345 ns estimate. A *smaller* design needing *two more* pipeline
+stages and still missing 5 ns is the same BN1 rebinding: a DSP48 has far longer
+clock-to-out than a strength-reduced LUT constant multiply, so inserting one into the
+dot→BN1→aggregate path lengthened the critical path and forced HLS to add stages. The
+pattern holds across every build on file — BN1-on-DSP builds run 15–16 cycles (bfp7 20p
+and 16p both 16), the one BN1-in-fabric build runs 13.
+
+**This build should not be shipped as-is.** The fix is to keep the BN1 constant under 11
+bits (cap `bn_t_gen` F, or round γ/σ to a 10-bit grid) — which should recover both the
+171 DSPs and the two pipeline stages, and is worth testing before the 12p run.
+
+**16-particle row (2026-08-21, `16pt-vivado_synth.rpt` + `16pt-csynth.rpt` at the
+workspace root).** First particle-count run ever done at a current operating point —
+the only prior N-sweep (`6_6_12_12p.txt` / `6_6_12_14p.txt`, 2026-06-16) was csynth-only,
+on xcvu13p, at the pre-Lever-2 `6_6_12` config with `input_t` still pinned at
+`ap_fixed<36,12>`, so its 12p/14p/20p DSP numbers (1,794 / 2,383 / 4,677) run ~3.5× the
+current point and are not comparable to anything in this table.
+
+⚠ **This build is block-FP W=7, NOT pmu-12.** Identified from the report itself, not from
+the build flags: `beam_input` port is 200 bits = 2·4·25 → `input_t` is 25-bit
+(`ap_fixed<25,12>`, the bfp7 `types_generated.h`), and the Bind Op report carries
+`mul_7s_7s_14` / `mac_mulsub_7s_7s_*`. The like-for-like comparison is therefore the
+**20p block-FP row above**; the pmu-12 delta is cross-config and mixes two levers.
+
+csynth: 757 DSP / 42,427 FF / 237,586 LUT, **16 cycles, II=1** (unchanged from 20p).
+
+**(N+2)² scaling confirmed to within a few percent.** Predicted = 20p value × (18/22)² =
+×0.6694:
+
+| metric | 20p bfp7 | 16p predicted | 16p measured | error |
+|--------|----------|---------------|--------------|-------|
+| LUT    | 123,543  | 82,702        | 84,302       | +1.9% |
+| FF     | 25,288   | 16,928        | 17,928       | +5.9% |
+| DSP    | 1,090    | 730           | 751          | +2.9% |
+| CARRY8 | 9,034    | 6,048         | 6,043        | −0.1% |
+
+CARRY8 lands within 0.1% of the law — the adder tree is purely per-pair. The small
+positive bias on DSP/LUT/FF is the N-independent tail (output stage, nobj comparators,
+`am_addmul` realign) that does not shrink with particle count.
+
+**DSP attribution reproduces exactly.** Under block-FP the bare `mul_7s_7s` falls to
+fabric, so dot DSP = 3 mulsub/pair, and BN1 contributes 1 DSP/pair (`mul_6s_11ns_16`,
+the 11-bit-constant threshold crossing documented above):
+
+| slots | pairs = s(s+1)/2 | 3× mulsub | BN1 | subtotal | csynth total |
+|-------|------------------|-----------|-----|----------|--------------|
+| 22 (20p) | 253 | 759 | 253 | 1,012 | 1,097 |
+| 18 (16p) | 171 | 513 | 171 | 684   | 757   |
+
+Per-pair module counts scale as predicted: `mul_6s_11ns_16` 253→171 (= s(s+1)/2) and
+`mul_6s_6ns_11` 231→153 (= s(s−1)/2, off-diagonal pairs only).
+
+⚠ **Timing tightened, not loosened.** 20p block-FP csynth estimated 4.361 ns against the
+5.00 ns target; the 16p summary reports slack 0.01 ns. Report formats differ (full
+`Utilization Estimates` vs the 2023.2 Synthesis Summary), so this is not a clean
+comparison, but a *smaller* design showing *less* slack is the opposite of the expected
+direction and should be checked before the number is used to argue for a faster clock.
+
 pmu-9 row (`reports/{vsynth,csynth}_monolith_pmu9.rpt`, `input_t =
 ap_fixed<9,8>`): csynth 752 DSP / 50,184 FF / 281,073 LUT, 15 cyc II=1.
 **The "csynth DSP is exact" rule BREAKS in the sub-threshold regime**: vsynth
@@ -182,6 +287,35 @@ randomness, but still not a dial anyone can usefully turn. If the threshold
 story ever needs a hard proof: the dot mults are variable×variable (unlike
 the Lever-6 constant MACs), so a `BIND_OP variable=dots op=mul impl=dsp`
 run would force them back into DSPs — one cheap confirmatory synth.
+
+**block-FP W=7 row (2026-08-09, `bfp7_reports/` at the workspace root — vsynth
+`vivado_synth.rpt`, csynth `nPELICAN_prj/solution/syn/report/nPELICAN_csynth.rpt`;
+csynth 1,097 DSP / 58,784 FF / 343,761 LUT, 16 cyc II=1 @ 5 ns).** The multiplier
+inventory finishes the story the pmu-9/8 receipt above started, and the answer is
+structural: **the Minkowski dot is 1 bare multiply + 3 multiply-SUBTRACTS, and only
+the bare multiply is width-addressable.**
+
+| per-pair op | uniform pmu-12 | block-FP W=7 |
+|---|---|---|
+| bare mul (`E·E`) | 253 × `mul_12s_12s_24` → **253 DSP**, 1,265 LUT | 253 × `mul_7s_7s_14` → **0 DSP, 8,349 LUT** |
+| 3 spatial terms | 759 × `mac_mulsub_12s_12s_*` → **759 DSP** | 759 × `mac_mulsub_7s_7s_*` → **759 DSP** |
+| dot front end | **1,012 DSP** = 96% of the design's 1,053 | **759 DSP** |
+
+A DSP48E2 computes `(A±D)×B + C` natively, so it performs the subtraction for free —
+HLS binds a mulsub for its ACCUMULATE STRUCTURE, not its operand width, and a 7×7
+multiply still occupies a whole 27×18 site. Going 12 → 7 bits therefore frees **one in
+four** dot DSPs and nothing more. Those 253 are then handed straight back: this
+checkpoint's BN1 constant needs 11 bits, so its 253 BN1 multiplies bind as
+`mul_6s_11ns_16` = **1 DSP / 6 LUT each** — the identical module and binding recorded
+for pmu-8 two paragraphs up, i.e. the same checkpoint-specific 11-bit threshold
+crossing, nothing to do with block-FP. Net −79 DSP at vsynth, for +54.4k LUT. The LUT
+goes to the fabric mantissa mults (+8.3k), 231 × `mul_6s_6ns_11` (+5.3k), and block-FP's
+own machinery: 22 exponent cascades, 88 variable right-shifters on 35-bit `mraw_t`, and
+253 realign shifters on 36-bit `dotalign_t` (the +2,002 CARRY8 signature). ⚠ The pmu-12
+csynth numbers quoted for comparison are the Jul-17 clock-sweep build (1,053 DSP /
+51,395 FF / 199,410 LUT, 13 cyc), NOT the build behind the Jul-10 pmu-12 vsynth (which
+csynth'd 1,173) — no csynth→vsynth calibration is claimed across that pair. Full
+analysis and verdict: `RESOURCE_REDUCTION_LEVERS.md` §7j.
 
 pmu-10 row (`reports/vsynth_monolith_pmu10.rpt`, `input_t = ap_fixed<10,9>`): at
 10-bit momenta the tools started moving dot-front-end multiplies out of DSP48s
