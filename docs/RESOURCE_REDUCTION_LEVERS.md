@@ -590,6 +590,20 @@ BN constants is two β terms going 1.36e-05 → 1.70e-05, against a half-LSB bud
 pipeline stages. **Verify with the printed `BN1 multiplier binding: FABRIC` line before
 every synthesis run.**
 
+   **γ/σ is checkpoint-specific — re-derive, never hardcode.** The 5/128 coincidence above
+   holds for the checkpoint current on 2026-08-21. On `fpga_model_qat` (the pmu-12 export in
+   `firmware/weights/weights.h`) γ/σ = 0.031948961457160, where F=14 gives literal 523
+   (10 bits, fabric) with a snap error of 2.7e-05 — small, inside the +2 margin the derivation
+   already carries, but *not* bit-identical. What is stable across both is the threshold
+   itself: **F=15 is the width that produces an 11-bit literal, and F=14 the one that
+   produces 10.** So `mul_6s_11ns_*` in a Bind Op report means `bn_t_gen` F=15, uncapped.
+
+   **Not yet confirmed in synthesis (2026-08-23).** Two re-runs of the 16p pmu-12 build after
+   the cap came back byte-identical to the uncapped baseline (still 171 × `mul_6s_11ns_16`),
+   i.e. the cap never reached the compiler — a stale header/project, not a bad fix. Evidence
+   and the ordered checklist: `../../synthesis-archive/stale-reruns/README-stale.md`.
+   Report index: `../reports/README.md`.
+
 #### 7h. `dot_t` is RANGE-limited, not resolution-limited — CLOSED (2026-08-05)
 
 The learned `input_quant` scale doubled (8.0 → 16.0) under block-FP, i.e. `dot_t` got

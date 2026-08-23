@@ -11,8 +11,15 @@ Records synthesis and C-sim results at each phase of the QAT restructure
 ## Resource-reduction sweep (6/6/6 QAT, 20 particles → 22 with spurions)
 
 Synth (csynth) results for the resource-reduction effort; see
-`RESOURCE_REDUCTION_LEVERS.md` for the levers. Reports archived as `.txt` at the
-workspace root. Device SLR limits: DSP 3072, LUT 432000, FF 864000.
+`RESOURCE_REDUCTION_LEVERS.md` for the levers. Device SLR limits: DSP 3072, LUT 432000,
+FF 864000.
+
+**Where the report files are (reorganised 2026-08-23):** `../reports/README.md` is the index
+for every current, mutually comparable report (all xcu250 @ 5 ns), including the new
+`reports/particle_count/` and `reports/capacity_sweep/` subfolders. The `.txt` reports this
+section cites were loose at the workspace root; they are now
+`../../synthesis-archive/2026-06_xcvu13p_pre-lever2/` under descriptive names (mapping table
+in that folder's README) — **xcvu13p, pre-Lever-2, not comparable to anything below.**
 
 | step | commit | report | DSP | FF | LUT | dot multiplier | notes |
 |------|--------|--------|-----|-----|-----|----------------|-------|
