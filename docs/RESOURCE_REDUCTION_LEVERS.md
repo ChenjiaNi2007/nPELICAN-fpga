@@ -590,13 +590,18 @@ BN constants is two β terms going 1.36e-05 → 1.70e-05, against a half-LSB bud
 pipeline stages. **Verify with the printed `BN1 multiplier binding: FABRIC` line before
 every synthesis run.**
 
-   **γ/σ is checkpoint-specific — re-derive, never hardcode.** The 5/128 coincidence above
-   holds for the checkpoint current on 2026-08-21. On `fpga_model_qat` (the pmu-12 export in
-   `firmware/weights/weights.h`) γ/σ = 0.031948961457160, where F=14 gives literal 523
-   (10 bits, fabric) with a snap error of 2.7e-05 — small, inside the +2 margin the derivation
-   already carries, but *not* bit-identical. What is stable across both is the threshold
-   itself: **F=15 is the width that produces an 11-bit literal, and F=14 the one that
-   produces 10.** So `mul_6s_11ns_*` in a Bind Op report means `bn_t_gen` F=15, uncapped.
+   **Verified locally 2026-08-23** on `fpga_model_qat_w6a6i6p12_best.pt` (the checkpoint
+   behind the 16p pmu-12 build): the cap changes exactly one line —
+   `bn_t_gen ap_fixed<21,6>` → `<20,6>` — `weights.h` comes out md5-identical, and the snap
+   error is unchanged at 5.68e-07. The loader prints
+   `literal 640 at F=14 (10 bits) / BN1 multiplier binding: FABRIC`.
+
+   **γ/σ is still checkpoint-specific — re-derive, never hardcode.** The 5/128 coincidence is
+   a property of the pmu-12 checkpoint, not of the model: `fpga_model_qat_best.pt` has
+   γ/σ = 0.031948961457160, where F=14 gives literal 523 with a 2.7e-05 snap error — inside
+   the derivation's +2 margin, but not bit-identical. What holds for both is the threshold
+   itself: **F=15 produces an 11-bit literal, F=14 a 10-bit one.** So `mul_6s_11ns_*` in a
+   Bind Op report means `bn_t_gen` is uncapped at F=15, whichever checkpoint is loaded.
 
    **Not yet confirmed in synthesis (2026-08-23).** Two re-runs of the 16p pmu-12 build after
    the cap came back byte-identical to the uncapped baseline (still 171 × `mul_6s_11ns_16`),

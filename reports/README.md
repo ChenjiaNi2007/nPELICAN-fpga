@@ -65,15 +65,17 @@ That accounts for both anomalies: the DSP overshoot (941 measured vs ~782 predic
 out the 171 gives 684 + ~86 ≈ 770) and the latency regression. Rule across every build on
 file: **BN1 on DSP → 15–16 cycles; BN1 in fabric → 13.**
 
-γ/σ = 0.031948961457160 on this checkpoint. F=15 is the *unique* fractional width giving an
-11-bit literal (F=14 → 523, 10 bits; F=15 → 1047, 11 bits), so any report showing
-`mul_6s_11ns_16` was built against `bn_t_gen` with **F=15**.
+Checkpoint is `fpga_model_qat_w6a6i6p12_best.pt`, γ/σ = 0.039063068444 = exactly 5/128.
+F=15 is the *unique* fractional width giving an 11-bit literal (F=14 → 640, 10 bits;
+F=15 → 1280, 11 bits), so any report showing `mul_6s_11ns_16` was built against `bn_t_gen`
+with **F=15**.
 
 Fix is implemented: `model_loader.py --bn-frac-bits 14` (commit `13cfd8c`, on
 `origin/lever7-blockfp`). The derived `BN_F = t2_F + dot_mag + 2` already carries +2 explicit
-margin, so capping to 14 spends one margin bit and keeps one. The loader now prints the
-literal and its binding on every export — **check that line before trusting a resource
-number.** Two re-synthesis attempts have not yet picked the cap up; see
+margin, and on this checkpoint the cap is exactly free: verified locally 2026-08-23, it
+changes one typedef (`bn_t_gen ap_fixed<21,6>` → `<20,6>`) and leaves `weights.h`
+md5-identical, snap error unchanged at 5.68e-07. The loader prints the literal and its
+binding on every export — **check that line before trusting a resource number.** Two re-synthesis attempts have not yet picked the cap up; see
 `../../synthesis-archive/stale-reruns/README-stale.md`.
 
 ## capacity_sweep/ — hidden width at 20p, pmu-12
