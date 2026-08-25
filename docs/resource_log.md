@@ -33,24 +33,30 @@ fabric measured at an 8-bit literal, DSP48 + timing violation at 10 bits, 9 unte
 Op module names carry a +1 zero-extension bit (653→`11ns`, 163→`9ns`). Reports:
 `reports/particle_count/{c,v}synth_16p_pmu12_bnf12.rpt`.
 
-### 2026-08-25 — II=3 experiment, 16p + `--bn-frac-bits 12`
+### 2026-08-25 — II sweep (1/2/3/4), 16p + `--bn-frac-bits 12`
 
-Same bnf12 export, initiation interval relaxed 1 → 3 (breaks the II=1 deliverable invariant
-on purpose — this is a throughput/resource trade point, not the deliverable; the II pragma
-edit must be reverted for the II=1 build).
+Same bnf12 export, only the initiation interval changed (II>1 breaks the II=1 deliverable
+invariant on purpose — these are throughput/resource trade points, not the deliverable; the
+II pragma edit must be reverted for the II=1 build).
 
-| build (16p pmu-12 bnf12) | LUT | FF | DSP | CARRY8 | lat | II | timing |
-|---|---|---|---|---|---|---|---|
-| II=1 | 49,894 | 15,416 | 769 | 4,446 | 15 (75 ns) | 1 | met (4.372) |
-| II=3 | 48,012 | 15,686 | **313** | 4,268 | 19 (95 ns) | 3 | met (4.346) |
+| build (16p pmu-12 bnf12) | LUT | FF | DSP | CARRY8 | lat | II | evt period | timing est |
+|---|---|---|---|---|---|---|---|---|
+| II=1 | 49,894 | 15,416 | 769 | 4,446 | 15 (75 ns) | 1 | 5 ns | met (4.372) |
+| II=2 | 49,459 | 17,594 | **769** | 4,671 | 17 (85 ns) | 2 | 10 ns | met (4.367) |
+| II=3 | 48,012 | 15,686 | **313** | 4,268 | 19 (95 ns) | 3 | 15 ns | met (4.346) |
+| II=4 | 47,121 | 15,433 | **257** | 4,272 | 26 (130 ns) | 4 | 20 ns | met (4.367) |
 
-**−456 DSP (−59%) and LUT/CARRY8 go DOWN too** (−1,882 / −178); FF +270. Mechanism: at II=3
-Vitis un-inlines the dot stage into **57 `dot4` instances (4 DSP each = 228)** and
-time-multiplexes the 171 pairs onto them 3:1 — perfect sharing (II=1 spends 684 DSP there).
-The other ~85 DSPs (aggregation/dense `am_addmul` forms) do not shrink. BN1 stays in fabric
-(`mul_6s_9ns_14` ×171). Throughput: one event per 15 ns at the 5 ns clock — still inside the
-25 ns LHC bunch spacing (II≤5 would be the ceiling at this clock). Reports:
-`reports/particle_count/{c,v}synth_16p_pmu12_bnf12_ii3.rpt`.
+**II=2 is a dead point: zero DSP saved** (769, identical to II=1) while FF rises +2,178 and
+CARRY8 +225 — the scheduler keeps the dot stage fully inlined and only pays the pipelining
+overhead. Sharing kicks in at II=3: dots restructure into `dot4` function instances (4 DSP
+each) time-multiplexed pair-per-cycle — 57 units at II=3 (⌈171/3⌉=57, perfect), **43 at II=4
+(⌈171/4⌉=43, perfect → 172 dot DSP)**. The non-dot floor stays ~85 DSP throughout, so
+II=4's 257 ≈ 172+85 and the curve is flattening: II=5 would predict ~35·4+85 ≈ 225, only
+−32 more for another 5 ns of period. LUT *drops* monotonically past II=2 (muxes are cheaper
+than the inlined dot fabric). BN1 stays in fabric at every II (`mul_6s_9ns_14` ×171).
+Throughput: every point is inside the 25 ns LHC bunch spacing except II>5 territory; II=4's
+20 ns is the last comfortable one at this clock. Reports:
+`reports/particle_count/{c,v}synth_16p_pmu12_bnf12_ii{2,3,4}.rpt`.
 
 **Where the report files are (reorganised 2026-08-23):** `../reports/README.md` is the index
 for every current, mutually comparable report (all xcu250 @ 5 ns), including the new
