@@ -579,34 +579,42 @@ Two anomalies, both traced to one cause — see `resource_log.md` for the full i
    dot→BN1→aggregate path. Every BN1-on-DSP build on file runs 15–16 cycles; the one
    BN1-in-fabric build runs 13.
 
-**Fix implemented — `model_loader.py --bn-frac-bits N` (2026-08-21).** Caps `bn_t_gen`'s
-fractional width and prints the snapped BN1 literal + its predicted binding, so the DSP
-decision is visible without synthesising. On the pmu-12 checkpoint γ/σ = 0.039063068444 is
-**exactly 5/128**, so F=15→14 moves the literal 1280 (11 bits, DSP48) → 640 (10 bits,
-fabric) with a **bit-identical value** (snap error unchanged at 5.68e-07) and a
-**byte-identical `weights.h`** — only the typedef changes. Worst-case cost across all nine
-BN constants is two β terms going 1.36e-05 → 1.70e-05, against a half-LSB budget of
-3.1e-02: four orders of margin. Expected recovery: 171 DSP at 16p (253 at 20p) and the two
-pipeline stages. **Verify with the printed `BN1 multiplier binding: FABRIC` line before
-every synthesis run.**
+**Fix measured — `--bn-frac-bits 12` (2026-08-25), and the mechanism corrected.** The
+   flag caps `bn_t_gen`'s fractional width and prints the snapped BN1 literal. What synthesis
+   actually showed, on the epoch-34 pmu-12 checkpoint (γ/σ = 0.0398262530696) at 16
+   particles, same weights.h, one typedef changed (`bn_t_gen <21,7>` → `<19,7>`):
 
-   **Verified locally 2026-08-23** on `fpga_model_qat_w6a6i6p12_best.pt` (the checkpoint
-   behind the 16p pmu-12 build): the cap changes exactly one line —
-   `bn_t_gen ap_fixed<21,6>` → `<20,6>` — `weights.h` comes out md5-identical, and the snap
-   error is unchanged at 5.68e-07. The loader prints
-   `literal 640 at F=14 (10 bits) / BN1 multiplier binding: FABRIC`.
+   | | F=14 (derived): literal 653, 10 bits | F=12 (capped): literal 163, 8 bits |
+   |---|---|---|
+   | BN1 binding | `mul_6s_11ns_16` ×171, 1 DSP each | `mul_6s_9ns_14` ×171, 0 DSP / 49 LUT each |
+   | vsynth | 48,419 LUT / 941 DSP / 4,111 CARRY8 | **49,894 LUT / 769 DSP / 4,446 CARRY8** |
+   | csynth timing | slack −0.00, `Issue Type: Timing` | **est 4.372 ns, met** |
+   | latency | 15 cycles | 15 cycles — unchanged |
 
-   **γ/σ is still checkpoint-specific — re-derive, never hardcode.** The 5/128 coincidence is
-   a property of the pmu-12 checkpoint, not of the model: `fpga_model_qat_best.pt` has
-   γ/σ = 0.031948961457160, where F=14 gives literal 523 with a 2.7e-05 snap error — inside
-   the derivation's +2 margin, but not bit-identical. What holds for both is the threshold
-   itself: **F=15 produces an 11-bit literal, F=14 a 10-bit one.** So `mul_6s_11ns_*` in a
-   Bind Op report means `bn_t_gen` is uncapped at F=15, whichever checkpoint is loaded.
+   −172 DSP for +1,475 LUT = **8.6 LUT per DSP, the cheapest DSP lever measured** (the width
+   levers run 111–189). Reports: `reports/particle_count/{c,v}synth_16p_pmu12_bnf12.rpt`.
 
-   **Not yet confirmed in synthesis (2026-08-23).** Two re-runs of the 16p pmu-12 build after
-   the cap came back byte-identical to the uncapped baseline (still 171 × `mul_6s_11ns_16`),
-   i.e. the cap never reached the compiler — a stale header/project, not a bad fix. Evidence
-   and the ordered checklist: `../../synthesis-archive/stale-reruns/README-stale.md`.
+   Three corrections to earlier notes this table forces:
+
+   1. **The threshold is not 10/11.** Measured: 8-bit literal → fabric; 10-bit → DSP48 +
+      timing violation; 9 bits untested. The old "≤10 fabric" claim interpolated across the
+      untested gap and happened to be wrong at 10.
+   2. **Bind Op module names carry a +1 zero-extension bit** (the DSP multiplier is signed,
+      so an unsigned literal gets a zero MSB): 653 → `11ns`, 163 → `9ns`. Reading `11ns` as
+      an 11-bit literal was the root error — it sent us hunting for an F=15 header that never
+      existed.
+   3. **Latency 15 is NOT BN1's fault.** Evicting BN1 to fabric cleared the timing violation
+      but the schedule stays 15 cycles (20p baseline runs 13). The old "BN1-on-DSP → 15,
+      fabric → 13" rule is dead; the 16p-vs-20p latency gap is unexplained and open.
+
+   Practical note: prefer F=12 over F=13 here — F=13 snaps to 326 = 2×163, the *same value*
+   with a wasted trailing zero. Snap error at F=12 is 3.1e-5 on γ/σ → worst-case 8.0e-3
+   through the multiply vs the 3.1e-2 half-LSB budget (~4× margin).
+
+   Post-mortem on the "stale re-run" saga (`../../synthesis-archive/stale-reruns/`): those
+   builds were **not stale** — they were honest rebuilds of an unchanged design. The derived
+   BN_F was already 14 on this checkpoint, so `--bn-frac-bits 14` was a no-op, and every
+   rebuild (including one after `rm -rf` of the project) correctly reproduced the same RTL.
    Report index: `../reports/README.md`.
 
 #### 7h. `dot_t` is RANGE-limited, not resolution-limited — CLOSED (2026-08-05)

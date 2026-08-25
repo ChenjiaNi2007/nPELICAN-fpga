@@ -14,6 +14,25 @@ Synth (csynth) results for the resource-reduction effort; see
 `RESOURCE_REDUCTION_LEVERS.md` for the levers. Device SLR limits: DSP 3072, LUT 432000,
 FF 864000.
 
+### 2026-08-25 — BN1 constant evicted to fabric (`--bn-frac-bits 12`), 16 particles
+
+Same epoch-34 pmu-12 checkpoint and weights as the 2026-08-22 16p build; the ONLY change is
+`bn_t_gen` F 14 → 12, which moves the BN1 γ/σ literal from 653 (10 bits, `mul_6s_11ns_16`
+×171 on DSP48, slack −0.00) to 163 (8 bits, `mul_6s_9ns_14` ×171 in fabric at 49 LUT each,
+timing met at est 4.372 ns).
+
+| build | LUT | FF | DSP | CARRY8 | lat | timing |
+|---|---|---|---|---|---|---|
+| 16p pmu-12, BN1 on DSP (F=14) | 48,419 | 15,487 | 941 | 4,111 | 15 | slack −0.00 ⚠ |
+| 16p pmu-12, `--bn-frac-bits 12` | 49,894 | 15,416 | **769** | 4,446 | 15 | met (4.372 ns) |
+
+Δ = −172 DSP / +1,475 LUT / +335 CARRY8 → **8.6 LUT per DSP saved, the cheapest DSP lever
+measured** (width levers run 111–189). Latency did NOT drop to the 20p baseline's 13 —
+the 16p 15-cycle schedule is not BN1's doing; open question. Threshold model corrected:
+fabric measured at an 8-bit literal, DSP48 + timing violation at 10 bits, 9 untested; Bind
+Op module names carry a +1 zero-extension bit (653→`11ns`, 163→`9ns`). Reports:
+`reports/particle_count/{c,v}synth_16p_pmu12_bnf12.rpt`.
+
 **Where the report files are (reorganised 2026-08-23):** `../reports/README.md` is the index
 for every current, mutually comparable report (all xcu250 @ 5 ns), including the new
 `reports/particle_count/` and `reports/capacity_sweep/` subfolders. The `.txt` reports this

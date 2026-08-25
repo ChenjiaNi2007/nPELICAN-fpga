@@ -35,7 +35,8 @@ The width levers all trade the same way: every DSP saved costs ~100+ LUT and CAR
 
 | Config | vsynth LUT | FF | DSP | CARRY8 | csynth lat | Date |
 |---|---|---|---|---|---|---|
-| 16p pmu-12 | **48,419** | 15,487 | 941 | 4,111 | 15 cyc, slack −0.00 ⚠ | 2026-08-22 |
+| 16p pmu-12, `--bn-frac-bits 12` (**best**) | 49,894 | 15,416 | **769** | 4,446 | 15 cyc, timing met | 2026-08-25 |
+| 16p pmu-12 (BN1 on DSP) | **48,419** | 15,487 | 941 | 4,111 | 15 cyc, slack −0.00 ⚠ | 2026-08-22 |
 | 16p block-FP W=7 | 84,302 | 17,928 | 751 | 6,043 | 16 cyc | 2026-08-21/22 |
 
 Lowest-LUT builds measured. Particle count is the only lever that moves LUT, DSP **and**
@@ -51,32 +52,33 @@ Two caveats on these two rows:
    measured at 16p, and `nobj_avg = 49` is baked into the checkpoint, so `invnave` is wrong
    for accuracy purposes at 16p. Do not quote these as an accuracy-neutral saving.
 
-### The BN1 11-bit threshold (open issue as of 2026-08-23)
+### The BN1 constant-width threshold — RESOLVED 2026-08-25
 
-Vitis strength-reduces a constant multiply into fabric up to a **10-bit** operand and binds a
-**DSP48 at 11+**. BN1's γ/σ is a *scalar* constant multiplying every dot (`nPELICAN.cpp:202`),
-so its literal width binds all `s(s+1)/2` multipliers at once. In `csynth_16p_pmu12.rpt`:
+BN1's γ/σ is a *scalar* constant multiplying every dot (`nPELICAN.cpp:202`), so its snapped
+literal width binds all `s(s+1)/2` multipliers at once. Measured on this checkpoint
+(γ/σ = 0.0398262530696), same weights, one typedef changed:
 
-```
-171 mul_6s_11ns_16      <- 11-bit constant -> 171 DSP48 + ~2 pipeline stages
-```
+- **10-bit literal** (653, at the derived `bn_t_gen` F=14) → `mul_6s_11ns_16` ×171, one
+  DSP48 each, **and a timing violation** (slack −0.00).
+- **8-bit literal** (163, `--bn-frac-bits 12`) → `mul_6s_9ns_14` ×171 in fabric (49 LUT
+  each), timing met (est 4.372 ns). **−172 DSP for +1,475 LUT — 8.6 LUT/DSP, the cheapest
+  DSP lever measured.** 9 bits is untested.
 
-That accounts for both anomalies: the DSP overshoot (941 measured vs ~782 predicted; netting
-out the 171 gives 684 + ~86 ≈ 770) and the latency regression. Rule across every build on
-file: **BN1 on DSP → 15–16 cycles; BN1 in fabric → 13.**
+Two gotchas encoded in those module names:
 
-Checkpoint is `fpga_model_qat_w6a6i6p12_best.pt`, γ/σ = 0.039063068444 = exactly 5/128.
-F=15 is the *unique* fractional width giving an 11-bit literal (F=14 → 640, 10 bits;
-F=15 → 1280, 11 bits), so any report showing `mul_6s_11ns_16` was built against `bn_t_gen`
-with **F=15**.
+1. The Bind Op operand width is the literal **plus one zero-extension bit** (signed
+   multiplier): 653 → `11ns`, 163 → `9ns`. Do not read the module name as the literal width.
+2. Latency did **not** recover: 15 cycles with BN1 on DSP *or* in fabric (the 20p baseline
+   runs 13). The 16p latency gap is a separate, open question — only the timing violation
+   was BN1's.
 
-Fix is implemented: `model_loader.py --bn-frac-bits 14` (commit `13cfd8c`, on
-`origin/lever7-blockfp`). The derived `BN_F = t2_F + dot_mag + 2` already carries +2 explicit
-margin, and on this checkpoint the cap is exactly free: verified locally 2026-08-23, it
-changes one typedef (`bn_t_gen ap_fixed<21,6>` → `<20,6>`) and leaves `weights.h`
-md5-identical, snap error unchanged at 5.68e-07. The loader prints the literal and its
-binding on every export — **check that line before trusting a resource number.** Two re-synthesis attempts have not yet picked the cap up; see
-`../../synthesis-archive/stale-reruns/README-stale.md`.
+Export with `--bn-frac-bits 12` for this checkpoint (F=13 snaps to the same value with a
+wasted bit; snap error 3.1e-5, ~4× inside the half-LSB budget). The loader prints the
+literal and a measured-verdict line on every export — check it before synthesizing.
+
+The `../../synthesis-archive/stale-reruns/` files record the debugging detour: byte-identical
+re-runs that looked like a stale Vitis cache but were honest rebuilds of an unchanged design
+(the F=14 cap was a no-op — the derived F already was 14). See that folder's README.
 
 ## capacity_sweep/ — hidden width at 20p, pmu-12
 
