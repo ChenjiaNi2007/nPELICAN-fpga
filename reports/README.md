@@ -35,7 +35,8 @@ The width levers all trade the same way: every DSP saved costs ~100+ LUT and CAR
 
 | Config | vsynth LUT | FF | DSP | CARRY8 | csynth lat | Date |
 |---|---|---|---|---|---|---|
-| 16p pmu-12, `--bn-frac-bits 12` (**best**) | 49,894 | 15,416 | **769** | 4,446 | 15 cyc, timing met | 2026-08-25 |
+| 16p pmu-12, `--bn-frac-bits 12` (**best II=1**) | 49,894 | 15,416 | **769** | 4,446 | 15 cyc, timing met | 2026-08-25 |
+| 16p pmu-12 bnf12, **II=3** (experiment) | 48,012 | 15,686 | **313** | 4,268 | 19 cyc, timing met | 2026-08-25 |
 | 16p pmu-12 (BN1 on DSP) | **48,419** | 15,487 | 941 | 4,111 | 15 cyc, slack −0.00 ⚠ | 2026-08-22 |
 | 16p block-FP W=7 | 84,302 | 17,928 | 751 | 6,043 | 16 cyc | 2026-08-21/22 |
 
@@ -44,7 +45,11 @@ CARRY8 down together, because it removes work instead of relocating it. Pair cou
 `s(s+1)/2` with `s = NPARTICLES + 2`; dot-stage DSP ≈ `4·(N+2)(N+3)/2`. Validated to <3%
 (CARRY8 to 0.1%).
 
-Two caveats on these two rows:
+The II=3 row trades throughput for DSP: one event per 15 ns instead of per 5 ns (still
+inside the 25 ns bunch spacing), dots time-multiplexed 3:1 onto 57 `dot4` units. It breaks
+the II=1 invariant deliberately — an operating point, not the deliverable.
+
+Two caveats on these rows:
 
 1. **`csynth_16p_pmu12.rpt` fails timing** (`Issue Type: Timing`, slack −0.00, 15 cycles vs
    the 20p baseline's 13). Cause is the BN1 constant, not the particle count — see below.
