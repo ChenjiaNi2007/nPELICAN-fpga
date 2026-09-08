@@ -60,8 +60,15 @@ def main():
     # 1) canonical boosted 4-momenta: 80 floats/row, particle-major (E,px,py,pz).
     pmu_path = os.path.join(CANON_DIR, "equiv_pmu.dat")
     print(f"loading {pmu_path} (large text file, may take ~1 min)...")
-    pmu = np.loadtxt(pmu_path, dtype=np.float64).reshape(-1, 20, 4)
-    n_rows = pmu.shape[0]
+    # Preallocated line-by-line parse: keeps peak memory at the final array size,
+    # which matters once the canonical set grows beyond the 2000-jet original
+    # (the 20k set's equiv_pmu.dat is ~3.1 GB of text).
+    with open(pmu_path) as f:
+        n_rows = sum(1 for _ in f)
+    pmu = np.empty((n_rows, 20, 4), dtype=np.float64)
+    with open(pmu_path) as f:
+        for i, line in enumerate(f):
+            pmu[i] = np.array(line.split(), dtype=np.float64).reshape(20, 4)
     print(f"  {n_rows} rows x (20, 4)")
 
     # 2) jet-relative features recomputed from the BOOSTED constituents (the whole point).

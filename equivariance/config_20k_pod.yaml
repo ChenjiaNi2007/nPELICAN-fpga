@@ -1,0 +1,30 @@
+# POD-side twin of config_20k.yaml — identical sweep definition (same n_jets,
+# seed, beta grid, directions), only data_file differs: the pod reads the original
+# data/toptag/test.h5, the Mac reads the converted workspace-root test_c.h5.
+# The two sources are the same events (verified bit-exact on the 2000-jet
+# canonical), and the seeded RNG makes jet selection, boost directions, and row
+# order identical — so pod-produced logits align row-for-row with the Mac's
+# canonical_20k/manifest.csv (the merge script checks the manifest md5).
+
+pelican_nano_repo: ../PELICAN-nano
+data_file:         ../PELICAN-nano/data/toptag/test.h5
+
+n_jets: 20000
+seed:   1234
+
+beta_grid: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95]
+n_dir:     8
+
+boost_beams: true
+
+nobj:      20
+add_beams: true
+beam_mass: 0.0
+nobj_avg:  49
+
+# Not used by gen_boosted_inputs.py or run_sweep_deepset.py; present so
+# load_config finds a valid structure.
+models:
+  - {label: "deepset", evaluator: deepset, qat: false, reference: false}
+
+golden_tol: 1.0e-3

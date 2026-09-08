@@ -1,0 +1,28 @@
+# 20k-jet variant of config.yaml for the boost_auc / boost_bgrej figures ONLY.
+# Sources jets from the workspace-root test_c.h5 (the full converted 404k toptag
+# test set, verified bit-exact against the pod-generated canonical beta=0 rows).
+# Sweeps ONLY the models those figures need (float + 6:6:6); the committed
+# 2000-jet canonical/ and results/ stay untouched (run_20k.sh swaps dirs).
+# DeepSet is absent by design: its stack (QKeras/TF) exists on the pod only.
+
+pelican_nano_repo: ../PELICAN-nano
+data_file:         ../test_c.h5
+
+n_jets: 20000
+seed:   1234
+
+beta_grid: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95]
+n_dir:     8
+
+boost_beams: true
+
+nobj:      20
+add_beams: true
+beam_mass: 0.0
+nobj_avg:  49
+
+models:
+  - {label: "6:6:6", checkpoint: equivariance/checkpoints/fpga_model_qat_w6a6i6_best.pt, qat: true, reference: false}
+  - {label: "float", checkpoint: equivariance/checkpoints/fpga_model_qat_best.pt, float: true, reference: true}
+
+golden_tol: 1.0e-3
