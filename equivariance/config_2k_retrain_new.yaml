@@ -1,0 +1,75 @@
+# 2000-jet canonical set, RETRAINED checkpoints only (run_2k_retrain.sh)
+# =============================================================================
+# Equivariance sweep — single source of truth.
+#
+# Measures how reducing QAT bit-width breaks the firmware's Lorentz invariance,
+# as a curve of equivariance-violation vs boost magnitude |beta|, one curve per
+# bit-width (SEAL arXiv:2511.01982, GSEAL / Fig. 2 methodology).
+#
+# The engine of truth is the C++ HLS firmware run in csim. Vitis is not required:
+# the harness uses the local g++ build (build_local.sh path), which docs/WORKFLOW.md
+# certifies as bit-identical to remote Vitis csim. Python owns boost sampling,
+# encoding, metrics and plots only.
+#
+# ALL relative paths below are resolved against the nPELICAN-fpga REPO ROOT
+# (the parent of this equivariance/ directory).
+# =============================================================================
+
+pelican_nano_repo: ../PELICAN-nano
+# data/toptag is the common benchmark for the DeepSet comparison (both models trained
+# on it). It exists on the POD only — gen_boosted_inputs.py must run there; the Mac
+# side (run_sweep.py) only reads canonical/*.dat, never this file.
+data_file:         ../PELICAN-nano/data/toptag/test.h5
+
+n_jets: 2000        # test jets to use (balanced across signal/background, seeded)
+seed:   1234        # determinism: the SAME physical boosted set is reused across all builds
+
+# ---- Boost protocol (SEAL eq.7) ---------------------------------------------
+beta_grid: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95]
+n_dir:     8         # random isotropic directions per magnitude (averaged in metrics)
+
+# Beams are now a top-level firmware input (Option A).
+# firmware/nPELICAN.cpp takes beam_input[2*4] alongside model_input, so the two beam
+# spurions can be Lorentz-boosted through csim exactly like the particles. boost_beams
+# is therefore a REAL runtime toggle (same firmware build for both):
+#   * boost_beams: true  — beams transform WITH the particles. The full 22x22 Gram is
+#     then an exact Lorentz invariant, so the high-bit/reference curve collapses to the
+#     pure fixed-point floor: 100% of the residual violation is a precision artifact.
+#     (gen_boosted_inputs.py proves this with a float64 full-22x22 invariance gate, G2.)
+#   * boost_beams: false — beams stay (1,0,0,+/-1). The beam-particle dots d(beam,Lambda*p)
+#     are NOT invariant even in exact float64, so the reference curve is a NON-ZERO
+#     "fixed-beam floor" by design. The GAP between the two reference curves quantifies
+#     how much of the original violation was intended frame-dependence vs precision loss.
+# gen_boosted_inputs.py always emits BOTH beams conventions (the momenta are mode-
+# independent), and run_sweep.py --mode {boostedbeams,fixedbeams,both} sweeps either or
+# both. This flag only records the DEFAULT sweep mode; both files are always available.
+# At |beta|=0 the boosted and fixed beams coincide ((1,0,0,+/-1)) -> identical firmware
+# output, functionally identical to the deployed firmware (gate G1).
+boost_beams: true
+
+# ---- Constituent set (must match the trained checkpoint's collate settings) --
+nobj:      20        # real-particle cap (test.h5 Pmu is already 20-wide)
+add_beams: true      # firmware always adds 2 beam spurions internally
+beam_mass: 0.0
+nobj_avg:  49        # N-bar normalization constant (informational; baked into weights)
+
+# ---- Models to sweep: one entry == one curve. -------------------------------
+# `label` is the W:A:I bit-width triple (weight:act:input) — display + file key
+# only; the ACTUAL fixed-point grids come from each checkpoint's learned Brevitas
+# scales via model_loader.py. Mark exactly one model `reference: true` (the
+# invariance floor drawn on every plot — the highest-precision 24:24:24 model).
+#
+# These checkpoints form two controlled sub-sweeps sharing the same architecture:
+#   * INPUT-bit sweep  (W=A=6 fixed, I varies): 6:6:6, 6:6:8, 6:6:12
+#   * WEIGHT/ACT sweep (I=16 fixed, W=A vary):   8:8:16, 12:12:16, 16:16:16
+# plus the 24:24:24 reference.
+models:
+  # 2026-09-09 retrained checkpoints (PELICAN-nano docs/CAPACITY_RETRAIN.md): 20 ep, fixed
+  # LR cooldown, best-by-valid-loss of the production-LR seeds; qat_* = 6-bit w6a6i6 pmu12
+  # with --freeze-scales-epoch 12, float_* = true float models (no quantizers).
+  - {label: "qat_h2",   checkpoint: equivariance/checkpoints/cap_h2_qatf12_lr0p0025_e20_s2_best.pt, qat: true,  reference: false}
+  - {label: "qat_h4",   checkpoint: equivariance/checkpoints/cap_h4_qatf12_lr0p0025_e20_s3_best.pt, qat: true,  reference: false}
+  - {label: "float_h2", checkpoint: equivariance/checkpoints/cap_h2_float_lr0p0025_e20_s2_best.pt,  float: true, reference: false}
+  - {label: "float_h4", checkpoint: equivariance/checkpoints/cap_h4_float_lr0p0025_e20_s2_best.pt,  float: true, reference: true}
+
+golden_tol: 1.0e-3

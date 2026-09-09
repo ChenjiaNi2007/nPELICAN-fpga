@@ -2,3 +2,7 @@ model,dataset,AUC,inv_eps_b@0.3,accuracy,n
 DeepSet (8-bit),toptag test.h5,0.9744,338.0,0.920,
 nanoPELICAN (firmware 18in),toptag full_pmu_test.dat,0.9529,,,50000
 DeepSet (8-bit) STALE sample_data run,sample_data test.h5,0.9518,184.89,0.8879,39936
+"nanoPELICAN float h=2 (retrain 2026-09-09, seed 2)",toptag test.h5,0.9621,85.3,0.9078,404000
+"nanoPELICAN float h=4 (retrain 2026-09-09, seed 2)",toptag test.h5,0.9660,113.4,0.9107,404000
+"nanoPELICAN quant w6a6i6 pmu12 h=2 (retrain 2026-09-09, scales frozen ep12, seed 2)",toptag test.h5,0.9560,76.7,0.8985,404000
+"nanoPELICAN quant w6a6i6 pmu12 h=4 (retrain 2026-09-09, scales frozen ep12, seed 3)",toptag test.h5,0.9625,107.9,0.9046,404000
