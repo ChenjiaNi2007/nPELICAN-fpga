@@ -34,12 +34,18 @@ typedef ap_fixed<6, 3, AP_RND_CONV, AP_SAT> w2_gen_t;  // 2->0 weights (signed):
 typedef ap_fixed<12, 11, AP_RND_CONV, AP_SAT> input_t;  // raw momenta; TRAINED pmu_quant grid (I=11, F=1); |p|max=1946.9
 
 // ---- Float-trained biases / BatchNorm constants / normalization constants ----
-// These are NOT PyTorch quantization points (PyTorch keeps them in float), so
-// per CLAUDE.md/plan they are WIDENED, not snapped: their fixed-point rounding
-// error must stay below half the LSB of the next real quantizer they feed.
-typedef ap_fixed<8, 2, AP_RND_CONV, AP_SAT> bias_t_gen;  // b1,b1_diag,b2 (float); |bias|max=0.744833 (I=2), F=6
-typedef ap_fixed<18, 6, AP_RND_CONV, AP_SAT> bn_t_gen;  // BN mean/scale/beta (float); |c|max=27.9669 (I=6), F=12
-typedef ap_fixed<22, 1, AP_RND_CONV, AP_SAT> norm_t;  // 1/N̄, 1/N̄^2 normalize-late multipliers (F=21)
+// These are NOT PyTorch quantization points: PyTorch applies them in float32.
+// Rule: each type holds its constants as EXACT float32 literals,
+//   F = max over nonzero entries of (23 - floor(log2|c|)), capped at 36;
+//   I derived from the magnitude.
+// With exact float32 constants, the firmware's exact fixed-point arithmetic
+// (products/sums exact in HLS promoted types, one AP_RND_CONV rounding at the
+// quantizer) is at least as accurate as PyTorch's float32 evaluation, so a
+// residual mismatch can only come from PyTorch's own float32 rounding landing
+// within ~1e-7 (relative) of a quantizer grid boundary.
+typedef ap_fixed<37, 2, AP_RND_CONV, AP_SAT> bias_t_gen;  // b1,b1_diag,b2 (exact float32); |bias|max=0.744833 (I=2), F=35
+typedef ap_fixed<34, 6, AP_RND_CONV, AP_SAT> bn_t_gen;  // BN mean/scale/beta (exact float32); |c|max=27.9669 (I=6), F=28
+typedef ap_fixed<36, 1, AP_RND_CONV, AP_SAT> norm_t;  // 1/N̄, 1/N̄^2 normalize-late multipliers (exact float32), F=35
 
 // ---- Aggregation summands (unquantized BatchNorm outputs) + their accumulators.
 //      bn1out_t / acc2_t / accrow_t: LEGACY, unused by the datapath after Lever 8
@@ -73,7 +79,7 @@ typedef ap_fixed<11, 14> accdotrow_t;   // Σ_i masked dots per column (I(dot)+H
 typedef ap_fixed<27, 1, AP_RND_CONV, AP_SAT> bn1fold_t;  // s/N̄, β'/N̄, s/N̄², β'/N̄²; |c|max=0.0139347 (I=1), F=26
 
 // ---- MAC temporaries: I = I(weight)+I(operand)+ceil(log2(#terms)), W = I+B ----
-typedef ap_fixed<15, 5> mac2_t;     // 2->2 dense: 6 w1*t2 products + b1 + b1_diag = 8 terms
-typedef ap_fixed<15, 8> mac0_t;     // 2->0 dense: 2*NHIDDEN w2*t0 products + b2 = 5 terms
+typedef ap_fixed<15, 5> mac2_t;     // 2->2 dense: 6 w1*t2 products (biases added at the relu_t cast)
+typedef ap_fixed<14, 7> mac0_t;     // 2->0 dense: 4 w2*t0 products (b2 added at the result_t cast)
 
 #endif  // NPELICAN_TYPES_GENERATED_H_

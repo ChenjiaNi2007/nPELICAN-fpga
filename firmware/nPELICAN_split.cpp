@@ -241,8 +241,8 @@ void np_bn1(
       }
     }
 
-    //raw masked dot sums (exact): Σ_ij d·m and Σ_i d_ij·m
-    dsum = 0;
+    //raw masked dot sums (exact): Σ_i d_ij·m per column, then Σ_ij d·m = Σ_j rowsum[j]
+    //(the same exact integer; a 22-term tree instead of a 484-term one).
     for (unsigned int i = 0; i < NPARTICLES2; i++) {
     #pragma HLS unroll
       rowsum[i] = 0;
@@ -251,9 +251,13 @@ void np_bn1(
     #pragma HLS unroll
       for (unsigned int j = 0; j < NPARTICLES2; j++) {
       #pragma HLS unroll
-        AggMJ:   dsum      += dots[NP_SYMIDX(i, j)]*nobjmask[i][j];
         AggJdot: rowsum[j] += dots[NP_SYMIDX(i, j)]*nobjmask[i][j];
       }
+    }
+    dsum = 0;
+    for (unsigned int j = 0; j < NPARTICLES2; j++) {
+    #pragma HLS unroll
+      AggMJ: dsum += rowsum[j];
     }
 }
 
@@ -350,25 +354,19 @@ void np_eq2to2(
     #pragma HLS BIND_OP variable=Tp op=mul impl=dsp
 #endif
 
-    // initialize with bias
+    // MAC accumulators start at 0: mac2_t is the EXACT product-sum type (w1 x t2 grid).
+    // The float32 biases (bias_t_gen, finer grid) are added in the final expression right
+    // before the relu_t cast, so only that one add is promoted to the wide type.
     for (unsigned int i = 0; i < NPARTICLES2; i++) {
     #pragma HLS unroll
       for (unsigned int j = 0; j < NPARTICLES2; j++) {
       #pragma HLS unroll
         for (unsigned int h = 0; h < NHIDDEN; h++) {
         #pragma HLS unroll
-          Tp[i][j][h] = b1_2to2[h]*nobjmask[i][j];
+          Tp[i][j][h] = 0;
           }
         }
       }
-
-    for (unsigned int i = 0; i < NPARTICLES2; i++){
-    #pragma HLS unroll
-      for (unsigned int h = 0; h < NHIDDEN; h++) {
-      #pragma HLS unroll
-        Tp[i][i][h] += b1_diag_2to2[h]*nobjmask[i][i];
-      }
-    }
 
     // 2->2 weights (frozen element order w1_2to2[h*6+b])
     for (unsigned int i = 0; i < NPARTICLES2; i++) {
@@ -385,17 +383,22 @@ void np_eq2to2(
       }
     }
 
-    // ReLU, then quantize onto the act_layer grid (relu_t, AP_RND_CONV).
+    // + biases (masked exactly as before: b1·m_ij everywhere, b1_diag·m_ii on the diagonal),
+    // quantize onto the act_layer grid (relu_t, AP_RND_CONV), then ReLU. Q is monotone with
+    // Q(0)=0, so max(0, Q(x)) == Q(max(0, x)): identical to ReLU-then-quantize.
     for (unsigned int i = 0; i < NPARTICLES2; i++) {
     #pragma HLS unroll
       for (unsigned int j = 0; j < NPARTICLES2; j++) {
       #pragma HLS unroll
         for (unsigned int h = 0; h < NHIDDEN; h++) {
         #pragma HLS unroll
-          if (Tp[i][j][h] < 0){
-            Tp[i][j][h] = 0;
-            }
-          Tp_q[i][j][h] = (relu_t)Tp[i][j][h];
+          relu_t q;
+          if (i == j)
+            q = (relu_t)(Tp[i][j][h] + b1_2to2[h]*nobjmask[i][j] + b1_diag_2to2[h]*nobjmask[i][i]);
+          else
+            q = (relu_t)(Tp[i][j][h] + b1_2to2[h]*nobjmask[i][j]);
+          if (q < 0) q = 0;
+          Tp_q[i][j][h] = q;
         }
       }
     }
@@ -487,10 +490,11 @@ void np_out2to0(
     #pragma HLS ARRAY_PARTITION variable=w2_2to0 complete dim=0
     #pragma HLS ARRAY_PARTITION variable=b2_2to0 complete dim=0
 
-    // initialize with bias
+    // accumulator starts at 0 (mac0_t = exact product-sum type); the float32 bias b2 is
+    // added in the promoted type right before the result_t cast.
     for (unsigned int o = 0; o < NOUT; o++) {
     #pragma HLS unroll
-      Rp[o] = b2_2to0[o];
+      Rp[o] = 0;
     }
 
     // 2->0 weights (frozen element order w2_2to0[h*2+a])
@@ -684,9 +688,9 @@ void nPELICAN(
                 (double)R[1][0], (double)R[1][1]);
 
         // Rp: 1 value (output_quant grid; exact)
-        fprintf(fp, "Rp: %.17g\n", (double)Rp[0]);
+        fprintf(fp, "Rp: %.17g\n", (double)(Rp[0] + b2_2to0[0]));   // pre-cast logit incl. b2
     }
 #endif
 
-    model_out[0] = (result_t)Rp[0];
+    model_out[0] = (result_t)(Rp[0] + b2_2to0[0]);   // b2 added in the promoted type, ONE rounding
 }

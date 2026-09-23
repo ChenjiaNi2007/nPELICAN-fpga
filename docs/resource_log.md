@@ -16,11 +16,15 @@ FF 864000.
 
 ### 2026-09-23 — Lever 8: BN1 past the 2→2 aggregation + T0 ROM (branch `bn1-fold`)
 
-| build | checkpoint | LUT | FF | DSP | lat | II | timing | local gate (200 golden) |
-|---|---|---|---|---|---|---|---|---|
-| monolith / split / split=2, 20p, `--bn-frac-bits 12` | cap_h2_qatf12_lr0p0025_e20_s1_best.pt (6-bit) | TBD | TBD | TBD | TBD | TBD (remote) | TBD | stock TB 59/200 (unchanged; TB `nobj` wrap, see Lever 8 ⚠1); nobj-clamped TB 140→135/200, max\|Δ\| 0.375→0.25; T0..T5 exact on 200/200 events (HEAD: 110 events off); 200/200 once the pre-existing bias/MAC/BN/norm constant types are widened. Three builds byte-identical. |
+Checkpoint `cap_h2_qatf12_lr0p0025_e20_s1_best.pt` (6-bit everywhere), 20p, local g++ gate on
+200 golden events. Two pre-existing bugs found while validating Lever 8 were fixed in their own
+commits first (see `RESOURCE_REDUCTION_LEVERS.md` Lever 8 ⚠1/⚠2).
 
-See `RESOURCE_REDUCTION_LEVERS.md` Lever 8. csynth/vsynth owed (remote).
+| change | firmware | export | LUT | FF | DSP | lat | II | timing | GOLDEN exact, max\|Δ\| | DOTS-LEVEL exact, max\|Δ\| | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| starting point | HEAD `4f51e7c` | `--bn-frac-bits 12` | – | – | – | – | – | – | 59/200, 3.0625 | 59/200, 3.0625 | stock TB (nobj wrap) |
+| TB `nobj` clamp + exact-float32 constant widths | HEAD `4f51e7c` | no cap: BIAS_F=35, BN_F=28, NORM_F=35 | – | – | – | – | – | – | 175/200, 0.25 | 175/200, 0.25 | TB: raw nobj wrapped mod 32 in `ap_uint<5>` (134/200 events) since `0479032`. Residuals = HEAD's per-element `bn1out_t` rounding (T1–T5 wrong in 105 events) + bias truncated into `mac2_t` |
+| **Lever 8** (+ biases added at the cast, `dsum = Σ rowsum`) | `bn1-fold` | same | TBD | TBD | TBD | TBD | TBD (remote) | TBD | **200/200, 0** | **200/200, 0** | monolith / split / split=2 byte-identical; every stage matches a float64 PyTorch-semantics reference on all 200 events. csynth/vsynth owed (remote). |
 
 ### 2026-08-25 — BN1 constant evicted to fabric (`--bn-frac-bits 12`), 16 particles
 

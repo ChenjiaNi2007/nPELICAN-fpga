@@ -867,47 +867,59 @@ unrounded `batch1`.
 
 **What goes away (csynth should show it).** The `batch1[484]` array, the 253 `s·d`
 constant multiplies (`mul_6s_9ns` in fabric at ~49 LUT each at `--bn-frac-bits 12`), 253
-`bn1out_t` roundings, and the wide 12-bit-summand adder trees (now 6-bit dot summands).
-What remains: 253 ROM muxes + mask selects (np_bn1), one 484-term and 22 22-term exact
-adder trees on 6-bit dots, and in np_agg2to2 23 constant multiplies (1 × `dsum·s/N̄²`,
-22 × `rowsum·s/N̄`) + 2 shared count products (`ncount²·β'/N̄²`, `ncount·β'/N̄`) — the same
-multiplier count as the old normalize-late stage (23 × `invnave`). Possible follow-up (not
-done): `dsum = Σ_j rowsum[j]` is the same exact integer and would replace the 484-term tree
-with a 22-term one.
+`bn1out_t` roundings, and the 12-bit-summand adder trees.
 
-**Validation (local g++ gate, export `cap_h2_qatf12_lr0p0025_e20_s1_best.pt`,
-`--bn-frac-bits 12`, 6-bit everywhere).** Monolith / split / split2 byte-identical
-(`golden_fw_results.log` + `fw_stage_dump.txt`).
+**New inventory.**
+- `np_bn1`: **0 multipliers.** 253 ROM lookups (64-entry `t2_t` table, completely
+  partitioned → constant muxes) + mask selects, mirrored to 484; 22 column-sum trees of
+  22 masked 6-bit dots each (`accdotrow_t` = 11 bit, exact); `dsum` = exact sum of the
+  22 `rowsum` values (one 22-term tree, `accdot2_t` = 15 bit — replaces the 484-term tree).
+- `np_agg2to2`: **23 constant multiplies** (1 × `dsum·s/N̄²`, 22 × `rowsum·s/N̄`, both
+  against 27-bit `bn1fold_t` literals) + 2 count products shared across rows
+  (`ncount²·β'/N̄²`, `ncount·β'/N̄`) + 22 mask selects + 23 t2 casts. Same multiplier count
+  as the old normalize-late stage (23 × `invnave`).
+- `np_eq2to2` / `np_out2to0` (constant-width fix, see below): the 968 MAC accumulator
+  chains stay the exact product-sum `mac2_t = <15,5>` (bias no longer accumulated); the
+  float32 bias is added once per output right before the `relu_t` / `result_t` cast.
+  `mac0_t` shrank to `<14,7>` (4 product terms, no bias).
 
-| gate (200 golden events) | before (HEAD) | Lever 8 |
+**Two pre-existing issues found while validating, fixed in separate commits.**
+- ⚠1 **Testbench `nobj` wrap** (commit "tb: clamp raw nobj…"). `golden_nobj.dat` holds the
+  RAW constituent count; since the port was retyped to `nobj_t = ap_uint<5>` (Lever 2,
+  `0479032`) it wrapped mod 32 at the call, so 134/200 golden events (raw nobj 32–51)
+  were masked as small jets. The TB now clamps to `NPARTICLES` in every nobj path.
+- ⚠2 **Float-trained constants too coarse at 6-bit grids** (commit "loader: float-trained
+  constants are exact float32 literals"). `bias_t_gen` F=6 (max(relu_F,out_F)+1), the bias
+  truncated into `mac2_t`/`mac0_t` (F=10/7, AP_TRN), and `bn_t_gen`/`norm_t` F=12(cap)/21
+  tipped Tp/R rounding. New rule: `bias_t_gen`, `bn_t_gen`, `norm_t` get
+  F = max over nonzero entries of (23 − ⌊log₂|c|⌋), capped at 36 — every float32 constant
+  exactly. PyTorch applies these in float32, so the firmware's exact fixed-point
+  arithmetic is then at least as accurate; a residual can only be PyTorch's own float32
+  rounding within ~1e-7 of a grid boundary. On this checkpoint: BIAS_F=35 (`<37,2>`),
+  BN_F=28 (`<34,6>`), NORM_F=35 (`<36,1>`). `--bn-frac-bits` stays as an optional cap but
+  is no longer a DSP lever (after Lever 8 it only reaches the BN2 constants — 4 multiplies —
+  and the legacy `batch1_2to2` array).
+
+**Validation (local g++, export `cap_h2_qatf12_lr0p0025_e20_s1_best.pt`, `--bn-frac-bits`
+omitted, fixed TB; 200 golden events).** Monolith / split / split=2 byte-identical
+(`golden_fw_results.log` + `fw_stage_dump.txt`); the arithmetic-T0 fallback (no ROM) also
+gives 200/200.
+
+| firmware | GOLDEN exact, max\|Δ\| | DOTS-LEVEL exact, max\|Δ\| |
 |---|---|---|
-| stock TB, GOLDEN / DOTS-LEVEL | 59/200, max\|Δ\|=3.0625 | 59/200, max\|Δ\|=3.0625 (5 events changed) |
-| TB with `nobj` clamped to 20 (scratch, see ⚠1) | 140/200, max 0.375 | 135/200, max **0.25** |
-| stage-level vs a float64 PyTorch-semantics reference (== golden logits 200/200): events with a T0..T5 mismatch | **110** (T1–T3), 7 (T4/T5) | **0** |
-| clamped TB + pre-existing constant types widened (⚠2) | 194/200, max 0.25 | **200/200, max 0** |
+| HEAD `4f51e7c` (pre-Lever-8), same headers + TB | 175/200, 0.25 | 175/200, 0.25 |
+| **Lever 8 + constant-width fix** | **200/200, 0** | **200/200, 0** |
 
-The stock-TB count does not move because it is dominated by two PRE-EXISTING,
-lever-independent issues found while validating this lever:
-
-- ⚠1 **Testbench `nobj` truncation.** `golden_nobj.dat` holds the RAW constituent count
-  (up to ~60) and the TB passes it straight into `nobj_t = ap_uint<5>`, which wraps mod 32:
-  134/200 golden events (raw nobj 32–51) arrive as 0–19 and are wrongly masked. Only 6 of
-  them match by luck. Clamping to `NPARTICLES` in the TB (the firmware remaps ≥20 → 22
-  anyway) fixes it; the TB is not changed on this branch.
-- ⚠2 **Coarse float-constant types at 6-bit grids.** Tp still flips by 1 relu LSB in most
-  events because `bias_t_gen` has F = max(relu_F,out_F)+1 = 6 and the bias is then added
-  into `mac2_t`/`mac0_t`, whose F = w_F + operand_F (10 / 7) TRUNCATES it (AP_TRN) — the
-  bias is not on the product grid. The Lever-4 BN2 collapse also rounds at `bn_t_gen`
-  (F=12 under the cap) and `norm_t` F=21, which tips R on a few near-tie events.
-  Widening `bias_t_gen`, `mac2_t`, `mac0_t`, `bn_t_gen` and `norm_t` (diagnostic only)
-  brings Lever 8 to 200/200 zero-tolerance exact with the clamped TB; HEAD stays at 194.
-  The no-cap export (no `--bn-frac-bits`) emits an identical `weights.h` (ROM + fold
-  constants) and differs only in `bn_t_gen`, i.e. only in the BN2 path: 2 events differ
-  from the capped build on the stock TB (3 with the clamped TB) — Lever 8's stages are
-  exact in both.
+Before any fix (stock TB, bnf12 export, HEAD firmware) the gate read 59/200, max 3.0625.
+HEAD's 25 residuals, against a float64 PyTorch-semantics reference (itself 200/200 vs the
+golden logits): T1–T3 wrong in 105 events and T4/T5 in 3 (the 484 per-element `bn1out_t`
+roundings before the sums — exactly what Lever 8 removes) and Tp in 198 (HEAD initialises
+`mac2_t` with the bias, which truncates it to F=10). Lever 8's firmware matches the
+reference at every stage (T0..T5, Tp, R, Rp) on all 200 events.
 
 **Owed:** remote csynth + vsynth (monolith and `split=2`); expect np_bn1 to lose its 253
-fabric multipliers and np_agg2to2 to keep ~23 constant multiplies; log in
+fabric multipliers, np_agg2to2 to keep ~23 constant multiplies, and the wider bias adds to
+cost a little LUT only at the 968 final adds (not in the MAC chains). Log in
 `resource_log.md`.
 
 ## Not reducible / dead ends (don't re-investigate)

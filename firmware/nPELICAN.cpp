@@ -224,14 +224,18 @@ void nPELICAN(
       rowsum[i] = 0;
     }
 
-    // M_J / J.p_j raw parts: Σ_ij d·m and Σ_i d_ij·m (the BN1 affine is applied after)
+    // M_J / J.p_j raw parts: Σ_i d_ij·m per column, then Σ_ij d·m = Σ_j rowsum[j] (the same
+    // exact integer; a 22-term tree instead of a 484-term one). BN1 affine applied after.
     for (unsigned int i = 0; i < NPARTICLES2; i++) {
     #pragma HLS unroll
       for (unsigned int j = 0; j < NPARTICLES2; j++) {
       #pragma HLS unroll
-        AggMJ:   dsum      += dots[i*NPARTICLES2+j]*nobjmask[i][j];
         AggJdot: rowsum[j] += dots[i*NPARTICLES2+j]*nobjmask[i][j];
       }
+    }
+    for (unsigned int j = 0; j < NPARTICLES2; j++) {
+    #pragma HLS unroll
+      AggMJ: dsum += rowsum[j];
     }
 
     //BN1 affine on the aggregates + normalization (pre-folded constants), ONE t2 rounding each.
@@ -305,25 +309,19 @@ void nPELICAN(
     #pragma HLS BIND_OP variable=Tp op=mul impl=dsp
 #endif
 
-    // initialize with bias
+    // MAC accumulators start at 0: mac2_t is the EXACT product-sum type (w1 x t2 grid).
+    // The float32 biases (bias_t_gen, finer grid) are added in the final expression right
+    // before the relu_t cast, so only that one add is promoted to the wide type.
     for (unsigned int i = 0; i < NPARTICLES2; i++) {
     #pragma HLS unroll
       for (unsigned int j = 0; j < NPARTICLES2; j++) {
       #pragma HLS unroll
         for (unsigned int h = 0; h < NHIDDEN; h++) {
         #pragma HLS unroll
-          Tp[i][j][h] = b1_2to2[h]*nobjmask[i][j];
+          Tp[i][j][h] = 0;
           }
         }
       }
-
-    for (unsigned int i = 0; i < NPARTICLES2; i++){
-    #pragma HLS unroll
-      for (unsigned int h = 0; h < NHIDDEN; h++) {
-      #pragma HLS unroll
-        Tp[i][i][h] += b1_diag_2to2[h]*nobjmask[i][i];
-      }
-    }
 
     // 2->2 weights (frozen element order w1_2to2[h*6+b])
     for (unsigned int i = 0; i < NPARTICLES2; i++) {
@@ -341,20 +339,24 @@ void nPELICAN(
       }
     }
 
-    // ReLU, then quantize onto the act_layer grid (relu_t, AP_RND_CONV). The compare
-    // is against a typed 0 (mac2_t), not a double literal.
     relu_t Tp_q[NPARTICLES2][NPARTICLES2][NHIDDEN];
     #pragma HLS ARRAY_PARTITION variable=Tp_q complete dim=0
+    // + biases (masked exactly as before: b1·m_ij everywhere, b1_diag·m_ii on the diagonal),
+    // quantize onto the act_layer grid (relu_t, AP_RND_CONV), then ReLU. Q is monotone with
+    // Q(0)=0, so max(0, Q(x)) == Q(max(0, x)): identical to ReLU-then-quantize.
     for (unsigned int i = 0; i < NPARTICLES2; i++) {
     #pragma HLS unroll
       for (unsigned int j = 0; j < NPARTICLES2; j++) {
       #pragma HLS unroll
         for (unsigned int h = 0; h < NHIDDEN; h++) {
         #pragma HLS unroll
-          if (Tp[i][j][h] < 0){
-            Tp[i][j][h] = 0;
-            }
-          Tp_q[i][j][h] = (relu_t)Tp[i][j][h];
+          relu_t q;
+          if (i == j)
+            q = (relu_t)(Tp[i][j][h] + b1_2to2[h]*nobjmask[i][j] + b1_diag_2to2[h]*nobjmask[i][i]);
+          else
+            q = (relu_t)(Tp[i][j][h] + b1_2to2[h]*nobjmask[i][j]);
+          if (q < 0) q = 0;
+          Tp_q[i][j][h] = q;
         }
       }
     }
@@ -432,10 +434,11 @@ void nPELICAN(
     mac0_t Rp[NOUT];
     #pragma HLS ARRAY_PARTITION variable=Rp complete dim=0
 
-    // initialize with bias
+    // accumulator starts at 0 (mac0_t = exact product-sum type); the float32 bias b2 is
+    // added in the promoted type right before the result_t cast.
     for (unsigned int o = 0; o < NOUT; o++) {
     #pragma HLS unroll
-      Rp[o] = b2_2to0[o];
+      Rp[o] = 0;
     }
 
     // 2->0 weights (frozen element order w2_2to0[h*2+a])
@@ -523,9 +526,9 @@ void nPELICAN(
                 (double)R[1][0], (double)R[1][1]);
 
         // Rp: 1 value (output_quant grid; exact)
-        fprintf(fp, "Rp: %.17g\n", (double)Rp[0]);
+        fprintf(fp, "Rp: %.17g\n", (double)(Rp[0] + b2_2to0[0]));   // pre-cast logit incl. b2
     }
 #endif
 
-    model_out[0] = (result_t)Rp[0];
+    model_out[0] = (result_t)(Rp[0] + b2_2to0[0]);   // b2 added in the promoted type, ONE rounding
 }
