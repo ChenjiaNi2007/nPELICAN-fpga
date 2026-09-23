@@ -82,7 +82,9 @@ int main(int argc, char **argv) {
                 in.push_back(atof(current));
                 current = strtok(NULL, " ");
             }
-            int nobj_val = std::stoi(nobj_line);
+            // golden_nobj.dat / *_nobj.dat hold the RAW constituent count (can exceed 31); the nobj_t
+            // port is ap_uint<5> and wraps at 32, so clamp here (firmware maps >=NPARTICLES to NPARTICLES2).
+            int nobj_val = std::min(std::stoi(nobj_line), NPARTICLES);
 
             input_t model_input[NPARTICLES*4];
             nnet::copy_data<float, input_t, 0, NPARTICLES*4>(in, model_input);
@@ -151,7 +153,9 @@ int main(int argc, char **argv) {
             }
 
             // Parse nobj
-            int nobj_val = std::stoi(nobj_line);
+            // golden_nobj.dat / *_nobj.dat hold the RAW constituent count (can exceed 31); the nobj_t
+            // port is ap_uint<5> and wraps at 32, so clamp here (firmware maps >=NPARTICLES to NPARTICLES2).
+            int nobj_val = std::min(std::stoi(nobj_line), NPARTICLES);
 
             // Parse golden logit (double)
             double golden_logit = std::stod(logit_line);
@@ -239,7 +243,9 @@ int main(int argc, char **argv) {
                 static dot_t dots_inj[NPARTICLES2*NPARTICLES2];
                 { char *c = const_cast<char*>(ddots.c_str()); char *t = strtok(c, " ");
                   int k = 0; while (t && k < NPARTICLES2*NPARTICLES2) { dots_inj[k++] = (dot_t)atof(t); t = strtok(NULL, " "); } }
-                int nobj_val = std::stoi(dnobj);
+                // golden_nobj.dat / *_nobj.dat hold the RAW constituent count (can exceed 31); the nobj_t
+                // port is ap_uint<5> and wraps at 32, so clamp here (firmware maps >=NPARTICLES to NPARTICLES2).
+                int nobj_val = std::min(std::stoi(dnobj), NPARTICLES);
                 double golden_logit = std::stod(dlogit);
 
                 input_t model_input[NPARTICLES*4];
@@ -290,7 +296,9 @@ int main(int argc, char **argv) {
                 in2.push_back(atof(current2));
                 current2 = strtok(NULL, " ");
             }
-            int nobj_val2 = std::stoi(nobj_line2);
+            // golden_nobj.dat / *_nobj.dat hold the RAW constituent count (can exceed 31); the nobj_t
+            // port is ap_uint<5> and wraps at 32, so clamp here (firmware maps >=NPARTICLES to NPARTICLES2).
+            int nobj_val2 = std::min(std::stoi(nobj_line2), NPARTICLES);
 
             input_t model_input2[NPARTICLES*4];
             nnet::copy_data<float, input_t, 0, NPARTICLES*4>(in2, model_input2);
@@ -381,7 +389,9 @@ int main(int argc, char **argv) {
             std::vector<int> vnobj;
             current = strtok(cstr, " ");
             while (current != NULL) {
-                vnobj.push_back(std::stoi(current));
+                // golden_nobj.dat / *_nobj.dat hold the RAW constituent count (can exceed 31); the nobj_t
+                // port is ap_uint<5> and wraps at 32, so clamp here (firmware maps >=NPARTICLES to NPARTICLES2).
+                vnobj.push_back(std::min(std::stoi(current), NPARTICLES));
                 current = strtok(NULL, " ");
             }
 
