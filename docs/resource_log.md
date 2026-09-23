@@ -14,6 +14,14 @@ Synth (csynth) results for the resource-reduction effort; see
 `RESOURCE_REDUCTION_LEVERS.md` for the levers. Device SLR limits: DSP 3072, LUT 432000,
 FF 864000.
 
+### 2026-09-23 — Lever 8: BN1 past the 2→2 aggregation + T0 ROM (branch `bn1-fold`)
+
+| build | checkpoint | LUT | FF | DSP | lat | II | timing | local gate (200 golden) |
+|---|---|---|---|---|---|---|---|---|
+| monolith / split / split=2, 20p, `--bn-frac-bits 12` | cap_h2_qatf12_lr0p0025_e20_s1_best.pt (6-bit) | TBD | TBD | TBD | TBD | TBD (remote) | TBD | stock TB 59/200 (unchanged; TB `nobj` wrap, see Lever 8 ⚠1); nobj-clamped TB 140→135/200, max\|Δ\| 0.375→0.25; T0..T5 exact on 200/200 events (HEAD: 110 events off); 200/200 once the pre-existing bias/MAC/BN/norm constant types are widened. Three builds byte-identical. |
+
+See `RESOURCE_REDUCTION_LEVERS.md` Lever 8. csynth/vsynth owed (remote).
+
 ### 2026-08-25 — BN1 constant evicted to fabric (`--bn-frac-bits 12`), 16 particles
 
 Same epoch-34 pmu-12 checkpoint and weights as the 2026-08-22 16p build; the ONLY change is

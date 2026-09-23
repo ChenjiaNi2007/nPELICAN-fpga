@@ -3,6 +3,12 @@
 #include "nPELICAN.h"
 #include "weights/weights.h"
 
+// Lever 8: T0 from the loader-generated BN1 ROM when weights.h provides one (dot_t
+// narrow enough) — never in the float-reference build (dots are doubles there).
+#if defined(NPELICAN_BN1_ROM) && !defined(NPELICAN_FLOAT_BUILD)
+#define NP_USE_BN1_ROM 1
+#endif
+
 #ifndef __SYNTHESIS__
 #include <cstdio>
 FILE* npelican_dump_fp = nullptr;
@@ -62,6 +68,9 @@ void nPELICAN(
     #pragma HLS ARRAY_PARTITION variable=batch2_2to0 complete dim=0
     #pragma HLS ARRAY_PARTITION variable=w2_2to0 complete dim=0
     #pragma HLS ARRAY_PARTITION variable=b2_2to0 complete dim=0
+#ifdef NP_USE_BN1_ROM
+    #pragma HLS ARRAY_PARTITION variable=bn1_t0_rom complete dim=0
+#endif
 
 
     if (nobj != 0 ) {
@@ -177,66 +186,65 @@ void nPELICAN(
     }
     */
 
-    //Do first batchnorm. PyTorch keeps the BN output (batch1) in float and SUMS THE
-    //UNQUANTIZED value in the aggregation; only the basis op T0 sees the post_agg
-    //quantizer. So batch1 is stored WIDE (bn1out_t, AGG_F frac) — NOT t2_t — otherwise
-    //the coarse t2 rounding (F=18) of each summand tips the renormalized jmass/jdotp
-    //onto the wrong t2 grid point. T0 below casts batch1 to t2_t once. BN constants are
-    //NOT folded (CLAUDE.md invariant).
-    //batch1 = BN1(dots) is symmetric too: dots is symmetric, the BN constants
-    //(mean/scale/beta) are scalar, and nobjmask[i][j]==nobjmask[j][i]. So compute
-    //the upper triangle and mirror — halves the BN1 multiplies (part of the
-    //inferred-DSP cost). Bit-exact for the same reason as the dot loop above.
-    bn1out_t batch1[(NPARTICLES2)*(NPARTICLES2)];
-    #pragma HLS ARRAY_PARTITION variable=batch1 complete dim=0
-    //#4: fold BN1's mean into the bias ONCE (compile-time constant), dropping the wide
-    //(bn_t_gen) per-element subtract: (dots-μ)·s+β == dots·s + (β-μ·s). Mathematically the
-    //same affine, still applied elementwise BEFORE aggregation (NOT folded into the dense
-    //weights), so the "additive BN term is N-dependent" invariant is untouched. β' rounds at
-    //bn_t_gen F (>> bn1out_t F), so the cast to bn1out_t is the same single rounding as before.
-    const bn_t_gen bn1_beta = batch1_2to2[2] - batch1_2to2[0]*batch1_2to2[1];
-    for(unsigned int i = 0; i < NPARTICLES2; i++){
-      #pragma HLS unroll
-      for(unsigned int j = i; j < NPARTICLES2; j++){
-        #pragma HLS unroll
-        bn1out_t v = (bn1out_t)((dots[i*NPARTICLES2+j] * batch1_2to2[1] + bn1_beta)*nobjmask[i][j]);
-        batch1[i*NPARTICLES2+j] = v;
-        if (j != i) batch1[j*NPARTICLES2+i] = v;
-      }
-    }
+    //unmasked-entry counts (nobj already remapped to the active row/col count incl. spurions).
+    //Shared by the BN1 fold (Lever 8) and the BN2 collapse (Lever 4) below.
+    ap_uint<5> ncount  = (ap_uint<5>)nobj;     // active rows/cols, 0..22
+    ap_uint<9> ncount2 = ncount * ncount;      // unmasked (i,j) pairs, 0..484
 
-    //Aggregation (parameter-free), normalize-late: accumulate raw sums in widened
-    //accumulators, then ONE rescale by the (precise) norm_t multipliers.
-    acc2_t   jmass_acc = 0;
-    accrow_t jdotp_acc[NPARTICLES2];
-    #pragma HLS ARRAY_PARTITION variable=jdotp_acc complete dim=0
+    //Lever 8: BN1 PAST THE AGGREGATION + T0 ROM. BN1 (batch1 = (s·d + β')·m, β' = β − μ·s)
+    //is consumed only (A) per element as T0 = Q_t2(batch1) and (B) linearly by the 2->2
+    //sums. So batch1 is never materialized:
+    // (A) T0 is a function of the DOT_W-bit code of d alone -> loader-generated ROM
+    //     (bn1_t0_rom, built by running PyTorch's own BN1 + post_agg quantizer on every
+    //     code), fully partitioned so each lookup is a mux of constants. The mask select
+    //     is REQUIRED: PyTorch zeroes masked batch1 before quantizing (Q(0) = 0), while
+    //     ROM[code(0)] = Q(β') != 0.
+    // (B) raw masked dot sums (exact, on the dot grid), BN1 applied ONCE per aggregate with
+    //     the 1/N̄ normalization pre-folded (Lever-4 algebra):
+    //       Σ_ij batch1   = s·Σ_ij d·m  + β'·ncount²
+    //       Σ_i  batch1_ij = (s·Σ_i d_ij·m_ij + β'·ncount)·m_jj
+    //     All products/sums are exact in HLS promoted types; the ONLY rounding is the final
+    //     t2_t cast (AP_RND_CONV, AP_SAT). Normalize-late preserved; BN1 is still an explicit
+    //     affine applied BEFORE the post_agg quantizer (not folded into the dense weights),
+    //     and its N-dependent additive term is explicit via ncount/ncount2. This removes the
+    //     484 intermediate bn1out_t roundings, so it is MORE faithful to PyTorch (which sums
+    //     the unrounded batch1).
+#ifndef NP_USE_BN1_ROM
+    //fallback (dot_t wider than the ROM limit, or the float-reference build): per-element
+    //arithmetic T0 with a SINGLE rounding straight to t2_t (no bn1out_t intermediate).
+    const bn_t_gen bn1_beta = batch1_2to2[2] - batch1_2to2[0]*batch1_2to2[1];
+#endif
+
+    //Aggregation (parameter-free), normalize-late: raw masked dot sums in exact accumulators.
+    accdot2_t   dsum = 0;
+    accdotrow_t rowsum[NPARTICLES2];
+    #pragma HLS ARRAY_PARTITION variable=rowsum complete dim=0
     for (unsigned int i = 0; i < NPARTICLES2; i++) {
     #pragma HLS unroll
-      jdotp_acc[i] = 0;
+      rowsum[i] = 0;
     }
 
-    // M_J = sum(batch1); J . p_j = sum over rows i of batch1[i][j]
-    //TODO: could reform this to only loop over the upper triangle and double off diagonal contributions
+    // M_J / J.p_j raw parts: Σ_ij d·m and Σ_i d_ij·m (the BN1 affine is applied after)
     for (unsigned int i = 0; i < NPARTICLES2; i++) {
     #pragma HLS unroll
       for (unsigned int j = 0; j < NPARTICLES2; j++) {
       #pragma HLS unroll
-        AggMJ:   jmass_acc    += batch1[i*NPARTICLES2+j];
-        AggJdot: jdotp_acc[j] += batch1[i*NPARTICLES2+j];
+        AggMJ:   dsum      += dots[i*NPARTICLES2+j]*nobjmask[i][j];
+        AggJdot: rowsum[j] += dots[i*NPARTICLES2+j]*nobjmask[i][j];
       }
     }
 
-    //aggregation normalizations: rescale once and round onto the post_agg (t2) grid.
-    t2_t jmass = (t2_t)(jmass_acc * invnave2);
+    //BN1 affine on the aggregates + normalization (pre-folded constants), ONE t2 rounding each.
+    t2_t jmass = (t2_t)(dsum*bn1_s_all + ncount2*bn1_b_all);
     t2_t jdotp[NPARTICLES2];
     #pragma HLS ARRAY_PARTITION variable=jdotp complete dim=0
     for( unsigned int i = 0; i < NPARTICLES2; i++){
     #pragma HLS unroll
-      jdotp[i] = (t2_t)(jdotp_acc[i] * invnave);
+      jdotp[i] = (t2_t)((rowsum[i]*bn1_s_row + ncount*bn1_b_row)*nobjmask[i][i]);
     }
 
     //Basis ops T[i][j][0..5] on the post_agg (t2) grid. Each entry is an exact copy of
-    //an already-t2-quantized value (batch1 / jmass / jdotp), matching PyTorch's single
+    //an already-t2-quantized value (T0 / jmass / jdotp), matching PyTorch's single
     //post_agg_quant over the stacked 6-op tensor.
     t2_t T[NPARTICLES2][NPARTICLES2][6];
     #pragma HLS ARRAY_PARTITION variable=T complete dim=0
@@ -251,13 +259,29 @@ void nPELICAN(
       }
     }
 
+    //T0 = post_agg quant of batch1. Symmetric (dots, BN1 constants and nobjmask are), so
+    //look up the upper triangle and mirror (wiring).
+    for (unsigned int i = 0; i < NPARTICLES2; i++) {
+    #pragma HLS unroll
+      for (unsigned int j = i; j < NPARTICLES2; j++) {
+      #pragma HLS unroll
+#ifdef NP_USE_BN1_ROM
+        ap_uint<NPELICAN_DOT_W> code = dots[i*NPARTICLES2+j].range(NPELICAN_DOT_W-1, 0);
+        t2_t t0 = nobjmask[i][j] ? bn1_t0_rom[code] : (t2_t)0;
+#else
+        t2_t t0 = (t2_t)((dots[i*NPARTICLES2+j] * batch1_2to2[1] + bn1_beta)*nobjmask[i][j]);
+#endif
+        LinEq2to2_0: T[i][j][0] = t0;
+        if (j != i) T[j][i][0] = t0;
+      }
+    }
+
     //TODO: it's possible the following can be simplified to hold fewer arrays
     // T0 = p_i . p_j ; T1 = (J.p_i) d_ij ; T2 = J.p_j ; T3 = J.p_i ; T4 = M_J ; T5 = M_J d_ij
     for (unsigned int i = 0; i < NPARTICLES2; i++) {
     #pragma HLS unroll
       for (unsigned int j = 0; j < NPARTICLES2; j++) {
       #pragma HLS unroll
-        LinEq2to2_0: T[i][j][0] = (t2_t)batch1[i*NPARTICLES2+j];   // post_agg quant of batch1
         LinEq2to2_1: T[i][j][4] = jmass*nobjmask[i][j];
         LinEq2to2_4: T[i][j][3] = jdotp[i];
         LinEq2to2_5: T[i][j][2] = jdotp[j];
@@ -390,9 +414,7 @@ void nPELICAN(
       }
     }
 
-    //unmasked-entry counts (nobj already remapped to the active row/col count incl. spurions).
-    ap_uint<5> ncount  = (ap_uint<5>)nobj;     // active rows/cols, 0..22
-    ap_uint<9> ncount2 = ncount * ncount;      // unmasked (i,j) pairs, 0..484
+    //unmasked-entry counts ncount/ncount2: hoisted above (shared with the BN1 fold).
 
     //apply the per-channel BN2 affine to the raw aggregate, then normalize-late: ONE rescale
     //rounding onto the post_agg-2to0 grid (t0_t). R[h][0]=normalized sum; R[h][1]=trace. The
@@ -434,7 +456,7 @@ void nPELICAN(
     //   dots, T0..T5, Tp, R, Rp.
     // APPROX stages (PyTorch keeps them in float; firmware stores them on the next
     // grid, so expect tiny differences here — they are NOT mismatches):
-    //   batch1 (= PyTorch's quantized T0, not raw batch1), jmass, jdotp, Tr.
+    //   batch1 (reconstructed in double, never materialized after Lever 8), jmass, jdotp, Tr.
     if (npelican_dump_fp) {
         FILE* fp = npelican_dump_fp;
 
@@ -445,12 +467,17 @@ void nPELICAN(
                 fprintf(fp, " %.17g", (double)dots[i*NPARTICLES2+j]);
         fprintf(fp, "\n");
 
-        // batch1: 484 values, row-major (t2-grid; approx)
-        fprintf(fp, "batch1:");
-        for (unsigned int i = 0; i < NPARTICLES2; i++)
-            for (unsigned int j = 0; j < NPARTICLES2; j++)
-                fprintf(fp, " %.17g", (double)batch1[i*NPARTICLES2+j]);
-        fprintf(fp, "\n");
+        // batch1: 484 values, row-major (approx, dump-only). Lever 8 never materializes
+        // batch1; reconstructed in double as (d·s + β')·m from the batch1_2to2 constants.
+        {
+            const double s1 = (double)batch1_2to2[1];
+            const double b1 = (double)batch1_2to2[2] - (double)batch1_2to2[0]*s1;
+            fprintf(fp, "batch1:");
+            for (unsigned int i = 0; i < NPARTICLES2; i++)
+                for (unsigned int j = 0; j < NPARTICLES2; j++)
+                    fprintf(fp, " %.17g", nobjmask[i][j] ? (double)dots[i*NPARTICLES2+j]*s1 + b1 : 0.0);
+            fprintf(fp, "\n");
+        }
 
         // jmass: 1 value (post-normalization, t2-grid; approx)
         fprintf(fp, "jmass: %.17g\n", (double)jmass);

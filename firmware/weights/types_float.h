@@ -45,6 +45,14 @@ typedef double tr_t;
 typedef double accrelu_t;
 typedef double accrelurow_t;
 
+// ---- Lever 8: raw dot accumulators + folded BN1 constants ----
+// (weights.h's `#define NPELICAN_BN1_ROM` is ignored in this build: the firmware
+//  takes the arithmetic-T0 path under NPELICAN_FLOAT_BUILD; bn1_t0_rom is then an
+//  unused array of doubles.)
+typedef double accdot2_t;
+typedef double accdotrow_t;
+typedef double bn1fold_t;
+
 // ---- MAC temporaries ----
 typedef double mac2_t;
 typedef double mac0_t;

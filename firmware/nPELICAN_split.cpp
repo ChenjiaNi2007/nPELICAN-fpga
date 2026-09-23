@@ -2,6 +2,12 @@
 #include "nPELICAN.h"
 #include "weights/weights.h"
 
+// Lever 8: T0 from the loader-generated BN1 ROM when weights.h provides one —
+// never in the float-reference build. Mirrors nPELICAN.cpp.
+#if defined(NPELICAN_BN1_ROM) && !defined(NPELICAN_FLOAT_BUILD)
+#define NP_USE_BN1_ROM 1
+#endif
+
 #ifndef __SYNTHESIS__
 #include <cstdio>
 FILE* npelican_dump_fp = nullptr;
@@ -79,11 +85,11 @@ dot_t* npelican_dots_override = nullptr;
 
 // ---------------------------------------------------------------------------
 // split=2: triangular symmetric crossings (NPELICAN_SPLIT_TRI; FUNCTION_SPLIT.md).
-// Mechanism test for the split's lost symmetry-CSE: dots and batch1 are
-// symmetric, but as full 484-element ports the consumers cannot know element
+// Mechanism test for the split's lost symmetry-CSE: dots and T0 (batch1 before
+// Lever 8) are symmetric, but as full 484-element ports the consumers cannot know element
 // (i,j) equals (j,i) — the identity lives in the PRODUCER's mirror write, and
 // HLS's expression analysis stops at a non-inlined boundary. So the shared
-// 2->2 MAC products (w1[h*6+0]*batch1[i,j] is the same value for (i,j) and
+// 2->2 MAC products (w1[h*6+0]*T0[i,j] is the same value for (i,j) and
 // (j,i)) get duplicated hardware in split=1. Under this flag the two arrays
 // cross as 253-element upper triangles and EVERY access goes through
 // NP_SYMIDX, which maps (i,j) and (j,i) to the SAME element — the identity is
@@ -187,13 +193,17 @@ void np_dots(
     }
 }
 
-// Stage 2: BatchNorm1 scalar affine (mean folded into bias), masked, symmetric.
-// batch1 stays WIDE (bn1out_t) — see nPELICAN.cpp for why (PyTorch sums the
-// unquantized BN output; only the basis op T0 sees the post_agg quantizer).
+// Stage 2 (Lever 8): BN1 T0 lookup + raw masked dot sums. batch1 is never
+// materialized (see nPELICAN.cpp for the derivation): T0 = m ? ROM[code(d)] : 0
+// (upper triangle, mirrored), and the aggregation sums run on the RAW dots, which
+// are exact integers on the dot grid. The BN1 affine is applied once per aggregate
+// in np_agg2to2.
 void np_bn1(
     dot_t dots[NP_SYMSZ],
     ap_uint<1> nobjmask[NPARTICLES2][NPARTICLES2],
-    bn1out_t batch1[NP_SYMSZ]
+    t2_t T0[NP_SYMSZ],
+    accdot2_t &dsum,
+    accdotrow_t rowsum[NPARTICLES2]
 ) {
 #if NP_SPLIT_BN1
     #pragma HLS INLINE off
@@ -203,27 +213,60 @@ void np_bn1(
 #endif
     #pragma HLS ARRAY_PARTITION variable=dots complete dim=0
     #pragma HLS ARRAY_PARTITION variable=nobjmask complete dim=0
-    #pragma HLS ARRAY_PARTITION variable=batch1 complete dim=0
+    #pragma HLS ARRAY_PARTITION variable=T0 complete dim=0
+    #pragma HLS ARRAY_PARTITION variable=rowsum complete dim=0
+#ifdef NP_USE_BN1_ROM
+    #pragma HLS ARRAY_PARTITION variable=bn1_t0_rom complete dim=0
+#else
     #pragma HLS ARRAY_PARTITION variable=batch1_2to2 complete dim=0
-
+    //fallback: per-element arithmetic T0, SINGLE rounding straight to t2_t.
     const bn_t_gen bn1_beta = batch1_2to2[2] - batch1_2to2[0]*batch1_2to2[1];
+#endif
+
+    //T0 = post_agg quant of batch1 (symmetric: upper triangle + mirror).
     for(unsigned int i = 0; i < NPARTICLES2; i++){
       #pragma HLS unroll
       for(unsigned int j = i; j < NPARTICLES2; j++){
         #pragma HLS unroll
-        bn1out_t v = (bn1out_t)((dots[NP_SYMIDX(i, j)] * batch1_2to2[1] + bn1_beta)*nobjmask[i][j]);
-        batch1[NP_SYMIDX(i, j)] = v;
-#ifndef NPELICAN_SPLIT_TRI
-        if (j != i) batch1[NP_SYMIDX(j, i)] = v;
+#ifdef NP_USE_BN1_ROM
+        ap_uint<NPELICAN_DOT_W> code = dots[NP_SYMIDX(i, j)].range(NPELICAN_DOT_W-1, 0);
+        t2_t t0 = nobjmask[i][j] ? bn1_t0_rom[code] : (t2_t)0;
+#else
+        t2_t t0 = (t2_t)((dots[NP_SYMIDX(i, j)] * batch1_2to2[1] + bn1_beta)*nobjmask[i][j]);
 #endif
+        T0[NP_SYMIDX(i, j)] = t0;
+#ifndef NPELICAN_SPLIT_TRI
+        if (j != i) T0[NP_SYMIDX(j, i)] = t0;
+#endif
+      }
+    }
+
+    //raw masked dot sums (exact): Σ_ij d·m and Σ_i d_ij·m
+    dsum = 0;
+    for (unsigned int i = 0; i < NPARTICLES2; i++) {
+    #pragma HLS unroll
+      rowsum[i] = 0;
+    }
+    for (unsigned int i = 0; i < NPARTICLES2; i++) {
+    #pragma HLS unroll
+      for (unsigned int j = 0; j < NPARTICLES2; j++) {
+      #pragma HLS unroll
+        AggMJ:   dsum      += dots[NP_SYMIDX(i, j)]*nobjmask[i][j];
+        AggJdot: rowsum[j] += dots[NP_SYMIDX(i, j)]*nobjmask[i][j];
       }
     }
 }
 
-// Stage 3: 2->2 aggregation (parameter-free), normalize-late: raw sums in the
-// widened accumulators, then ONE rescale rounding onto the post_agg (t2) grid.
+// Stage 3 (Lever 8): BN1 affine applied ONCE to each raw aggregate with the 1/N̄
+// normalization pre-folded by the loader, then ONE rounding onto the t2 grid:
+//   jmass    = t2(dsum·s/N̄² + ncount²·β'/N̄²)
+//   jdotp[j] = t2((rowsum[j]·s/N̄ + ncount·β'/N̄)·m_jj)
 void np_agg2to2(
-    bn1out_t batch1[NP_SYMSZ],
+    accdot2_t dsum,
+    accdotrow_t rowsum[NPARTICLES2],
+    ap_uint<1> nobjmask[NPARTICLES2][NPARTICLES2],
+    ap_uint<5> ncount,
+    ap_uint<9> ncount2,
     t2_t &jmass,
     t2_t jdotp[NPARTICLES2]
 ) {
@@ -233,31 +276,14 @@ void np_agg2to2(
 #else
     #pragma HLS INLINE
 #endif
-    #pragma HLS ARRAY_PARTITION variable=batch1 complete dim=0
+    #pragma HLS ARRAY_PARTITION variable=rowsum complete dim=0
+    #pragma HLS ARRAY_PARTITION variable=nobjmask complete dim=0
     #pragma HLS ARRAY_PARTITION variable=jdotp complete dim=0
 
-    acc2_t   jmass_acc = 0;
-    accrow_t jdotp_acc[NPARTICLES2];
-    #pragma HLS ARRAY_PARTITION variable=jdotp_acc complete dim=0
-    for (unsigned int i = 0; i < NPARTICLES2; i++) {
-    #pragma HLS unroll
-      jdotp_acc[i] = 0;
-    }
-
-    // M_J = sum(batch1); J . p_j = sum over rows i of batch1[i][j]
-    for (unsigned int i = 0; i < NPARTICLES2; i++) {
-    #pragma HLS unroll
-      for (unsigned int j = 0; j < NPARTICLES2; j++) {
-      #pragma HLS unroll
-        AggMJ:   jmass_acc    += batch1[NP_SYMIDX(i, j)];
-        AggJdot: jdotp_acc[j] += batch1[NP_SYMIDX(i, j)];
-      }
-    }
-
-    jmass = (t2_t)(jmass_acc * invnave2);
+    jmass = (t2_t)(dsum*bn1_s_all + ncount2*bn1_b_all);
     for( unsigned int i = 0; i < NPARTICLES2; i++){
     #pragma HLS unroll
-      jdotp[i] = (t2_t)(jdotp_acc[i] * invnave);
+      jdotp[i] = (t2_t)((rowsum[i]*bn1_s_row + ncount*bn1_b_row)*nobjmask[i][i]);
     }
 }
 
@@ -265,7 +291,7 @@ void np_agg2to2(
 // act_layer quantization. MAC accumulates in mac2_t (exact product width), so
 // the only rounding is the relu_t cast.
 void np_eq2to2(
-    bn1out_t batch1[NP_SYMSZ],
+    t2_t T0[NP_SYMSZ],
     t2_t jmass,
     t2_t jdotp[NPARTICLES2],
     ap_uint<1> nobjmask[NPARTICLES2][NPARTICLES2],
@@ -277,7 +303,7 @@ void np_eq2to2(
 #else
     #pragma HLS INLINE
 #endif
-    #pragma HLS ARRAY_PARTITION variable=batch1 complete dim=0
+    #pragma HLS ARRAY_PARTITION variable=T0 complete dim=0
     #pragma HLS ARRAY_PARTITION variable=jdotp complete dim=0
     #pragma HLS ARRAY_PARTITION variable=nobjmask complete dim=0
     #pragma HLS ARRAY_PARTITION variable=Tp_q complete dim=0
@@ -303,7 +329,7 @@ void np_eq2to2(
     #pragma HLS unroll
       for (unsigned int j = 0; j < NPARTICLES2; j++) {
       #pragma HLS unroll
-        LinEq2to2_0: T[i][j][0] = (t2_t)batch1[NP_SYMIDX(i, j)];   // post_agg quant of batch1
+        LinEq2to2_0: T[i][j][0] = T0[NP_SYMIDX(i, j)];   // post_agg quant of batch1 (np_bn1)
         LinEq2to2_1: T[i][j][4] = jmass*nobjmask[i][j];
         LinEq2to2_4: T[i][j][3] = jdotp[i];
         LinEq2to2_5: T[i][j][2] = jdotp[j];
@@ -381,7 +407,8 @@ void np_eq2to2(
 void np_agg2to0(
     relu_t Tp_q[NPARTICLES2][NPARTICLES2][NHIDDEN],
     ap_uint<1> nobjmask[NPARTICLES2][NPARTICLES2],
-    nobj_t nobj,
+    ap_uint<5> ncount,
+    ap_uint<9> ncount2,
     t0_t R[NHIDDEN][2]
 ) {
 #if NP_SPLIT_AGG2TO0
@@ -434,10 +461,7 @@ void np_agg2to0(
       }
     }
 
-    //unmasked-entry counts (nobj already remapped in the top).
-    ap_uint<5> ncount  = (ap_uint<5>)nobj;     // active rows/cols, 0..22
-    ap_uint<9> ncount2 = ncount * ncount;      // unmasked (i,j) pairs, 0..484
-
+    //unmasked-entry counts ncount/ncount2: computed once in the top (shared with np_agg2to2).
     for (unsigned int h = 0; h < NHIDDEN; h++) {
     #pragma HLS unroll
       R[h][0] = (t0_t)((batch2_2to0[h][1]*A_sum[h]   + bn2_beta[h]*ncount2) * invnave2);
@@ -524,7 +548,7 @@ void nPELICAN(
     // DOTS-LEVEL injection (csim only): same hook/placement as the monolith —
     // after the dot4 front-end, before BN1. The override buffer is always full
     // 484 row-major; under NPELICAN_SPLIT_TRI only the upper triangle is stored
-    // (the golden dots are symmetric, and np_bn1 reads only j>=i anyway).
+    // (the golden dots are symmetric; every read goes through NP_SYMIDX).
     if (npelican_dots_override) {
       for (unsigned int i = 0; i < NPARTICLES2; i++)
         for (unsigned int j = i; j < NPARTICLES2; j++) {
@@ -536,22 +560,30 @@ void nPELICAN(
     }
 #endif
 
-    bn1out_t batch1[NP_SYMSZ];
-    #pragma HLS ARRAY_PARTITION variable=batch1 complete dim=0
-    np_bn1(dots, nobjmask, batch1);
+    //unmasked-entry counts (nobj remapped above): shared by np_agg2to2 (BN1 fold, Lever 8)
+    //and np_agg2to0 (BN2 collapse, Lever 4).
+    ap_uint<5> ncount  = (ap_uint<5>)nobj;     // active rows/cols, 0..22
+    ap_uint<9> ncount2 = ncount * ncount;      // unmasked (i,j) pairs, 0..484
+
+    t2_t T0[NP_SYMSZ];
+    #pragma HLS ARRAY_PARTITION variable=T0 complete dim=0
+    accdot2_t   dsum;
+    accdotrow_t rowsum[NPARTICLES2];
+    #pragma HLS ARRAY_PARTITION variable=rowsum complete dim=0
+    np_bn1(dots, nobjmask, T0, dsum, rowsum);
 
     t2_t jmass;
     t2_t jdotp[NPARTICLES2];
     #pragma HLS ARRAY_PARTITION variable=jdotp complete dim=0
-    np_agg2to2(batch1, jmass, jdotp);
+    np_agg2to2(dsum, rowsum, nobjmask, ncount, ncount2, jmass, jdotp);
 
     relu_t Tp_q[NPARTICLES2][NPARTICLES2][NHIDDEN];
     #pragma HLS ARRAY_PARTITION variable=Tp_q complete dim=0
-    np_eq2to2(batch1, jmass, jdotp, nobjmask, Tp_q);
+    np_eq2to2(T0, jmass, jdotp, nobjmask, Tp_q);
 
     t0_t R[NHIDDEN][2];
     #pragma HLS ARRAY_PARTITION variable=R complete dim=0
-    np_agg2to0(Tp_q, nobjmask, nobj, R);
+    np_agg2to0(Tp_q, nobjmask, ncount, ncount2, R);
 
     mac0_t Rp[NOUT];
     #pragma HLS ARRAY_PARTITION variable=Rp complete dim=0
@@ -573,12 +605,17 @@ void nPELICAN(
                 fprintf(fp, " %.17g", (double)dots[NP_SYMIDX(i, j)]);
         fprintf(fp, "\n");
 
-        // batch1: 484 values, row-major (t2-grid; approx)
-        fprintf(fp, "batch1:");
-        for (unsigned int i = 0; i < NPARTICLES2; i++)
-            for (unsigned int j = 0; j < NPARTICLES2; j++)
-                fprintf(fp, " %.17g", (double)batch1[NP_SYMIDX(i, j)]);
-        fprintf(fp, "\n");
+        // batch1: 484 values, row-major (approx, dump-only). Lever 8 never materializes
+        // batch1; reconstructed in double as (d·s + β')·m from the batch1_2to2 constants.
+        {
+            const double s1 = (double)batch1_2to2[1];
+            const double b1 = (double)batch1_2to2[2] - (double)batch1_2to2[0]*s1;
+            fprintf(fp, "batch1:");
+            for (unsigned int i = 0; i < NPARTICLES2; i++)
+                for (unsigned int j = 0; j < NPARTICLES2; j++)
+                    fprintf(fp, " %.17g", nobjmask[i][j] ? (double)dots[NP_SYMIDX(i, j)]*s1 + b1 : 0.0);
+            fprintf(fp, "\n");
+        }
 
         // jmass: 1 value (post-normalization, t2-grid; approx)
         fprintf(fp, "jmass: %.17g\n", (double)jmass);
@@ -599,7 +636,7 @@ void nPELICAN(
                         T[i][j][b] = 0;
             for (unsigned int i = 0; i < NPARTICLES2; i++)
                 for (unsigned int j = 0; j < NPARTICLES2; j++) {
-                    T[i][j][0] = (t2_t)batch1[NP_SYMIDX(i, j)];
+                    T[i][j][0] = T0[NP_SYMIDX(i, j)];
                     T[i][j][4] = jmass*nobjmask[i][j];
                     T[i][j][3] = jdotp[i];
                     T[i][j][2] = jdotp[j];

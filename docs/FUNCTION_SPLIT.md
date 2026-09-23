@@ -22,14 +22,14 @@ completely partitioned on both sides (wires, never BRAM).
 | function | contents | output (type) | expected dominant cost |
 |---|---|---|---|
 | `np_dots` | p1/beam prep + symmetric dot4 | `dots[484]` (`dot_t`) | DSP (≈253 upper-triangle dots) |
-| `np_bn1` | BN1 affine, mean-folded, masked | `batch1[484]` (`bn1out_t`) | DSP/LUT (253 wide mults) |
-| `np_agg2to2` | raw Σ + normalize-late (×invnave/invnave2) | `jmass`, `jdotp[22]` (`t2_t`) | LUT adder trees + 23 norm mults |
-| `np_eq2to2` | basis `T` (internal, pure wiring) + 2→2 MAC + ReLU quant | `Tp_q[22][22][2]` (`relu_t`) | MAC DSP/LUT |
+| `np_bn1` | Lever 8: T0 = mask ? `bn1_t0_rom[code(d)]` : 0 (upper triangle + mirror) + raw masked dot sums | `T0[484]` (`t2_t`; 253 under split=2), `dsum` (`accdot2_t`), `rowsum[22]` (`accdotrow_t`) | LUT: 253 ROM muxes + exact 6-bit adder trees, 0 mults |
+| `np_agg2to2` | Lever 8: BN1 affine applied once per aggregate with 1/N̄ pre-folded (`bn1_s_*`, `bn1_b_*`·ncount), one t2 rounding | `jmass`, `jdotp[22]` (`t2_t`) | 23 constant mults + 2 count products |
+| `np_eq2to2` | basis `T` (internal, pure wiring; T0 passed in) + 2→2 MAC + ReLU quant | `Tp_q[22][22][2]` (`relu_t`) | MAC DSP/LUT |
 | `np_agg2to0` | 2→0 sum/trace + collapsed BN2 affine + normalize | `R[2][2]` (`t0_t`) | adder trees, 8 wide mults |
 | `np_out2to0` | 2→0 dense + bias | `Rp[1]` (`mac0_t`) | tiny |
 
 Kept in the **top**: the nobj remap + `nobjmask` build (comparators/wiring,
-shared by four stages), the csim-only dots-override/stage-dump hooks, and the
+shared by four stages), `ncount`/`ncount2` (shared by `np_agg2to2` and `np_agg2to0`), the csim-only dots-override/stage-dump hooks, and the
 final `(result_t)` output cast. `T` and `Tr` are reconstructed inside the
 top's csim-only dump block (identical expressions) since they are no longer
 materialized in top scope.
@@ -72,15 +72,19 @@ section gives per-instance latency. Compare against the monolith totals from
 Local bit-exactness gate (no Vitis needed):
 
 ```bash
-./build_local.sh       -DRUN_GOLDEN_GATE   # → tb_local        (monolith)
-./build_local.sh split -DRUN_GOLDEN_GATE   # → tb_local_split  (split)
+./build_local.sh        -DRUN_GOLDEN_GATE   # → tb_local            (monolith)
+./build_local.sh split  -DRUN_GOLDEN_GATE   # → tb_local_split      (split)
+./build_local.sh split2 -DRUN_GOLDEN_GATE   # → tb_local_split_tri  (split=2)
 ```
+(Run each build unpiped, or check `$?`: a failed build piped into `tail`/`grep`
+leaves the stale binary to run.)
 
 Run both and diff `tb_data/golden_fw_results.log`, `tb_data/fw_stage_dump.txt`,
 and the printed gate summaries between the two: they must be **byte-identical**
 (the split is pure code motion in exact fixed-point arithmetic — any diff at
 all means the split drifted from the monolith and the monolith wins).
-Verified identical on 2026-07-03 (200 golden events + 10k legacy flow).
+Verified identical on 2026-07-03 (200 golden events + 10k legacy flow), and
+again for all three builds after Lever 8 (2026-09-23).
 
 ## Stage isolation — one-boundary-at-a-time marginal costs
 

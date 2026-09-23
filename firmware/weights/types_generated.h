@@ -8,53 +8,72 @@
 // yet wired into the datapath (Phase 2 swaps usage and retires the old types).
 
 #include "ap_fixed.h"
+#include "ap_int.h"
 
 #define NPELICAN_GENERATED_TYPES 1
 
 // ---- Quantization-point types: ap_fixed<B, B-k, AP_RND_CONV, AP_SAT> ----
-typedef ap_fixed<6, 8, AP_RND_CONV, AP_SAT> dot_t;  // input_quant (signed): scale=2^--2 (4.000000000e+00), bits=6, k=-2
-typedef ap_fixed<6, 3, AP_RND_CONV, AP_SAT> t2_t;  // post_agg 2->2 (signed): scale=2^-3 (1.250000000e-01), bits=6, k=3
-typedef ap_fixed<6, 3, AP_RND_CONV, AP_SAT> relu_t;  // act_layer (QuantReLU) (signed): scale=2^-3 (1.250000000e-01), bits=6, k=3
-typedef ap_fixed<6, 0, AP_RND_CONV, AP_SAT> t0_t;  // post_agg 2->0 (signed): scale=2^-6 (1.562500000e-02), bits=6, k=6
-typedef ap_fixed<6, 3, AP_RND_CONV, AP_SAT> out_t;  // output_quant (signed): scale=2^-3 (1.250000000e-01), bits=6, k=3
+typedef ap_fixed<6, 9, AP_RND_CONV, AP_SAT> dot_t;  // input_quant (signed): scale=2^--3 (8.000000000e+00), bits=6, k=-3
+typedef ap_fixed<6, 1, AP_RND_CONV, AP_SAT> t2_t;  // post_agg 2->2 (signed): scale=2^-5 (3.125000000e-02), bits=6, k=5
+typedef ap_fixed<6, 1, AP_RND_CONV, AP_SAT> relu_t;  // act_layer (QuantReLU) (signed): scale=2^-5 (3.125000000e-02), bits=6, k=5
+typedef ap_fixed<6, 2, AP_RND_CONV, AP_SAT> t0_t;  // post_agg 2->0 (signed): scale=2^-4 (6.250000000e-02), bits=6, k=4
+typedef ap_fixed<6, 2, AP_RND_CONV, AP_SAT> out_t;  // output_quant (signed): scale=2^-4 (6.250000000e-02), bits=6, k=4
 #define NPELICAN_RESULT_T_GENERATED 1
-typedef ap_fixed<6, 3, AP_RND_CONV, AP_SAT> result_t;  // == out_t (output_quant grid)
-typedef ap_fixed<6, 2, AP_RND_CONV, AP_SAT> w1_gen_t;  // 2->2 weights (signed): scale=2^-4 (6.250000000e-02), bits=6, k=4
-typedef ap_fixed<6, 4, AP_RND_CONV, AP_SAT> w2_gen_t;  // 2->0 weights (signed): scale=2^-2 (2.500000000e-01), bits=6, k=2
+typedef ap_fixed<6, 2, AP_RND_CONV, AP_SAT> result_t;  // == out_t (output_quant grid)
+typedef ap_fixed<6, 1, AP_RND_CONV, AP_SAT> w1_gen_t;  // 2->2 weights (signed): scale=2^-5 (3.125000000e-02), bits=6, k=5
+typedef ap_fixed<6, 3, AP_RND_CONV, AP_SAT> w2_gen_t;  // 2->0 weights (signed): scale=2^-3 (1.250000000e-01), bits=6, k=3
 
 // ---- Raw-momentum / IO interface type (input_t): operand of the dot4
-//      multipliers (36x36 today) that dominate DSP. NOT a learned quantizer;
-//      input_quant grids the DOTS (dot_t). I = physics |p| range (flag-
-//      independent); F = ceil(log2|p|max) + dot_F + 3 so the dot4 product error
-//      stays < 1/2 dot_t LSB (bit-exact dots). F tracks the dot grid, so lower
-//      QAT bits -> smaller F -> narrower input_t -> cheaper dot multipliers.
+//      multipliers. TRAINED grid (Phase A*): pmu_quant = QuantIdentity on Pmu
+//      before dot4, learned po2 scale. PyTorch and firmware grid the momenta
+//      identically, so dots are bit-exact by construction (no analytic bound,
+//      no Lever-2 cap). Leading |p| above the clip point saturates BY DESIGN;
+//      the model was trained through that clipping.
 //      Guard macro lets nPELICAN.h keep a hand fallback for the float path.
 #define NPELICAN_INPUT_T_GENERATED 1
-typedef ap_fixed<18, 12, AP_RND_CONV, AP_SAT> input_t;  // raw momenta; |p|max=1946.9 (I=12), F=6 (dot_F=-2)
+typedef ap_fixed<12, 11, AP_RND_CONV, AP_SAT> input_t;  // raw momenta; TRAINED pmu_quant grid (I=11, F=1); |p|max=1946.9
 
 // ---- Float-trained biases / BatchNorm constants / normalization constants ----
 // These are NOT PyTorch quantization points (PyTorch keeps them in float), so
 // per CLAUDE.md/plan they are WIDENED, not snapped: their fixed-point rounding
 // error must stay below half the LSB of the next real quantizer they feed.
-typedef ap_fixed<6, 2, AP_RND_CONV, AP_SAT> bias_t_gen;  // b1,b1_diag,b2 (float); |bias|max=0.639774 (I=2), F=4
-typedef ap_fixed<18, 6, AP_RND_CONV, AP_SAT> bn_t_gen;  // BN mean/scale/beta (float); |c|max=23.1777 (I=6), F=12
-typedef ap_fixed<24, 1, AP_RND_CONV, AP_SAT> norm_t;  // 1/N̄, 1/N̄^2 normalize-late multipliers (F=23)
+typedef ap_fixed<8, 2, AP_RND_CONV, AP_SAT> bias_t_gen;  // b1,b1_diag,b2 (float); |bias|max=0.744833 (I=2), F=6
+typedef ap_fixed<18, 6, AP_RND_CONV, AP_SAT> bn_t_gen;  // BN mean/scale/beta (float); |c|max=27.9669 (I=6), F=12
+typedef ap_fixed<22, 1, AP_RND_CONV, AP_SAT> norm_t;  // 1/N̄, 1/N̄^2 normalize-late multipliers (F=21)
 
 // ---- Aggregation summands (unquantized BatchNorm outputs) + their accumulators.
-//      AGG_F = 7 fractional bits (> the finest post-agg grid t0_F=6) so the
+//      bn1out_t / acc2_t / accrow_t: LEGACY, unused by the datapath after Lever 8
+//      (BN1 now applies to the raw dot sums); kept for the float-build aliases.
+//      AGG_F = 6 fractional bits (> the finest post-agg grid t0_F=4) so the
 //      raw-sum-then-renormalize lands bit-exactly on the post-agg quantizer grid;
 //      storing these on the coarse post-agg grid (e.g. t2_F) would tip the rounding.
 //      Each is range-typed by its OWN BN output bound; SAT guards it. Accumulators
 //      add ceil(log2(#terms)) integer headroom (H2=9 full sum, H1=5 row/trace).
-typedef ap_fixed<11, 4, AP_RND_CONV, AP_SAT> bn1out_t;  // batch1 = BN1(dots); |batch1|<=5.6 (I=4), F=7
-typedef ap_fixed<20, 13> acc2_t;     // jmass raw sum of bn1out_t (I(bn1out)+H2)
-typedef ap_fixed<16, 9> accrow_t;   // jdotp row sums of bn1out_t (I(bn1out)+H1)
-typedef ap_fixed<14, 7, AP_RND_CONV, AP_SAT> tr_t;  // Tr = BN2(relu); |Tr|<=48.2 (I=7); dump-only after #2 (BN2 folded past the 2->0 aggregation)
-typedef ap_fixed<15, 12> accrelu_t;     // R full sum of relu_t Tp_q (I(relu)+H2)
-typedef ap_fixed<11, 8> accrelurow_t;  // R trace, sum of relu_t Tp_q (I(relu)+H1)
+typedef ap_fixed<12, 6, AP_RND_CONV, AP_SAT> bn1out_t;  // LEGACY (pre-Lever-8) batch1 = BN1(dots); |batch1|<=17.5 (I=6), F=6
+typedef ap_fixed<21, 15> acc2_t;     // LEGACY jmass raw sum of bn1out_t (I(bn1out)+H2)
+typedef ap_fixed<17, 11> accrow_t;   // LEGACY jdotp row sums of bn1out_t (I(bn1out)+H1)
+typedef ap_fixed<12, 6, AP_RND_CONV, AP_SAT> tr_t;  // Tr = BN2(relu); |Tr|<=29.5 (I=6); dump-only after #2 (BN2 folded past the 2->0 aggregation)
+typedef ap_fixed<15, 10> accrelu_t;     // R full sum of relu_t Tp_q (I(relu)+H2)
+typedef ap_fixed<11, 6> accrelurow_t;  // R trace, sum of relu_t Tp_q (I(relu)+H1)
+
+// ---- Lever 8: BN1 applied ONCE to the raw dot aggregates + T0 ROM ----
+//      jmass    = t2( Σ_ij d·m · bn1_s_all + ncount² · bn1_b_all )
+//      jdotp[j] = t2((Σ_i d_ij·m · bn1_s_row + ncount · bn1_b_row) · m_jj)
+//      T0       = m ? bn1_t0_rom[raw DOT_W-bit code of d] : 0   (weights.h)
+//      Raw dot sums are EXACT integers on the dot grid (+H2/H1 headroom); every
+//      product/sum is exact in HLS promoted types, so the ONLY rounding is the
+//      single t2_t cast (AP_RND_CONV, AP_SAT).
+//      bn1fold_t F: the folded constant's rounding error 2^-(F+1), times the
+//      largest raw sum 2^(dot_mag+H2), must stay under 2^-4 of half a t2 LSB
+//      (2^-(t2_F+1)) so it cannot tip the single t2 rounding:
+//        F >= t2_F + H2 + dot_mag + 4 = 5 + 9 + 8 + 4 = 26
+#define NPELICAN_DOT_W 6
+typedef ap_fixed<15, 18> accdot2_t;     // Σ_ij masked dots (I(dot)+H2), exact
+typedef ap_fixed<11, 14> accdotrow_t;   // Σ_i masked dots per column (I(dot)+H1), exact
+typedef ap_fixed<27, 1, AP_RND_CONV, AP_SAT> bn1fold_t;  // s/N̄, β'/N̄, s/N̄², β'/N̄²; |c|max=0.0139347 (I=1), F=26
 
 // ---- MAC temporaries: I = I(weight)+I(operand)+ceil(log2(#terms)), W = I+B ----
-typedef ap_fixed<15, 8> mac2_t;     // 2->2 dense: 6 w1*t2 products + b1 + b1_diag = 8 terms
-typedef ap_fixed<15, 7> mac0_t;     // 2->0 dense: 2*NHIDDEN w2*t0 products + b2 = 5 terms
+typedef ap_fixed<15, 5> mac2_t;     // 2->2 dense: 6 w1*t2 products + b1 + b1_diag = 8 terms
+typedef ap_fixed<15, 8> mac0_t;     // 2->0 dense: 2*NHIDDEN w2*t0 products + b2 = 5 terms
 
 #endif  // NPELICAN_TYPES_GENERATED_H_
