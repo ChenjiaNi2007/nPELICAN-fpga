@@ -25,6 +25,8 @@ commits first (see `RESOURCE_REDUCTION_LEVERS.md` Lever 8 ⚠1/⚠2).
 | starting point | HEAD `4f51e7c` | `--bn-frac-bits 12` | – | – | – | – | – | – | 59/200, 3.0625 | 59/200, 3.0625 | stock TB (nobj wrap) |
 | TB `nobj` clamp + exact-float32 constant widths | HEAD `4f51e7c` | no cap: BIAS_F=35, BN_F=28, NORM_F=35 | – | – | – | – | – | – | 175/200, 0.25 | 175/200, 0.25 | TB: raw nobj wrapped mod 32 in `ap_uint<5>` (134/200 events) since `0479032`. Residuals = HEAD's per-element `bn1out_t` rounding (T1–T5 wrong in 105 events) + bias truncated into `mac2_t` |
 | **Lever 8** (+ biases added at the cast, `dsum = Σ rowsum`) | `bn1-fold` | same | TBD | TBD | TBD | TBD | TBD (remote) | TBD | **200/200, 0** | **200/200, 0** | monolith / split / split=2 byte-identical; every stage matches a float64 PyTorch-semantics reference on all 200 events. csynth/vsynth owed (remote). |
+| Lever 8 HEAD `f8e3f5d` csynth, monolith (2026-09-24, xcvu13p-2, 5 ns) — **pre-fix estimate** | `bn1-fold` | same (`bias_t_gen <37,2>`) | 375,654 | 57,724 | 1069 | 16 | 1 | slack −0.08 | 200/200, 0 | 200/200, 0 | LUT +~147k vs the ~229k previous comparable monolith: the 968 relu-cast adds + logit add at ~41 bits then a 41→6 RND_CONV/SAT cast (exact-float32 bias). |
+| **Lever 8 follow-up: sticky-bit bias** (response) | `bn1-fold` | same; `bias_t_gen <13,2>` (Fh=10, BIAS_F=11) | TBD | TBD | TBD | TBD | TBD (remote) | TBD | **200/200, 0** | **200/200, 0** | bias adds 17 bits (was ~41); `golden_fw_results.log` byte-identical to `f8e3f5d`; exhaustive cast equivalence over all `mac2_t`/`mac0_t` codes. csynth of the fix owed. See Lever 8 follow-up in `RESOURCE_REDUCTION_LEVERS.md`. |
 
 ### 2026-08-25 — BN1 constant evicted to fabric (`--bn-frac-bits 12`), 16 particles
 

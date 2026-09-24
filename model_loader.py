@@ -585,6 +585,48 @@ def _momentum_absmax(repo, default=2048.0):
         return float(default)
 
 
+def _f32_sum(a, b):
+    """float32(a + b) elementwise — the diagonal bias PyTorch sees (Eq2to2.forward adds
+    self.bias and diag_bias to the float32 output; the loader uses their float32 sum)."""
+    return (np.asarray(a, dtype=np.float32) + np.asarray(b, dtype=np.float32)).astype(np.float32)
+
+
+def _sticky_encode(values, Fh, I):
+    """Sticky-bit encoding of float32 biases onto a (Fh+1)-fractional-bit grid.
+
+    Claim: for any v0 on G = 2^-Fh (Fh >= MAC F, so the MAC sum is on G) and any target
+    grid 2^-qF with Fh >= qF+1 (so every rounding-tie point lies on G),
+    RND_CONV_q(v0 + b) == RND_CONV_q(v0 + enc(b)), enc(b) = b_hi + sticky*2^-(Fh+1),
+    b_hi = floor(b*2^Fh)/2^Fh, sticky = (b != b_hi).
+    Proof: v = v0 + b_hi is on G; t = v + b_lo with 0 <= b_lo < 2^-Fh. If v is not a tie,
+    the nearest tie is >= one G step away, so t and v' = v + sticky*2^-(Fh+1) (both in
+    [v, v+2^-Fh)) share v's rounding interval. If v is a tie: b_lo > 0 puts both t and v'
+    strictly above it (both round up); b_lo = 0 gives v' == t. Saturation is monotone.
+
+    Values are exact (Fraction) from the float32 checkpoint numbers; returns Python floats
+    (dyadic, <= Fh+1 fractional bits, hence exact doubles and exact ap_fixed literals)."""
+    from fractions import Fraction
+    out = []
+    for x in np.ravel(np.asarray(values, dtype=np.float32)):
+        b = Fraction(float(np.float32(x)))
+        hi = Fraction(math.floor(b * (1 << Fh)), 1 << Fh)
+        enc = hi + (Fraction(1, 1 << (Fh + 1)) if b != hi else 0)
+        # range check: ap_fixed<W,I> spans [-2^(I-1), 2^(I-1) - lsb]
+        assert -Fraction(2) ** (I - 1) <= enc <= Fraction(2) ** (I - 1) - Fraction(1, 1 << (Fh + 1)), \
+            f'sticky bias {float(enc)} outside bias_t_gen range (I={I})'
+        f = float(enc)
+        assert Fraction(f) == enc
+        # literal round trip: the %.17g text parsed back must be the encoded value exactly
+        assert Fraction(float(f'{f:.17g}')) == enc, f'literal {f:.17g} not exact'
+        out.append(f)
+    return np.array(out, dtype=np.float64).reshape(np.shape(values))
+
+
+def _c_exact(arr):
+    """C initializer with 17 significant digits (exact for dyadic doubles)."""
+    return '{' + ', '.join(f'{float(v):.17g}' for v in np.ravel(np.asarray(arr))) + '}'
+
+
 def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     # --- map module names -> typedef names + provenance label ---
     # Quantization-point typedefs, one per quantizer.
@@ -768,13 +810,12 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
             INPUT_F = capped_F
             INPUT_W = args.max_input_bits
 
-    bias_max = float(max(abs(np.asarray(b1)).max(), abs(np.asarray(b1d)).max(), abs(np.asarray(b2)).max()))
-    # Exact-float32 rule (see the header comment): F represents every bias exactly as the
-    # float32 PyTorch adds. (Was max(relu_F,out_F)+1 = 6 at 6-bit grids — too coarse: the
-    # bias rounding tipped the relu rounding in most events.)
-    BIAS_F = _f32_exact_frac(np.concatenate([np.ravel(b1), np.ravel(b1d), np.ravel(b2)]))
+    # Bias magnitudes (incl. the diagonal total b1+b1_diag the firmware now adds as ONE
+    # constant). BIAS_F itself is derived below, after the MAC grids are known.
+    _b1d_tot = _f32_sum(b1, b1d)
+    bias_max = float(max(abs(np.asarray(b1)).max(), abs(np.asarray(b1d)).max(),
+                         abs(np.asarray(b2)).max(), abs(_b1d_tot).max()))
     BIAS_I = _int_bits(bias_max)
-    BIAS_W = BIAS_I + BIAS_F
 
     bn_max = float(np.abs(np.asarray(batch1)).max())
     bn_max = max(bn_max, float(np.abs(np.asarray(batch2)).max()))
@@ -881,6 +922,22 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     mac2_W = mac2_I + (w1_F + t2_F)
     mac0_I = w2_I + t0_I + math.ceil(math.log2(mac0_terms))
     mac0_W = mac0_I + (w2_F + t0_F)
+
+    # --- bias_t_gen: STICKY-BIT encoding (Lever 8 follow-up) ---
+    # Q(Tp + b) onto the relu grid (and Q(Rp + b2) onto the out grid) depends on b only
+    # through b truncated to a grid G = 2^-Fh that is at least as fine as the MAC grid and
+    # the rounding-tie grid, plus ONE sticky bit (any nonzero remainder). See
+    # _sticky_encode for the proof. Every emitted bias is b_hi + sticky*2^-(Fh+1), so the
+    # 968 final adds are ~Fh+1+I bits wide instead of the exact-float32 F (35 here).
+    mac2_F = w1_F + t2_F
+    mac0_F = w2_F + t0_F
+    BIAS_FH = max(mac2_F, mac0_F, relu_F + 1, out_F + 1)
+    assert BIAS_FH >= mac2_F and BIAS_FH >= mac0_F, 'sticky grid must hold the MAC grids'
+    assert BIAS_FH >= relu_F + 1 and BIAS_FH >= out_F + 1, 'sticky grid must hold every tie point'
+    BIAS_F = BIAS_FH + 1
+    BIAS_W = BIAS_I + BIAS_F
+    _quant_info['bias_Fh'] = BIAS_FH
+    _quant_info['bias_I'] = BIAS_I
 
     def _fixed(W, I, signed, rnd='AP_RND_CONV', sat='AP_SAT'):
         base = 'ap_fixed' if signed else 'ap_ufixed'
@@ -992,7 +1049,18 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
         L.append('')
     L.append('// ---- Float-trained biases / BatchNorm constants / normalization constants ----')
     L.append('// These are NOT PyTorch quantization points: PyTorch applies them in float32.')
-    L.append('// Rule: each type holds its constants as EXACT float32 literals,')
+    L.append('// bias_t_gen (b1, b1_diag, b1_diag_total, b2): STICKY-BIT rule. Every bias is')
+    L.append('// added to an exact MAC sum right before ONE AP_RND_CONV cast (relu_t / result_t).')
+    L.append(f'// Let G = 2^-Fh, Fh = max(mac2_F, mac0_F, relu_F+1, out_F+1) = max({mac2_F}, {mac0_F}, {relu_F + 1}, {out_F + 1}) = {BIAS_FH},')
+    L.append('// so the MAC sum is on G and every rounding tie of the target grid is on G. With')
+    L.append('// b = b_hi + b_lo, b_hi = floor_G(b), 0 <= b_lo < 2^-Fh, the emitted literal is')
+    L.append('// b_hi + sticky*2^-(Fh+1), sticky = (b_lo != 0). v = mac + b_hi is on G; the true')
+    L.append('// t = v + b_lo and v\' = v + sticky*2^-(Fh+1) are both in [v, v + 2^-Fh), with no tie')
+    L.append('// strictly inside, and both lie strictly above v iff b_lo > 0 (equal to v otherwise),')
+    L.append('// so RND_CONV(v\') == RND_CONV(t) always (saturation is monotone). BIAS_F = Fh+1.')
+    L.append('// The diagonal uses b1_diag_total = sticky(float32(b1 + b1_diag)): two sticky terms')
+    L.append('// must never be added (their low parts can exceed one G step).')
+    L.append('// bn_t_gen / norm_t: EXACT float32 literals,')
     L.append(f'//   F = max over nonzero entries of (23 - floor(log2|c|)), capped at {FLOAT_CONST_F_CAP};')
     L.append('//   I derived from the magnitude.')
     L.append('// With exact float32 constants, the firmware\'s exact fixed-point arithmetic')
@@ -1001,7 +1069,7 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     L.append('// residual mismatch can only come from PyTorch\'s own float32 rounding landing')
     L.append('// within ~1e-7 (relative) of a quantizer grid boundary.')
     L.append(f'typedef ap_fixed<{BIAS_W}, {BIAS_I}, AP_RND_CONV, AP_SAT> bias_t_gen;'
-             f'  // b1,b1_diag,b2 (exact float32); |bias|max={bias_max:.6g} (I={BIAS_I}), F={BIAS_F}')
+             f'  // b1,b1_diag,b1_diag_total,b2 (sticky-bit, Fh={BIAS_FH}); |bias|max={bias_max:.6g} (I={BIAS_I}), F={BIAS_F}')
     L.append(f'typedef ap_fixed<{BN_W}, {BN_I}, AP_RND_CONV, AP_SAT> bn_t_gen;'
              f'  // BN mean/scale/beta (exact float32{", capped by --bn-frac-bits" if args.bn_frac_bits is not None else ""}); |c|max={bn_max:.6g} (I={BN_I}), F={BN_F}')
     # norm_t: invnave=1/N̄, invnave2=1/N̄^2 (not po2), exact-float32 rule like the others.
@@ -1128,6 +1196,33 @@ if args.quant:
         args.out_types, _quant_info['act'], _quant_info['weight'],
         b1_2to2, b1d_2to2, b2_2to0)
 
+# Diagonal bias total (b1 + b1_diag), added as ONE constant on the diagonal.
+b1dt_2to2 = _f32_sum(b1_2to2, b1d_2to2)
+if args.quant:
+    # Sticky-bit bias encoding (see _sticky_encode / types_generated.h). Encode AFTER the
+    # types header so Fh (from the MAC / quantizer grids) is known.
+    _Fh, _BI = _quant_info['bias_Fh'], _quant_info['bias_I']
+    # Exact sum vs float32 sum: identical sticky encodings unless float32 rounding of
+    # b1+b1_diag crosses the G grid or zeroes the remainder (then warn; float32 is used).
+    from fractions import Fraction as _Fr
+    for _h in range(len(b1dt_2to2)):
+        _ex = _Fr(float(b1_2to2[_h])) + _Fr(float(b1d_2to2[_h]))
+        _ex_hi = _Fr(math.floor(_ex * (1 << _Fh)), 1 << _Fh)
+        _ex_enc = _ex_hi + (_Fr(1, 1 << (_Fh + 1)) if _ex != _ex_hi else 0)
+        _f_enc = _Fr(float(_sticky_encode([b1dt_2to2[_h]], _Fh, _BI)[0]))
+        if _ex_enc != _f_enc:
+            print(f'  WARNING: b1_diag_total[{_h}]: sticky(float32(b1+b1_diag)) != sticky(exact b1+b1_diag)')
+    b1_2to2_out = _sticky_encode(b1_2to2, _Fh, _BI)
+    b1d_2to2_out = _sticky_encode(b1d_2to2, _Fh, _BI)
+    b1dt_2to2_out = _sticky_encode(b1dt_2to2, _Fh, _BI)
+    b2_2to0_out = _sticky_encode(b2_2to0, _Fh, _BI)
+    _cb = _c_exact
+    print(f'  bias_t_gen sticky-bit: Fh={_Fh}, BIAS_F={_Fh + 1}; '
+          f'b1={_cb(b1_2to2_out)} b1_diag_total={_cb(b1dt_2to2_out)} b2={_cb(b2_2to0_out)}')
+else:
+    b1_2to2_out, b1d_2to2_out, b1dt_2to2_out, b2_2to0_out = b1_2to2, b1d_2to2, b1dt_2to2, b2_2to0
+    _cb = _c
+
 os.makedirs(os.path.dirname(args.out) or '.', exist_ok=True)
 with open(args.out, 'w') as f:
     f.write('#include "../nPELICAN.h"\n')
@@ -1145,15 +1240,16 @@ with open(args.out, 'w') as f:
 
     f.write('//2to2 linear layer\n')
     f.write(f'{w1_type} w1_2to2[NHIDDEN*6] = ' + _c(w1_2to2) + ';\n')
-    f.write(f'{bias_type} b1_2to2[NHIDDEN] = ' + _c(b1_2to2) + ';\n')
-    f.write(f'{bias_type} b1_diag_2to2[NHIDDEN] = ' + _c(b1d_2to2) + ';\n\n')
+    f.write(f'{bias_type} b1_2to2[NHIDDEN] = ' + _cb(b1_2to2_out) + ';\n')
+    f.write(f'{bias_type} b1_diag_2to2[NHIDDEN] = ' + _cb(b1d_2to2_out) + ';'
+            + ('  // legacy/dump-only: quant firmware adds b1_diag_total_2to2' if args.quant else '') + '\n\n')
 
     f.write('//second batchnorm [channel][mean, weight/sqrt(var), bias]\n')
     f.write(f'{bn_type} batch2_2to0[NHIDDEN][3] = ' + _c(batch2) + ';\n\n')
 
     f.write('//2to1 linear layer\n')
     f.write(f'{w2_type} w2_2to0[NHIDDEN*2*NOUT] = ' + _c(w2_2to0) + ';\n')
-    f.write(f'{bias_type} b2_2to0[NOUT] = ' + _c(b2_2to0) + ';\n')
+    f.write(f'{bias_type} b2_2to0[NOUT] = ' + _cb(b2_2to0_out) + ';\n')
 
     # Lever 8 (appended AFTER the frozen arrays; nothing above is renamed/reordered).
     fold_type = 'bn1fold_t' if args.quant else 'internal_t'
@@ -1167,6 +1263,11 @@ with open(args.out, 'w') as f:
         f.write('//generated by running the rebuilt Brevitas MessageNet(BN1) + post_agg_quant.\n')
         f.write('#define NPELICAN_BN1_ROM 1\n')
         f.write(f't2_t bn1_t0_rom[{len(rom)}] = {{' + ', '.join(f'{v:.17g}' for v in rom) + '};\n')
+
+    # Lever 8 follow-up (appended AFTER every other array): diagonal bias total, added on
+    # the diagonal as ONE constant instead of b1 + b1_diag.
+    f.write('\n//diagonal 2to2 bias total float32(b1 + b1_diag)' + (' (sticky-bit encoded)' if args.quant else '') + '\n')
+    f.write(f'{bias_type} b1_diag_total_2to2[NHIDDEN] = ' + _cb(b1dt_2to2_out) + ';\n')
 
     # D3: measured QAT scales appended as comments for the record (quant path only).
     if _scale_comment_lines:

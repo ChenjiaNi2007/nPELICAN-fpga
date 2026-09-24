@@ -35,7 +35,18 @@ typedef ap_fixed<12, 11, AP_RND_CONV, AP_SAT> input_t;  // raw momenta; TRAINED 
 
 // ---- Float-trained biases / BatchNorm constants / normalization constants ----
 // These are NOT PyTorch quantization points: PyTorch applies them in float32.
-// Rule: each type holds its constants as EXACT float32 literals,
+// bias_t_gen (b1, b1_diag, b1_diag_total, b2): STICKY-BIT rule. Every bias is
+// added to an exact MAC sum right before ONE AP_RND_CONV cast (relu_t / result_t).
+// Let G = 2^-Fh, Fh = max(mac2_F, mac0_F, relu_F+1, out_F+1) = max(10, 7, 6, 5) = 10,
+// so the MAC sum is on G and every rounding tie of the target grid is on G. With
+// b = b_hi + b_lo, b_hi = floor_G(b), 0 <= b_lo < 2^-Fh, the emitted literal is
+// b_hi + sticky*2^-(Fh+1), sticky = (b_lo != 0). v = mac + b_hi is on G; the true
+// t = v + b_lo and v' = v + sticky*2^-(Fh+1) are both in [v, v + 2^-Fh), with no tie
+// strictly inside, and both lie strictly above v iff b_lo > 0 (equal to v otherwise),
+// so RND_CONV(v') == RND_CONV(t) always (saturation is monotone). BIAS_F = Fh+1.
+// The diagonal uses b1_diag_total = sticky(float32(b1 + b1_diag)): two sticky terms
+// must never be added (their low parts can exceed one G step).
+// bn_t_gen / norm_t: EXACT float32 literals,
 //   F = max over nonzero entries of (23 - floor(log2|c|)), capped at 36;
 //   I derived from the magnitude.
 // With exact float32 constants, the firmware's exact fixed-point arithmetic
@@ -43,7 +54,7 @@ typedef ap_fixed<12, 11, AP_RND_CONV, AP_SAT> input_t;  // raw momenta; TRAINED 
 // quantizer) is at least as accurate as PyTorch's float32 evaluation, so a
 // residual mismatch can only come from PyTorch's own float32 rounding landing
 // within ~1e-7 (relative) of a quantizer grid boundary.
-typedef ap_fixed<37, 2, AP_RND_CONV, AP_SAT> bias_t_gen;  // b1,b1_diag,b2 (exact float32); |bias|max=0.744833 (I=2), F=35
+typedef ap_fixed<13, 2, AP_RND_CONV, AP_SAT> bias_t_gen;  // b1,b1_diag,b1_diag_total,b2 (sticky-bit, Fh=10); |bias|max=0.984435 (I=2), F=11
 typedef ap_fixed<34, 6, AP_RND_CONV, AP_SAT> bn_t_gen;  // BN mean/scale/beta (exact float32); |c|max=27.9669 (I=6), F=28
 typedef ap_fixed<36, 1, AP_RND_CONV, AP_SAT> norm_t;  // 1/N̄, 1/N̄^2 normalize-late multipliers (exact float32), F=35
 

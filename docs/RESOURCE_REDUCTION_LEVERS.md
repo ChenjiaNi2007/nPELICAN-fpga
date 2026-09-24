@@ -922,6 +922,36 @@ fabric multipliers, np_agg2to2 to keep ~23 constant multiplies, and the wider bi
 cost a little LUT only at the 968 final adds (not in the MAC chains). Log in
 `resource_log.md`.
 
+**Lever 8 follow-up: sticky-bit bias rounding (2026-09-24).** The remote csynth of `f8e3f5d`
+(xcvu13p-2, 5 ns) priced the monolith at **LUT 375,654** (DSP 1069, FF 57,724, 16 cycles,
+II=1, slack −0.08) vs ~229k for the previous comparable monolith. Cause: the exact-float32
+`bias_t_gen = <37,2>` made each of the 968 relu-cast adds (and the logit add) a ~41-bit
+add followed by a 41→6-bit AP_RND_CONV+AP_SAT cast. Fix, exact by construction: rounding
+`Q(v0 + b)` with `v0` on the MAC grid depends on `b` only through `b_hi = floor_G(b)` on a
+grid `G = 2^-Fh` with `Fh ≥ mac_F` (so `v0 + b_hi` is on G) and `Fh ≥ q_F + 1` (every tie of
+the target grid lies on G), plus one sticky bit `b ≠ b_hi`. Proof: `v = v0 + b_hi` is on G;
+the true `t = v + b_lo` (`0 ≤ b_lo < 2^-Fh`) and `v' = v + sticky·2^-(Fh+1)` both lie in
+`[v, v + 2^-Fh)`, which contains no tie other than possibly `v` itself; if `v` is a tie,
+`b_lo > 0` puts both strictly above it and `b_lo = 0` gives `v' = t`. So
+`RND_CONV(v') = RND_CONV(t)`; saturation is monotone. The loader now uses
+`Fh = max(mac2_F, mac0_F, relu_F+1, out_F+1)` (asserted), `BIAS_F = Fh+1`, and emits every bias
+as `b_hi + sticky·2^-BIAS_F` (exact dyadic `%.17g` literals, round-trip-checked). Two sticky
+terms must not be added, so the diagonal gets its own appended constant
+`b1_diag_total_2to2 = sticky(float32(b1 + b1_diag))` and the firmware selects
+`(i==j ? b1_diag_total : b1)·m_ij` (no diagonal add); `b1_diag_2to2` stays emitted
+(legacy/dump-only). This checkpoint: `Fh = max(10, 7, 6, 5) = 10`, `bias_t_gen = <13,2>`
+(was `<37,2>`), so each of the 968 adds is `mac2_t <15,5>` + `<13,2>` → a 17-bit sum
+(was ~41). Validation: exhaustive over every `mac2_t`/`mac0_t` code, the new cast equals the
+old exact-float32 cast (147,456 cases, incl. the old `b1 + b1_diag` two-add diagonal); local
+gate 200/200 exact, max|Δ| 0, monolith/split/split=2 byte-identical, and
+`golden_fw_results.log` byte-identical to `f8e3f5d` (only the `Rp:` dump line moves, by
+< 2^-11, same rounding). ROM/fold/BN/norm constants unchanged. **csynth of the fix owed.**
+Other wide spots csynth may price high (unchanged here): the 4 R-path products
+`(bn_t_gen<34,6>·A + β'·count)·norm_t<36,1>` (~85-bit intermediates, then a t0 cast) and the
+23 `bn1fold_t<27,1>` BN1-aggregate products; the 253 `bn1_t0_rom` lookups are 64:1 constant
+muxes in csynth's estimate but a single LUT6 per output bit post-synthesis (6-input function),
+so judge them from vsynth, not csynth.
+
 ## Not reducible / dead ends (don't re-investigate)
 - **Narrowing the dot multiplier operands to save DSP** — 3 of the 4 products per pair
   are `mac_mulsub` and stay on DSP48 at ANY operand width, because the DSP is bound for

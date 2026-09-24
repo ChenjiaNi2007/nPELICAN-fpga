@@ -65,6 +65,7 @@ void nPELICAN(
     #pragma HLS ARRAY_PARTITION variable=w1_2to2 complete dim=0
     #pragma HLS ARRAY_PARTITION variable=b1_2to2 complete dim=0
     #pragma HLS ARRAY_PARTITION variable=b1_diag_2to2 complete dim=0
+    #pragma HLS ARRAY_PARTITION variable=b1_diag_total_2to2 complete dim=0
     #pragma HLS ARRAY_PARTITION variable=batch2_2to0 complete dim=0
     #pragma HLS ARRAY_PARTITION variable=w2_2to0 complete dim=0
     #pragma HLS ARRAY_PARTITION variable=b2_2to0 complete dim=0
@@ -310,8 +311,8 @@ void nPELICAN(
 #endif
 
     // MAC accumulators start at 0: mac2_t is the EXACT product-sum type (w1 x t2 grid).
-    // The float32 biases (bias_t_gen, finer grid) are added in the final expression right
-    // before the relu_t cast, so only that one add is promoted to the wide type.
+    // The biases (bias_t_gen, sticky-bit encoded: one bit finer than the MAC grid) are added
+    // in the final expression right before the relu_t cast.
     for (unsigned int i = 0; i < NPARTICLES2; i++) {
     #pragma HLS unroll
       for (unsigned int j = 0; j < NPARTICLES2; j++) {
@@ -341,20 +342,21 @@ void nPELICAN(
 
     relu_t Tp_q[NPARTICLES2][NPARTICLES2][NHIDDEN];
     #pragma HLS ARRAY_PARTITION variable=Tp_q complete dim=0
-    // + biases (masked exactly as before: b1·m_ij everywhere, b1_diag·m_ii on the diagonal),
-    // quantize onto the act_layer grid (relu_t, AP_RND_CONV), then ReLU. Q is monotone with
-    // Q(0)=0, so max(0, Q(x)) == Q(max(0, x)): identical to ReLU-then-quantize.
+    // + bias (masked exactly as before: b1·m_ij off the diagonal, (b1+b1_diag)·m_ii on it —
+    // the diagonal constant is the loader's b1_diag_total_2to2, a select between two
+    // constants, no extra add), quantize onto the act_layer grid (relu_t, AP_RND_CONV), then
+    // ReLU. Q is monotone with Q(0)=0, so max(0, Q(x)) == Q(max(0, x)): identical to
+    // ReLU-then-quantize. The biases are STICKY-BIT encoded (types_generated.h: b_hi on
+    // 2^-Fh + one sticky LSB 2^-(Fh+1), Fh >= mac2_F and >= relu_F+1), so this add is
+    // narrow yet rounds exactly like the exact float32 bias would.
     for (unsigned int i = 0; i < NPARTICLES2; i++) {
     #pragma HLS unroll
       for (unsigned int j = 0; j < NPARTICLES2; j++) {
       #pragma HLS unroll
         for (unsigned int h = 0; h < NHIDDEN; h++) {
         #pragma HLS unroll
-          relu_t q;
-          if (i == j)
-            q = (relu_t)(Tp[i][j][h] + b1_2to2[h]*nobjmask[i][j] + b1_diag_2to2[h]*nobjmask[i][i]);
-          else
-            q = (relu_t)(Tp[i][j][h] + b1_2to2[h]*nobjmask[i][j]);
+          relu_t q = (relu_t)(Tp[i][j][h]
+                              + (i == j ? b1_diag_total_2to2[h] : b1_2to2[h])*nobjmask[i][j]);
           if (q < 0) q = 0;
           Tp_q[i][j][h] = q;
         }
@@ -434,8 +436,8 @@ void nPELICAN(
     mac0_t Rp[NOUT];
     #pragma HLS ARRAY_PARTITION variable=Rp complete dim=0
 
-    // accumulator starts at 0 (mac0_t = exact product-sum type); the float32 bias b2 is
-    // added in the promoted type right before the result_t cast.
+    // accumulator starts at 0 (mac0_t = exact product-sum type); the sticky-bit-encoded
+    // bias b2 is added right before the result_t cast.
     for (unsigned int o = 0; o < NOUT; o++) {
     #pragma HLS unroll
       Rp[o] = 0;
@@ -526,9 +528,9 @@ void nPELICAN(
                 (double)R[1][0], (double)R[1][1]);
 
         // Rp: 1 value (output_quant grid; exact)
-        fprintf(fp, "Rp: %.17g\n", (double)(Rp[0] + b2_2to0[0]));   // pre-cast logit incl. b2
+        fprintf(fp, "Rp: %.17g\n", (double)(Rp[0] + b2_2to0[0]));   // pre-cast logit incl. sticky-encoded b2 (within 2^-(Fh+1) of the exact value; same rounding)
     }
 #endif
 
-    model_out[0] = (result_t)(Rp[0] + b2_2to0[0]);   // b2 added in the promoted type, ONE rounding
+    model_out[0] = (result_t)(Rp[0] + b2_2to0[0]);   // b2 (sticky-bit encoded) added narrow, ONE rounding
 }
