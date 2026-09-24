@@ -139,3 +139,18 @@ Both flags are load-bearing:
 
 Sanity check before believing any report: confirm the loader's printed BN1 binding line, and
 confirm the report's internal `Date` is newer than the header you just generated.
+
+## Lever 8 (BN1 past the aggregation + T0 ROM), 2026-09-24 — branch `bn1-fold`
+
+`cap_h2_qatf12_lr0p0025_e20_s1` weights (6/6/6, pmu-12, h=2, 20 particles, 5 ns).
+
+| file | build | part | DSP | FF | LUT | lat | notes |
+|---|---|---|---|---|---|---|---|
+| `csynth_monolith_lever8_widebias.rpt` | `f8e3f5d` (exact-float32 biases, ~41-bit adds) | xcvu13p-2 | 1069 | 57,724 | 375,654 | 16 | pre-fix estimate; 135k LUT on the relu-cast lines |
+| `csynth_monolith_lever8.rpt` + `_detail.rpt` | `01772ab`+ (sticky-bit biases) | xcvu13p-2 | 1069 | 53,475 | 324,453 | 16 | `_detail` has the per-line Expression table |
+| `vsynth_monolith_lever8.rpt` | `01772ab`+ | xcu250-2L | 1,067 | 18,338 | 72,467 | – | ground truth; vs pmu-12 monolith (July): LUT +4.9%, FF −26%, DSP −8.7% (different checkpoint) |
+
+Owed: `bn1-fold-baseline` (same checkpoint, old firmware/loader) csynth+vsynth for the like-for-like
+before; `split=1` csynth + `vivado_synth_split.tcl` for per-stage attribution; `bn1_rom=0` A/B.
+Vivado needs `export NPELICAN_PART=xcu250-figd2104-2L-e` (license) and the full flag set
+`"reset=1 csim=0 synth=1 cosim=0 validation=0 export=0 vsynth=1"`.
