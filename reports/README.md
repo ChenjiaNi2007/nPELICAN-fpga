@@ -125,7 +125,7 @@ the 2026-07-07 `csynth_monolith.rpt` / `csynth_split.rpt` pair.
 cd nPELICAN-fpga
 python model_loader.py --model ../PELICAN-nano/model/<prefix>_best.pt --quant \
     --repo ../PELICAN-nano --out firmware/weights/weights.h      # --out is REQUIRED
-vitis_hls -f build_prj.tcl "reset=1 csim=0 synth=1 vsynth=1"     # reset=1 is REQUIRED
+vitis_hls -f build_prj.tcl "reset=1 csim=0 synth=1 cosim=0 validation=0 export=0 vsynth=1"   # reset=1 REQUIRED; cosim/validation/export default ON and validation exits before vsynth when csim=0
 ```
 
 Both flags are load-bearing:
