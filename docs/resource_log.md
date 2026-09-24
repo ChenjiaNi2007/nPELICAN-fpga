@@ -44,6 +44,16 @@ timing met at est 4.372 ns).
 |---|---|---|---|---|---|---|
 | 16p pmu-12, BN1 on DSP (F=14) | 48,419 | 15,487 | 941 | 4,111 | 15 | slack −0.00 ⚠ |
 | 16p pmu-12, `--bn-frac-bits 12` | 49,894 | 15,416 | **769** | 4,446 | 15 | met (4.372 ns) |
+| **16p Lever 8** (`bn1-fold` c159355, cap_h2_qatf12_s1 weights, NPARTICLES=16, U250, 2026-09-24; `reports/particle_count/{c,v}synth_16p_lever8*.rpt`) | **41,763** (40,712 logic + 1,051 SRL) | **12,792** | **734** | **3,179** | 16 | csynth slack −0.08 |
+
+Lever 8 at 16 particles vs the best archived 16p builds (different checkpoint, epoch-34 pmu-12,
+pre-Lever-8 loader): vs the lowest-LUT build (BN1 on DSP, 48,419 / 15,487 / 941 / 4,111): LUT
+**−6,656 (−13.7%)**, FF −2,695 (−17.4%), DSP −207 (−22.0%), CARRY8 −932 (−22.7%); vs the
+lowest-DSP build (`--bn-frac-bits 12`, 49,894 / 15,416 / 769 / 4,446): LUT −8,131 (−16.3%),
+FF −2,624 (−17.0%), DSP −35 (−4.6%), CARRY8 −1,267 (−28.5%). Lever 8 is the new best 16p point on
+every axis at once (previously LUT and DSP traded against each other), at +1 latency cycle (16 vs 15).
+csynth for this build: 736 DSP / 37,591 FF / 205,884 LUT (csynth/vsynth LUT ratio 4.9×). The 20p→16p
+scaling of Lever 8 itself: LUT −31.3%, FF −28.3%, DSP −31.1%, matching the (N+2)² law seen before.
 
 Δ = −172 DSP / +1,475 LUT / +335 CARRY8 → **8.6 LUT per DSP saved, the cheapest DSP lever
 measured** (width levers run 111–189). Latency did NOT drop to the 20p baseline's 13 —

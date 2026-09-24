@@ -153,7 +153,8 @@ confirm the report's internal `Date` is newer than the header you just generated
 | `csynth_monolith_lever8_final.rpt` + `_detail.rpt`, `vsynth_monolith_lever8_final.rpt` | `bn1-fold` c159355 (FINAL: bias in the MAC init) | xcu250-2L | 1,066 | 17,843 | **60,747** | 16 | vs baseline vsynth: LUT −17.9%, FF −14.8%, DSP +1.8% |
 | `vsynth_monolith_lever8.rpt` | `01772ab`+ | xcu250-2L | 1,067 | 18,338 | 72,467 | – | ground truth; vs pmu-12 monolith (July): LUT +4.9%, FF −26%, DSP −8.7% (different checkpoint) |
 
-Owed: `bn1-fold-baseline` (same checkpoint, old firmware/loader) csynth+vsynth for the like-for-like
-before; `split=1` csynth + `vivado_synth_split.tcl` for per-stage attribution; `bn1_rom=0` A/B.
+16-particle Lever 8 (c159355, U250): `particle_count/{csynth,vsynth}_16p_lever8*.rpt` = 734 DSP /
+12,792 FF / **41,763 LUT** / 16 cyc — best 16p point on record on every axis (was 48,419 LUT / 941 DSP
+or 49,894 / 769). Owed: `split=1` csynth + `vivado_synth_split.tcl` for per-stage attribution; `bn1_rom=0` A/B.
 Vivado needs `export NPELICAN_PART=xcu250-figd2104-2L-e` (license) and the full flag set
 `"reset=1 csim=0 synth=1 cosim=0 validation=0 export=0 vsynth=1"`.
