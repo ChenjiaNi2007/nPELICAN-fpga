@@ -950,7 +950,12 @@ Other wide spots csynth may price high (unchanged here): the 4 R-path products
 `(bn_t_gen<34,6>·A + β'·count)·norm_t<36,1>` (~85-bit intermediates, then a t0 cast) and the
 23 `bn1fold_t<27,1>` BN1-aggregate products; the 253 `bn1_t0_rom` lookups are 64:1 constant
 muxes in csynth's estimate but a single LUT6 per output bit post-synthesis (6-input function),
-so judge them from vsynth, not csynth.
+so judge them from vsynth, not csynth. **Bias in the MAC init (2026-09-24):** the sticky-encoded bias now
+lives in the accumulator init (`Tp = (i==j ? b1_diag_total : b1)·m_ij`, `Rp = b2`, then the MACs)
+and `mac2_t`/`mac0_t` carry the sticky bit (F = max(product_F, BIAS_F) = 11: `<16,5>`/`<18,7>`),
+so the sum is exact and the cast input identical to the separate-add form (gate byte-identical).
+The same-checkpoint csynth had priced the 968 separate post-MAC adds at ~35k LUT (relu-cast lines
+81.4k vs 46.4k in the baseline, which already initialised the MAC with the bias); csynth/vsynth owed.
 
 **A/B switch (2026-09-24):** `build_prj.tcl bn1_rom=0` (`-DNPELICAN_NO_BN1_ROM`, also accepted by
 `build_local.sh`) builds T0 from the arithmetic form `(t2_t)((dots*s + beta')*mask)` instead of the

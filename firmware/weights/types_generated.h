@@ -36,7 +36,8 @@ typedef ap_fixed<12, 11, AP_RND_CONV, AP_SAT> input_t;  // raw momenta; TRAINED 
 // ---- Float-trained biases / BatchNorm constants / normalization constants ----
 // These are NOT PyTorch quantization points: PyTorch applies them in float32.
 // bias_t_gen (b1, b1_diag, b1_diag_total, b2): STICKY-BIT rule. Every bias is
-// added to an exact MAC sum right before ONE AP_RND_CONV cast (relu_t / result_t).
+// the INIT value of an exact MAC accumulator (mac2_t / mac0_t, which carry the sticky
+// bit: F = BIAS_F), followed by ONE AP_RND_CONV cast (relu_t / result_t).
 // Let G = 2^-Fh, Fh = max(mac2_F, mac0_F, relu_F+1, out_F+1) = max(10, 7, 6, 5) = 10,
 // so the MAC sum is on G and every rounding tie of the target grid is on G. With
 // b = b_hi + b_lo, b_hi = floor_G(b), 0 <= b_lo < 2^-Fh, the emitted literal is
@@ -89,8 +90,9 @@ typedef ap_fixed<15, 18> accdot2_t;     // Σ_ij masked dots (I(dot)+H2), exact
 typedef ap_fixed<11, 14> accdotrow_t;   // Σ_i masked dots per column (I(dot)+H1), exact
 typedef ap_fixed<27, 1, AP_RND_CONV, AP_SAT> bn1fold_t;  // s/N̄, β'/N̄, s/N̄², β'/N̄²; |c|max=0.0139347 (I=1), F=26
 
-// ---- MAC temporaries: I = I(weight)+I(operand)+ceil(log2(#terms)), W = I+B ----
-typedef ap_fixed<15, 5> mac2_t;     // 2->2 dense: 6 w1*t2 products (biases added at the relu_t cast)
-typedef ap_fixed<14, 7> mac0_t;     // 2->0 dense: 4 w2*t0 products (b2 added at the result_t cast)
+// ---- MAC temporaries: I = I(weight)+I(operand)+ceil(log2(#terms)),
+//      F = max(product_F, BIAS_F): initialised with the sticky-bit bias, carry the sticky bit ----
+typedef ap_fixed<16, 5> mac2_t;     // 2->2 dense: init = sticky-encoded b1 / b1_diag_total, + 6 w1*t2 products (product F=10, F=11)
+typedef ap_fixed<18, 7> mac0_t;     // 2->0 dense: init = sticky-encoded b2, + 4 w2*t0 products (product F=7, F=11)
 
 #endif  // NPELICAN_TYPES_GENERATED_H_

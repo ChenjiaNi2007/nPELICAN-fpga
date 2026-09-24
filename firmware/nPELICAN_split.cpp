@@ -292,7 +292,7 @@ void np_agg2to2(
 }
 
 // Stage 4: basis ops T (INTERNAL — pure wiring) + "dense" 2->2 mix + ReLU +
-// act_layer quantization. MAC accumulates in mac2_t (exact product width), so
+// act_layer quantization. MAC accumulates in mac2_t (exact: product grid + sticky bias bit), so
 // the only rounding is the relu_t cast.
 void np_eq2to2(
     t2_t T0[NP_SYMSZ],
@@ -355,16 +355,19 @@ void np_eq2to2(
     #pragma HLS BIND_OP variable=Tp op=mul impl=dsp
 #endif
 
-    // MAC accumulators start at 0: mac2_t is the EXACT product-sum type (w1 x t2 grid).
-    // The biases (bias_t_gen, sticky-bit encoded: one bit finer than the MAC grid) are added
-    // in the final expression right before the relu_t cast.
+    // MAC accumulators start at the bias, masked exactly as before: b1·m_ij off the diagonal,
+    // (b1+b1_diag)·m_ii on it (the diagonal constant is the loader's b1_diag_total_2to2, a
+    // select between two constants, no extra add). The biases are STICKY-BIT encoded
+    // (types_generated.h: b_hi on 2^-Fh + one sticky LSB 2^-(Fh+1), Fh >= mac2_F and
+    // >= relu_F+1) and mac2_t carries that sticky bit (F = BIAS_F), so the sum stays exact
+    // and the relu_t cast below rounds exactly like the exact float32 bias would.
     for (unsigned int i = 0; i < NPARTICLES2; i++) {
     #pragma HLS unroll
       for (unsigned int j = 0; j < NPARTICLES2; j++) {
       #pragma HLS unroll
         for (unsigned int h = 0; h < NHIDDEN; h++) {
         #pragma HLS unroll
-          Tp[i][j][h] = 0;
+          Tp[i][j][h] = (i == j ? b1_diag_total_2to2[h] : b1_2to2[h]) * nobjmask[i][j];
           }
         }
       }
@@ -384,21 +387,16 @@ void np_eq2to2(
       }
     }
 
-    // + bias (masked exactly as before: b1·m_ij off the diagonal, (b1+b1_diag)·m_ii on it —
-    // the diagonal constant is the loader's b1_diag_total_2to2, a select between two
-    // constants, no extra add), quantize onto the act_layer grid (relu_t, AP_RND_CONV), then
-    // ReLU. Q is monotone with Q(0)=0, so max(0, Q(x)) == Q(max(0, x)): identical to
-    // ReLU-then-quantize. The biases are STICKY-BIT encoded (types_generated.h: b_hi on
-    // 2^-Fh + one sticky LSB 2^-(Fh+1), Fh >= mac2_F and >= relu_F+1), so this add is
-    // narrow yet rounds exactly like the exact float32 bias would.
+    // Quantize (bias already in the accumulator) onto the act_layer grid (relu_t,
+    // AP_RND_CONV), then ReLU. Q is monotone with Q(0)=0, so max(0, Q(x)) == Q(max(0, x)):
+    // identical to ReLU-then-quantize.
     for (unsigned int i = 0; i < NPARTICLES2; i++) {
     #pragma HLS unroll
       for (unsigned int j = 0; j < NPARTICLES2; j++) {
       #pragma HLS unroll
         for (unsigned int h = 0; h < NHIDDEN; h++) {
         #pragma HLS unroll
-          relu_t q = (relu_t)(Tp[i][j][h]
-                              + (i == j ? b1_diag_total_2to2[h] : b1_2to2[h])*nobjmask[i][j]);
+          relu_t q = (relu_t)Tp[i][j][h];
           if (q < 0) q = 0;
           Tp_q[i][j][h] = q;
         }
@@ -474,7 +472,7 @@ void np_agg2to0(
     }
 }
 
-// Stage 6: final 2->0 dense MAC in mac0_t (exact product width). Rp is passed
+// Stage 6: final 2->0 dense MAC in mac0_t (exact: product grid + sticky bias bit). Rp is passed
 // out (not just model_out) so the top's csim stage dump can print it; the one
 // output_quant rounding (result_t cast) happens in the top, as in the monolith.
 void np_out2to0(
@@ -492,11 +490,11 @@ void np_out2to0(
     #pragma HLS ARRAY_PARTITION variable=w2_2to0 complete dim=0
     #pragma HLS ARRAY_PARTITION variable=b2_2to0 complete dim=0
 
-    // accumulator starts at 0 (mac0_t = exact product-sum type); the sticky-bit-encoded
-    // bias b2 is added right before the result_t cast.
+    // accumulator starts at the sticky-bit-encoded bias b2 (mac0_t carries the sticky bit,
+    // F = BIAS_F, so the sum is exact); ONE rounding at the result_t cast.
     for (unsigned int o = 0; o < NOUT; o++) {
     #pragma HLS unroll
-      Rp[o] = 0;
+      Rp[o] = b2_2to0[o];
     }
 
     // 2->0 weights (frozen element order w2_2to0[h*2+a])
@@ -690,9 +688,9 @@ void nPELICAN(
                 (double)R[1][0], (double)R[1][1]);
 
         // Rp: 1 value (output_quant grid; exact)
-        fprintf(fp, "Rp: %.17g\n", (double)(Rp[0] + b2_2to0[0]));   // pre-cast logit incl. sticky-encoded b2 (within 2^-(Fh+1) of the exact value; same rounding)
+        fprintf(fp, "Rp: %.17g\n", (double)Rp[0]);   // pre-cast logit incl. sticky-encoded b2 (accumulator init) (within 2^-(Fh+1) of the exact value; same rounding)
     }
 #endif
 
-    model_out[0] = (result_t)(Rp[0] + b2_2to0[0]);   // b2 (sticky-bit encoded) added narrow, ONE rounding
+    model_out[0] = (result_t)Rp[0];   // b2 (sticky-bit encoded) is the accumulator init; ONE rounding
 }

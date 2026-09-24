@@ -913,15 +913,15 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     # I = I(weight)+I(operand)+ceil(log2(#terms)) gives integer headroom for the sum.
     w1_F, t2_F = w1_W - w1_I, t2_W - t2_I
     w2_F, t0_F = w2_W - w2_I, t0_W - t0_I
-    # Biases are NOT accumulated here any more: the firmware adds them in the final
-    # expression right before the relu_t / result_t cast (promoted, exact), so these
-    # stay exact PRODUCT-SUM types on the w*operand grid.
+    # The accumulators are INITIALISED with the sticky-bit-encoded bias (below), so their
+    # fractional width is max(product_F, BIAS_F): the products are exact on the w*operand
+    # grid and the bias carries one sticky bit below it (BIAS_F = Fh+1 > product_F), so the
+    # running sum is exact and the final relu_t / result_t cast sees exactly
+    # v' = sum + b_hi + sticky*2^-BIAS_F -- no separate post-MAC bias add.
     mac2_terms = 6                    # 6 products w1*t2
     mac0_terms = 2 * NHIDDEN          # 2*NHIDDEN products w2*t0
     mac2_I = w1_I + t2_I + math.ceil(math.log2(mac2_terms))
-    mac2_W = mac2_I + (w1_F + t2_F)
     mac0_I = w2_I + t0_I + math.ceil(math.log2(mac0_terms))
-    mac0_W = mac0_I + (w2_F + t0_F)
 
     # --- bias_t_gen: STICKY-BIT encoding (Lever 8 follow-up) ---
     # Q(Tp + b) onto the relu grid (and Q(Rp + b2) onto the out grid) depends on b only
@@ -936,6 +936,16 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     assert BIAS_FH >= relu_F + 1 and BIAS_FH >= out_F + 1, 'sticky grid must hold every tie point'
     BIAS_F = BIAS_FH + 1
     BIAS_W = BIAS_I + BIAS_F
+    # MAC accumulators carry the sticky bit (bias lives in the accumulator init).
+    mac2_acc_F = max(mac2_F, BIAS_F)
+    mac0_acc_F = max(mac0_F, BIAS_F)
+    mac2_W = mac2_I + mac2_acc_F
+    mac0_W = mac0_I + mac0_acc_F
+    # Headroom: |sum of products| <= #terms * 2^(I_w+I_x-2) <= 2^(mac_I-2), so an init
+    # bias with |b| <= 2^(BIAS_I-1) keeps the (wrapping) accumulator in range iff
+    # BIAS_I <= mac_I - 1.
+    assert BIAS_I <= mac2_I - 1 and BIAS_I <= mac0_I - 1, \
+        f'bias init could overflow the MAC accumulator (BIAS_I={BIAS_I}, mac2_I={mac2_I}, mac0_I={mac0_I})'
     _quant_info['bias_Fh'] = BIAS_FH
     _quant_info['bias_I'] = BIAS_I
 
@@ -1050,7 +1060,8 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     L.append('// ---- Float-trained biases / BatchNorm constants / normalization constants ----')
     L.append('// These are NOT PyTorch quantization points: PyTorch applies them in float32.')
     L.append('// bias_t_gen (b1, b1_diag, b1_diag_total, b2): STICKY-BIT rule. Every bias is')
-    L.append('// added to an exact MAC sum right before ONE AP_RND_CONV cast (relu_t / result_t).')
+    L.append('// the INIT value of an exact MAC accumulator (mac2_t / mac0_t, which carry the sticky')
+    L.append('// bit: F = BIAS_F), followed by ONE AP_RND_CONV cast (relu_t / result_t).')
     L.append(f'// Let G = 2^-Fh, Fh = max(mac2_F, mac0_F, relu_F+1, out_F+1) = max({mac2_F}, {mac0_F}, {relu_F + 1}, {out_F + 1}) = {BIAS_FH},')
     L.append('// so the MAC sum is on G and every rounding tie of the target grid is on G. With')
     L.append('// b = b_hi + b_lo, b_hi = floor_G(b), 0 <= b_lo < 2^-Fh, the emitted literal is')
@@ -1131,9 +1142,10 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     L.append(f'typedef ap_fixed<{FOLD_W}, {FOLD_I}, AP_RND_CONV, AP_SAT> bn1fold_t;'
              f'  // s/N̄, β\'/N̄, s/N̄², β\'/N̄²; |c|max={fold_max:.6g} (I={FOLD_I}), F={FOLD_F}')
     L.append('')
-    L.append('// ---- MAC temporaries: I = I(weight)+I(operand)+ceil(log2(#terms)), W = I+B ----')
-    L.append(f'typedef ap_fixed<{mac2_W}, {mac2_I}> mac2_t;     // 2->2 dense: {mac2_terms} w1*t2 products (biases added at the relu_t cast)')
-    L.append(f'typedef ap_fixed<{mac0_W}, {mac0_I}> mac0_t;     // 2->0 dense: {mac0_terms} w2*t0 products (b2 added at the result_t cast)')
+    L.append('// ---- MAC temporaries: I = I(weight)+I(operand)+ceil(log2(#terms)),')
+    L.append('//      F = max(product_F, BIAS_F): initialised with the sticky-bit bias, carry the sticky bit ----')
+    L.append(f'typedef ap_fixed<{mac2_W}, {mac2_I}> mac2_t;     // 2->2 dense: init = sticky-encoded b1 / b1_diag_total, + {mac2_terms} w1*t2 products (product F={mac2_F}, F={mac2_acc_F})')
+    L.append(f'typedef ap_fixed<{mac0_W}, {mac0_I}> mac0_t;     // 2->0 dense: init = sticky-encoded b2, + {mac0_terms} w2*t0 products (product F={mac0_F}, F={mac0_acc_F})')
     L.append('')
     L.append('#endif  // NPELICAN_TYPES_GENERATED_H_')
     L.append('')
