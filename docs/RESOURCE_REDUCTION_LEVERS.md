@@ -952,6 +952,13 @@ Other wide spots csynth may price high (unchanged here): the 4 R-path products
 muxes in csynth's estimate but a single LUT6 per output bit post-synthesis (6-input function),
 so judge them from vsynth, not csynth.
 
+**A/B switch (2026-09-24):** `build_prj.tcl bn1_rom=0` (`-DNPELICAN_NO_BN1_ROM`, also accepted by
+`build_local.sh`) builds T0 from the arithmetic form `(t2_t)((dots*s + beta')*mask)` instead of the
+loader ROM; the raw-dot aggregation is unchanged. Gated locally: 200/200 exact, monolith/split
+byte-identical and identical to the ROM build. Use it if vsynth prices the 253 ROM lookups above
+the 253 constant multiplies (csynth estimates them at 273 vs ~150 LUT each; Vivado should collapse
+the ROM to ~6 LUT6 per lookup, so decide on vsynth, not csynth).
+
 ## Not reducible / dead ends (don't re-investigate)
 - **Narrowing the dot multiplier operands to save DSP** — 3 of the 4 products per pair
   are `mac_mulsub` and stay on DSP48 at ANY operand width, because the DSP is bound for
