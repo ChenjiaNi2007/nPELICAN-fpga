@@ -5,7 +5,7 @@
 
 // Lever 8: T0 from the loader-generated BN1 ROM when weights.h provides one (dot_t
 // narrow enough) — never in the float-reference build (dots are doubles there).
-#if defined(NPELICAN_BN1_ROM) && !defined(NPELICAN_FLOAT_BUILD)
+#if defined(NPELICAN_BN1_ROM) && !defined(NPELICAN_FLOAT_BUILD) && !defined(NPELICAN_NO_BN1_ROM)
 #define NP_USE_BN1_ROM 1
 #endif
 

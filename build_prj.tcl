@@ -14,6 +14,7 @@ array set opt {
     split_only 0
     const_beams 0
     mac_dsp    0
+    bn1_rom    1
     period     0
 }
 
@@ -225,6 +226,10 @@ if {$opt(period) != 0} {
 set fw_cflags "-std=c++0x"
 if {$opt(const_beams)} { append fw_cflags " -DNPELICAN_CONST_BEAMS" }
 if {$opt(mac_dsp)}     { append fw_cflags " -DNPELICAN_MAC_DSP" }
+# bn1_rom=0 -> -DNPELICAN_NO_BN1_ROM (Lever 8 A/B): T0 from the arithmetic form
+#   (t2_t)((dots*s + beta')*mask) instead of the loader-generated ROM; the raw-dot
+#   aggregation path is unchanged. Bit-exact either way (both gate 200/200).
+if {!$opt(bn1_rom)}    { append fw_cflags " -DNPELICAN_NO_BN1_ROM" }
 if {$opt(split) == 2 && $split_only_stage eq ""} { append fw_cflags " -DNPELICAN_SPLIT_TRI" }
 if {$split_only_stage ne ""} {
     append fw_cflags " -DNPELICAN_SPLIT_ONLY_[string toupper $split_only_stage]"
