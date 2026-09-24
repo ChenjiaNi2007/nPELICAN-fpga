@@ -149,6 +149,7 @@ confirm the report's internal `Date` is newer than the header you just generated
 | `csynth_monolith_lever8_widebias.rpt` | `f8e3f5d` (exact-float32 biases, ~41-bit adds) | xcvu13p-2 | 1069 | 57,724 | 375,654 | 16 | pre-fix estimate; 135k LUT on the relu-cast lines |
 | `csynth_monolith_lever8.rpt` + `_detail.rpt` | `01772ab`+ (sticky-bit biases) | xcvu13p-2 | 1069 | 53,475 | 324,453 | 16 | `_detail` has the per-line Expression table |
 | `csynth_monolith_lever8_baseline.rpt` + `_detail.rpt` | `bn1-fold-baseline` 7c31bb8 (old firmware + old loader, same ckpt) | xcvu13p-2 | 1052 | 50,694 | 263,753 | 14 | the like-for-like BEFORE (csynth); its vsynth is owed |
+| `vsynth_monolith_lever8_baseline.rpt` | `bn1-fold-baseline` 7c31bb8 | xcu250-2L | 1,047 | 20,941 | 74,034 | – | the like-for-like BEFORE in Vivado; Lever 8 = LUT −2.1%, FF −12.4%, DSP +1.9% |
 | `vsynth_monolith_lever8.rpt` | `01772ab`+ | xcu250-2L | 1,067 | 18,338 | 72,467 | – | ground truth; vs pmu-12 monolith (July): LUT +4.9%, FF −26%, DSP −8.7% (different checkpoint) |
 
 Owed: `bn1-fold-baseline` (same checkpoint, old firmware/loader) csynth+vsynth for the like-for-like
