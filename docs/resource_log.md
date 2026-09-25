@@ -33,6 +33,31 @@ commits first (see `RESOURCE_REDUCTION_LEVERS.md` Lever 8 ⚠1/⚠2).
 | **Lever 8: sticky bias moved into the MAC init (mac2_t/mac0_t F = BIAS_F)** | `bn1-fold` | same; `mac2_t <15,5>→<16,5>`, `mac0_t <14,7>→<18,7>` (F = BIAS_F = 11) | 300,618 (csynth) | 52,995 (csynth) | 1068 (csynth) | 16 | 1 | slack −0.08 | **200/200, 0** | **200/200, 0** | Accumulators start at the sticky-encoded bias (`(i==j ? b1_diag_total : b1)·m_ij`, `Rp = b2`) and carry the sticky bit, so the 968 separate 17-bit relu-cast adds and the logit add are gone; the `(relu_t)`/`(result_t)` casts see the identical value by construction. monolith / split / split=2 / `bn1_rom=0` byte-identical; `golden_fw_results.log` and `fw_stage_dump.txt` unchanged; weights.h unchanged. **csynth/vsynth owed** (expect the relu-cast lines back toward the baseline's 46.4k LUT in csynth). |
 | **Lever 8 FINAL — vsynth** (`bn1-fold` c159355: ROM T0 + raw-dot sums + sticky bias in the MAC init; Vivado 2023.2 `synth_design`, xcu250-figd2104-2L-e; `reports/{csynth,vsynth}_monolith_lever8_final*.rpt`, 2026-09-24) | `bn1-fold` | `mac2_t <16,5>`, `mac0_t <18,7>` | **60,747** (59,190 logic + 1,557 SRL) | **17,843** | **1,066** | 16 | 1 | csynth slack −0.08 | **200/200, 0** | **200/200, 0** | CARRY8 4,493. **vs same-checkpoint baseline vsynth (74,034 / 20,941 / 1,047 / CARRY8 5,655): LUT −13,287 (−17.9%), FF −3,098 (−14.8%), CARRY8 −1,162 (−20.5%), DSP +19 (+1.8%), latency +2.** vs the sticky-add build (72,467): moving the bias into the accumulator init saved 11,720 LUT in the netlist (the 968 separate adds + their rounding logic). csynth for this build: 300,618 LUT / 52,995 FF / 1068 DSP (csynth/vsynth ratio 4.9× — csynth remains useless for LUT on this design). Lowest-LUT 20-particle build on record (previous best: pmu-12 monolith 69,112). |
 | **Lever 9 — Winograd dot** (`bn1-fold` bce5b20, `winograd=1`, on top of Lever 8 final; cap_h2_qatf12_s1 weights, 20p, xcu250, 5 ns; `reports/{csynth,vsynth}_monolith_lever9*.rpt`, 2026-09-25) | `bn1-fold` | same + `dotxi_t <25,23>` | **72,729** (71,198 logic + 1,531 SRL) | **17,485** | **626** | 15 | 1 | csynth slack −0.08 | 200/200, 0 | 200/200, 0 | CARRY8 6,269. **vs Lever 8 final (60,747 / 17,843 / 1,066 / 4,493): DSP −440 (−41.3%), LUT +11,982 (+19.7%), FF −358, CARRY8 +1,776, latency 16 → 15.** Rate 27 LUT per DSP saved — 3-4× better than every width lever (90-111) but still a LUT-for-DSP trade. **vs the pre-Lever-8 same-checkpoint baseline (74,034 / 20,941 / 1,047): Levers 8+9 together = LUT −1.8%, FF −16.5%, DSP −40.2%.** csynth: 606 DSP / 52,246 FF / 325,555 LUT (DSP 550 dot + 56 other, exactly the 2×253+2×22 count). |
+| **Lever 9 + const beams** (`bn1-fold` bce5b20, `winograd=1 const_beams=1` = deployment config, on Lever 8 final; 20p, xcu250; `reports/{csynth,vsynth}_monolith_lever9_constbeams*.rpt`, 2026-09-25) | `bn1-fold` | same | **69,742** (68,223 logic + 1,519 SRL) | **17,636** | **534** | 15 | 1 | csynth slack −0.08 | 200/200, 0 (local, const-beams build) | 200/200, 0 | CARRY8 6,036. Beam pairs keep `dot4` (fold to adds), particle pairs Winograd: csynth 516 DSP = 2×210 + 2×20 + 56. **vs pre-Lever-8 baseline (74,034 / 20,941 / 1,047 / 5,655): LUT −5.8%, FF −15.8%, DSP −49.0%, CARRY8 +6.7%, latency +1.** vs Lever 9 without const beams: −92 DSP, −3.0k LUT. |
+
+
+### Summary — BatchNorm fold and Winograd dot, netlist numbers (Vivado 2023.2 synth_design, xcu250-2L = VU13P silicon)
+
+20 particles, same checkpoint (`cap_h2_qatf12_lr0p0025_e20_s1`) for every row:
+
+| build | LUT | FF | CARRY8 | DSP | latency | gate |
+|---|---|---|---|---|---|---|
+| pre-Lever-8 baseline (`bn1-fold-baseline`) | 74,034 | 20,941 | 5,655 | 1,047 | 14 | 140/200 |
+| Lever 8 final (BN1 fold + T0 ROM + sticky bias in MAC init) | **60,747** | 17,843 | **4,493** | 1,066 | 16 | 200/200 |
+| Lever 8 + 9 (`winograd=1`) | 72,729 | **17,485** | 6,269 | 626 | 15 | 200/200 |
+| Lever 8 + 9 + const beams (`winograd=1 const_beams=1`, deployment) | 69,742 | 17,636 | 6,036 | **534** | 15 | 200/200 |
+
+16 particles (baseline rows are the archived epoch-34 pmu-12 checkpoint, pre-Lever-8 loader; Lever rows are `cap_h2_qatf12_s1`):
+
+| build | LUT | FF | CARRY8 | DSP | latency |
+|---|---|---|---|---|---|
+| best archived, lowest LUT (BN1 on DSP) | 48,419 | 15,487 | 4,111 | 941 | 15 |
+| best archived, lowest DSP (`--bn-frac-bits 12`) | 49,894 | 15,416 | 4,446 | 769 | 15 |
+| Lever 8 final | **41,763** | 12,792 | **3,179** | 734 | 16 |
+| Lever 8 + 9 + const beams | 47,346 | **12,662** | 4,108 | **370** | 15 |
+
+Reading: Lever 8 is the LUT/FF minimum; adding Lever 9 (+ const beams) converts ~9-13k LUT into a further −50% DSP
+at unchanged FF. Both are bit-exact vs PyTorch. Pick by budget: `winograd=0` for LUT, `winograd=1 const_beams=1` for DSP.
 
 ### 2026-08-25 — BN1 constant evicted to fabric (`--bn-frac-bits 12`), 16 particles
 
@@ -46,6 +71,7 @@ timing met at est 4.372 ns).
 | 16p pmu-12, BN1 on DSP (F=14) | 48,419 | 15,487 | 941 | 4,111 | 15 | slack −0.00 ⚠ |
 | 16p pmu-12, `--bn-frac-bits 12` | 49,894 | 15,416 | **769** | 4,446 | 15 | met (4.372 ns) |
 | **16p Lever 8** (`bn1-fold` c159355, cap_h2_qatf12_s1 weights, NPARTICLES=16, U250, 2026-09-24; `reports/particle_count/{c,v}synth_16p_lever8*.rpt`) | **41,763** (40,712 logic + 1,051 SRL) | **12,792** | **734** | **3,179** | 16 | csynth slack −0.08 |
+| **16p Lever 8 + 9 + const beams** (`bn1-fold` bce5b20, `winograd=1 const_beams=1`, NPARTICLES=16, U250, 2026-09-25; `reports/particle_count/{c,v}synth_16p_lever9_constbeams*.rpt`) | **47,346** (46,337 logic + 1,009 SRL) | **12,662** | **370** | **4,108** | 15 | csynth slack −0.08 |
 
 Lever 8 at 16 particles vs the best archived 16p builds (different checkpoint, epoch-34 pmu-12,
 pre-Lever-8 loader): vs the lowest-LUT build (BN1 on DSP, 48,419 / 15,487 / 941 / 4,111): LUT

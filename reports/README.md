@@ -152,6 +152,8 @@ confirm the report's internal `Date` is newer than the header you just generated
 | `vsynth_monolith_lever8_baseline.rpt` | `bn1-fold-baseline` 7c31bb8 | xcu250-2L | 1,047 | 20,941 | 74,034 | – | the like-for-like BEFORE in Vivado; Lever 8 = LUT −2.1%, FF −12.4%, DSP +1.9% |
 | `csynth_monolith_lever8_final.rpt` + `_detail.rpt`, `vsynth_monolith_lever8_final.rpt` | `bn1-fold` c159355 (FINAL: bias in the MAC init) | xcu250-2L | 1,066 | 17,843 | **60,747** | 16 | vs baseline vsynth: LUT −17.9%, FF −14.8%, DSP +1.8% |
 | `csynth_monolith_lever9.rpt` + `_detail.rpt`, `vsynth_monolith_lever9.rpt` | `bn1-fold` bce5b20 `winograd=1` (Lever 9 on Lever 8) | xcu250-2L | **626** | 17,485 | 72,729 | 15 | vs Lever 8 final: DSP −41%, LUT +20% (27 LUT/DSP); vs pre-Lever-8 baseline: DSP −40%, LUT −2%, FF −17% |
+| `{csynth,vsynth}_monolith_lever9_constbeams*.rpt` | `bn1-fold` bce5b20 `winograd=1 const_beams=1` (deployment config) | xcu250-2L | **534** | 17,636 | 69,742 | 15 | vs pre-Lever-8 baseline: DSP −49%, LUT −6%, FF −16% |
+| `particle_count/{csynth,vsynth}_16p_lever9_constbeams*.rpt` | same at 16 particles | xcu250-2L | **370** | 12,662 | 47,346 | 15 | vs best archived 16p: DSP −52% (vs 769) / −61% (vs 941), LUT −2%/−5% |
 | `vsynth_monolith_lever8.rpt` | `01772ab`+ | xcu250-2L | 1,067 | 18,338 | 72,467 | – | ground truth; vs pmu-12 monolith (July): LUT +4.9%, FF −26%, DSP −8.7% (different checkpoint) |
 
 16-particle Lever 8 (c159355, U250): `particle_count/{csynth,vsynth}_16p_lever8*.rpt` = 734 DSP /
