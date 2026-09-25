@@ -151,6 +151,7 @@ confirm the report's internal `Date` is newer than the header you just generated
 | `csynth_monolith_lever8_baseline.rpt` + `_detail.rpt` | `bn1-fold-baseline` 7c31bb8 (old firmware + old loader, same ckpt) | xcvu13p-2 | 1052 | 50,694 | 263,753 | 14 | the like-for-like BEFORE (csynth); its vsynth is owed |
 | `vsynth_monolith_lever8_baseline.rpt` | `bn1-fold-baseline` 7c31bb8 | xcu250-2L | 1,047 | 20,941 | 74,034 | – | the like-for-like BEFORE in Vivado; Lever 8 = LUT −2.1%, FF −12.4%, DSP +1.9% |
 | `csynth_monolith_lever8_final.rpt` + `_detail.rpt`, `vsynth_monolith_lever8_final.rpt` | `bn1-fold` c159355 (FINAL: bias in the MAC init) | xcu250-2L | 1,066 | 17,843 | **60,747** | 16 | vs baseline vsynth: LUT −17.9%, FF −14.8%, DSP +1.8% |
+| `csynth_monolith_lever9.rpt` + `_detail.rpt`, `vsynth_monolith_lever9.rpt` | `bn1-fold` bce5b20 `winograd=1` (Lever 9 on Lever 8) | xcu250-2L | **626** | 17,485 | 72,729 | 15 | vs Lever 8 final: DSP −41%, LUT +20% (27 LUT/DSP); vs pre-Lever-8 baseline: DSP −40%, LUT −2%, FF −17% |
 | `vsynth_monolith_lever8.rpt` | `01772ab`+ | xcu250-2L | 1,067 | 18,338 | 72,467 | – | ground truth; vs pmu-12 monolith (July): LUT +4.9%, FF −26%, DSP −8.7% (different checkpoint) |
 
 16-particle Lever 8 (c159355, U250): `particle_count/{csynth,vsynth}_16p_lever8*.rpt` = 734 DSP /
