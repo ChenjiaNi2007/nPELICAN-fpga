@@ -156,5 +156,6 @@ confirm the report's internal `Date` is newer than the header you just generated
 16-particle Lever 8 (c159355, U250): `particle_count/{csynth,vsynth}_16p_lever8*.rpt` = 734 DSP /
 12,792 FF / **41,763 LUT** / 16 cyc — best 16p point on record on every axis (was 48,419 LUT / 941 DSP
 or 49,894 / 769). Owed: `split=1` csynth + `vivado_synth_split.tcl` for per-stage attribution; `bn1_rom=0` A/B.
+Owed (Lever 9, Winograd dot): `winograd=1` csynth + vsynth on the same weights (expect dot DSP 1,012 → 550; read the per-pair adder LUT), plus `winograd=1 const_beams=1`.
 Vivado needs `export NPELICAN_PART=xcu250-figd2104-2L-e` (license) and the full flag set
 `"reset=1 csim=0 synth=1 cosim=0 validation=0 export=0 vsynth=1"`.

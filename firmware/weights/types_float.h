@@ -20,6 +20,7 @@
 #define NPELICAN_INPUT_T_GENERATED 1
 #define NPELICAN_RESULT_T_GENERATED 1
 #define NPELICAN_LEGACY_WEIGHT_TYPES 1
+#define NPELICAN_DOTXI_T_GENERATED 1
 
 // ---- Quantization-point + IO interface types ----
 typedef double dot_t;       // input_quant (d_ij)
@@ -30,6 +31,7 @@ typedef double out_t;       // output_quant
 typedef double w1_gen_t;    // 2->2 weights
 typedef double w2_gen_t;    // 2->0 weights
 typedef double input_t;     // raw momenta / dot4 operands
+typedef double dotxi_t;     // Lever 9 Winograd per-particle correction (xi/eta)
 typedef double result_t;    // final logit
 
 // ---- Float-trained constant types (biases / BN / normalization) ----

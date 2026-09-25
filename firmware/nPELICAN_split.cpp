@@ -117,6 +117,17 @@ void dot4(input_t p1[4], input_t p2[4], dot_t& dot) {
 dot = p1[0]*p2[0]-p1[1]*p2[1]-p1[2]*p2[2]-p1[3]*p2[3];
 }
 
+void dot4_winograd(input_t p1[4], input_t p2[4], dotxi_t xi_i, dotxi_t eta_j, dot_t& dot) {
+// Lever 9: Winograd inner-product form of the Minkowski dot (p1 = particle i,
+// p2 = particle j; E, px, py, pz). ONE expression so the whole right-hand side stays
+// in HLS's exact promoted type: input_t<W,I> +/- input_t -> <W+1,I+1>; each product
+// -> <2W+2,2I+2>; product sum -> <2W+3,2I+3>; minus dotxi_t<2W+1,2I+1> twice ->
+// <2W+5,2I+5>. Nothing is narrowed, so the value equals dot4's exact
+// E_iE_j - px_i px_j - py_i py_j - pz_i pz_j and the single (dot_t) cast
+// (AP_RND_CONV, AP_SAT) rounds it identically -> bit-identical dots.
+dot = (p1[0] - p2[1])*(p1[1] + p2[0]) + (p1[2] - p2[3])*(p1[3] - p2[2]) - xi_i - eta_j;
+}
+
 // Stage 1: momentum prep (masked particles + beam spurions) + symmetric dot4
 // front-end. Dominant DSP consumer (~NPARTICLES2²/2 multiplies).
 void np_dots(
@@ -175,6 +186,24 @@ void np_dots(
     np_bfp_encode_all(p1, p1m, p1e);
 #endif
 
+#ifdef NPELICAN_WINOGRAD_DOT
+    //Lever 9: per-particle Winograd corrections from the prepared (masked, beams
+    //included) p1. Each is a two-product sum, exact in dotxi_t = ap_fixed<2W+1,2I+1>.
+    //A padded particle has an all-zero p1 row -> xi = eta = 0, and its pair terms
+    //collapse to E_i*px_i + py_i*pz_i - xi[i] = 0, so its dots stay exactly 0. Beam
+    //rows are never masked; the identity is exact for ANY input_t values, so runtime
+    //beam dots are unchanged too. Under NPELICAN_CONST_BEAMS the beam pairs keep dot4
+    //(see the Dot loop) and the constant beam xi/eta are unused and pruned.
+    dotxi_t xi[NPARTICLES2], eta[NPARTICLES2];
+    #pragma HLS ARRAY_PARTITION variable=xi complete dim=0
+    #pragma HLS ARRAY_PARTITION variable=eta complete dim=0
+    DotXi: for (unsigned int i = 0; i < NPARTICLES2; i++) {
+      #pragma HLS unroll
+      xi[i]  = p1[i][0]*p1[i][1] + p1[i][2]*p1[i][3];
+      eta[i] = p1[i][2]*p1[i][3] - p1[i][0]*p1[i][1];
+    }
+#endif
+
     //dot4 is symmetric: compute only the upper triangle and mirror (pure wiring).
     //Under NPELICAN_SPLIT_TRI there is nothing to mirror: (j,i) IS element (i,j).
     for(unsigned int i = 0; i < NPARTICLES2; i++){
@@ -183,6 +212,19 @@ void np_dots(
         #pragma HLS unroll
 #ifdef NPELICAN_BLOCK_FP
         Dot: np_bfp_dot4(p1m[i], p1e[i], p1m[j], p1e[j], dots[NP_SYMIDX(i, j)]);
+#elif defined(NPELICAN_WINOGRAD_DOT)
+        Dot: {
+#ifdef NPELICAN_CONST_BEAMS
+        //Lever 9 + Lever 5: a beam-row pair (i < 2; upper triangle, so every beam
+        //pair has i < 2) keeps dot4, which folds to E_j -/+ pz_j with NO multiply.
+        //Winograd would NOT fold there: its pair products mix particle j's own
+        //components ((1-px_j)*E_j, pz_j*py_j), cancelled only via eta[j]. Same exact
+        //value either way, so bit-identical.
+        if (i < NPARTICLES2 - NPARTICLES) dot4(p1[i], p1[j], dots[NP_SYMIDX(i, j)]);
+        else
+#endif
+        dot4_winograd(p1[i], p1[j], xi[i], eta[j], dots[NP_SYMIDX(i, j)]);
+        }
 #else
         Dot: dot4(p1[i], p1[j], dots[NP_SYMIDX(i, j)]);
 #endif

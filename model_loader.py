@@ -1025,6 +1025,17 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     else:
         L.append(f'typedef ap_fixed<{INPUT_W}, {INPUT_I}, AP_RND_CONV, AP_SAT> input_t;'
                  f'  // raw momenta; |p|max={pmax:.1f} (I={INPUT_I}), F={INPUT_F} (dot_F={dot_F})')
+    if bfp is None:
+        # Lever 9 (-DNPELICAN_WINOGRAD_DOT): exact per-particle Winograd correction.
+        # xi = E*px + py*pz (eta = -E*px + py*pz) is a sum of two input_t products:
+        # <2W,2I> each, +1 bit for the sum -> <2W+1,2I+1> holds it EXACTLY (F = 2*INPUT_F,
+        # the product grid). Not emitted under block-FP (Lever 9 is a compile error there).
+        L.append('// ---- Lever 9 (-DNPELICAN_WINOGRAD_DOT): Winograd per-particle correction')
+        L.append('//      xi = E*px + py*pz, eta = -E*px + py*pz: sum of two input_t products,')
+        L.append('//      exact in ap_fixed<2W+1, 2I+1> of input_t<W,I>. Unused by the default dot4.')
+        L.append('#define NPELICAN_DOTXI_T_GENERATED 1')
+        L.append(f'typedef ap_fixed<{2*INPUT_W + 1}, {2*INPUT_I + 1}> dotxi_t;'
+                 f'  // exact xi/eta (input_t <{INPUT_W},{INPUT_I}>)')
     L.append('')
 
     if bfp is not None:

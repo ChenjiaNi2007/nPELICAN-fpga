@@ -15,6 +15,7 @@ array set opt {
     const_beams 0
     mac_dsp    0
     bn1_rom    1
+    winograd   0
     period     0
 }
 
@@ -230,6 +231,12 @@ if {$opt(mac_dsp)}     { append fw_cflags " -DNPELICAN_MAC_DSP" }
 #   (t2_t)((dots*s + beta')*mask) instead of the loader-generated ROM; the raw-dot
 #   aggregation path is unchanged. Bit-exact either way (both gate 200/200).
 if {!$opt(bn1_rom)}    { append fw_cflags " -DNPELICAN_NO_BN1_ROM" }
+# winograd=1 -> -DNPELICAN_WINOGRAD_DOT (Lever 9): Winograd inner-product dot,
+#   2 multiplies per pair + 2 per particle (550) instead of 4 per pair (1012).
+#   Exact -> bit-identical dots. Stacks with const_beams (beam pairs keep the
+#   folded dot4, particle pairs go Winograd: 420 + 40 = 460 vs 840 mults);
+#   #error under block-FP.
+if {$opt(winograd)}    { append fw_cflags " -DNPELICAN_WINOGRAD_DOT" }
 if {$opt(split) == 2 && $split_only_stage eq ""} { append fw_cflags " -DNPELICAN_SPLIT_TRI" }
 if {$split_only_stage ne ""} {
     append fw_cflags " -DNPELICAN_SPLIT_ONLY_[string toupper $split_only_stage]"

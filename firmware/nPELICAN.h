@@ -26,6 +26,14 @@
 #include "weights/types_generated.h"
 #endif
 
+// Lever 9 does NOT apply under Lever 7 block-FP: there the dot operands are per-particle
+// (mantissa, exponent) pairs, not uniform input_t momenta, so the Winograd identity would
+// need per-pair exponent alignment of every sum (E_i - px_j etc.), losing the exactness
+// and the saving. Refuse the combination rather than silently ignoring the flag.
+#if defined(NPELICAN_WINOGRAD_DOT) && defined(NPELICAN_BLOCK_FP)
+#error "NPELICAN_WINOGRAD_DOT (Lever 9) is incompatible with NPELICAN_BLOCK_FP (Lever 7 block-FP momenta); build without winograd=1"
+#endif
+
 #define NPARTICLES  20
 #define NPARTICLES2 22  //Max number of particles plus number of spurions
 #define NHIDDEN 2       //Number of parallel channels
@@ -83,6 +91,24 @@ static void lut_pslog_init(data_T table_out[N_TABLE])
 
 // dots carry the input_quant grid → dot_t (was an internal_t/input_t mismatch before).
 void dot4(input_t p1[4], input_t p2[4], dot_t& dot);
+
+// Lever 9 (-DNPELICAN_WINOGRAD_DOT; build_prj.tcl winograd=1): Winograd inner-product
+// form of the Minkowski dot, 2 multiplies per pair + 2 per particle instead of 4 per
+// pair (docs/RESOURCE_REDUCTION_LEVERS.md, Lever 9). With a_i=(E,px,py,pz)_i and
+// b_j=(E,-px,-py,-pz)_j:
+//   xi[i]  =  E_i*px_i + py_i*pz_i          (per particle, exact in dotxi_t)
+//   eta[j] = -E_j*px_j + py_j*pz_j          (per particle, exact in dotxi_t)
+//   d_ij   = (E_i-px_j)*(px_i+E_j) + (py_i-pz_j)*(pz_i-py_j) - xi[i] - eta[j]
+// Every intermediate is exact (HLS promoted types; nothing narrowed), so the single
+// (dot_t) cast sees the same value as dot4 -> bit-identical dots.
+// dotxi_t = ap_fixed<2W+1, 2I+1> of input_t<W,I>: holds a two-product sum exactly.
+// Under --quant it is GENERATED (types_generated.h, NPELICAN_DOTXI_T_GENERATED); this
+// fallback derives it from whatever input_t is in scope (the float-export hand
+// input_t <36,12> gives <73,25>). types_float.h aliases it to double.
+#ifndef NPELICAN_DOTXI_T_GENERATED
+typedef ap_fixed<2*input_t::width+1, 2*input_t::iwidth+1> dotxi_t;
+#endif
+void dot4_winograd(input_t p1[4], input_t p2[4], dotxi_t xi_i, dotxi_t eta_j, dot_t& dot);
 
 // Lever 7: per-particle block-FP encode + (m, e) dot4. Inert unless the exported
 // checkpoint was trained with --pmu-block-fp (types_generated.h defines

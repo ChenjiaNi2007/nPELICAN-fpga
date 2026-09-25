@@ -32,6 +32,11 @@ typedef ap_fixed<6, 3, AP_RND_CONV, AP_SAT> w2_gen_t;  // 2->0 weights (signed):
 //      Guard macro lets nPELICAN.h keep a hand fallback for the float path.
 #define NPELICAN_INPUT_T_GENERATED 1
 typedef ap_fixed<12, 11, AP_RND_CONV, AP_SAT> input_t;  // raw momenta; TRAINED pmu_quant grid (I=11, F=1); |p|max=1946.9
+// ---- Lever 9 (-DNPELICAN_WINOGRAD_DOT): Winograd per-particle correction
+//      xi = E*px + py*pz, eta = -E*px + py*pz: sum of two input_t products,
+//      exact in ap_fixed<2W+1, 2I+1> of input_t<W,I>. Unused by the default dot4.
+#define NPELICAN_DOTXI_T_GENERATED 1
+typedef ap_fixed<25, 23> dotxi_t;  // exact xi/eta (input_t <12,11>)
 
 // ---- Float-trained biases / BatchNorm constants / normalization constants ----
 // These are NOT PyTorch quantization points: PyTorch applies them in float32.
