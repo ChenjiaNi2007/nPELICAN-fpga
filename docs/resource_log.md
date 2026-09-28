@@ -70,6 +70,34 @@ headroom, so 24p/32p full sums (676/1156 pairs > 512) could wrap silently. Now `
 details: `docs/RESOURCE_REDUCTION_LEVERS.md`, "Particle-count scaling". Re-run 24p/32p with
 `--nparticles N` exports.
 
+### 2026-09-28 — Particle-count sweep, deployment config (Lever 8 + 9 + const beams)
+
+`bn1-fold` bce5b20, `winograd=1 const_beams=1`, `cap_h2_qatf12_lr0p0025_e20_s1` weights, xcu250-2L, 5 ns;
+N set by editing `NPARTICLES` (pre-5a4b9f9 flow). Reports: `reports/particle_count/{csynth,vsynth}_{N}p_lever9_constbeams*.rpt`.
+
+| N | LUT (vsynth) | FF | CARRY8 | DSP | latency | csynth slack | csynth DSP / FF / LUT |
+|---|---|---|---|---|---|---|---|
+| 8 | 15,143 | 5,218 | 1,348 | 138 | 13 | +0.02 | 127 / 13,450 / 70,834 |
+| 12 | 28,813 | 10,246 | 2,503 | 238 | 14 | −0.01 | 223 / 23,763 / 133,855 |
+| 16 | 47,346 | 12,662 | 4,108 | 370 | 15 | −0.08 | 356 / 34,323 / 217,214 |
+| 20 | 69,742 | 17,636 | 6,036 | 534 | 15 | −0.08 | 516 / 49,244 / 319,003 |
+| 24 | 96,442 | 23,660 | 8,468 | 730 | 15 | −0.08 | 708 / 67,518 / 441,289 |
+| 32 | **INVALID** 135,201 | 31,994 | 11,916 | 1,020 | 15 | −0.08 | 993 — see below |
+
+Fits in M = N + 2 (least squares over N = 8…24):
+- **DSP = M² + M + 28, exact (zero residual)** = N(N+1) Winograd pair products + 2N ξ/η + (N+2) row
+  normalizations + (N+2) small products + 28 fixed (BN2/normalize wide multiplies).
+- LUT ≈ 133.6·M² + 279·M − 1,083 (max residual 194); LUT per particle pair falls 421 → 322 from 8p to 24p.
+- FF ≈ 20.3·M² + 376·M (residual ≤ 1.1k); CARRY8 ≈ 12.8·M² (residual ≤ 28).
+- Predicted valid 32p: **162.8k LUT / 36.1k FF / 14.5k CARRY8 / 1,218 DSP.**
+
+**32p row is INVALID (pre-fix firmware):** `nobj_t`/`ncount` were `ap_uint<5>` (max 31), so NPARTICLES2 = 34
+wrapped and rows ≥ 31 could never be unmasked; HLS deleted their arithmetic. The inventory is a 29-particle
+design (870 pair products = 29·30, 58 ξ/η, 31 row multiplies) and the LUT fit at N = 29 gives 136k vs the
+measured 135,201. The loader also hard-coded 20 particles for the accumulator headroom (H1/H2), so ≥ 24p
+accumulators could overflow silently. Both fixed in 5a4b9f9 (`np_bits<>`-derived widths, `--nparticles N`,
+`build_prj.tcl nparticles=N`); 24p is resource-representative but unvalidated, 32p must be re-run.
+
 ### 2026-08-25 — BN1 constant evicted to fabric (`--bn-frac-bits 12`), 16 particles
 
 Same epoch-34 pmu-12 checkpoint and weights as the 2026-08-22 16p build; the ONLY change is
