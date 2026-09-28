@@ -17,6 +17,7 @@ array set opt {
     bn1_rom    1
     winograd   0
     period     0
+    nparticles 0
 }
 
 set tcldir [file dirname [info script]]
@@ -241,6 +242,20 @@ if {$opt(split) == 2 && $split_only_stage eq ""} { append fw_cflags " -DNPELICAN
 if {$split_only_stage ne ""} {
     append fw_cflags " -DNPELICAN_SPLIT_ONLY_[string toupper $split_only_stage]"
 }
+# nparticles=N -> -DNPARTICLES=N on BOTH the firmware and the testbench (they must agree).
+#   Optional cross-check for particle-count resource builds: the particle count normally
+#   comes from the export itself (model_loader.py --nparticles N writes NPELICAN_NPARTICLES
+#   into types_generated.h, which sets NPARTICLES). Passing nparticles=N as well makes
+#   nPELICAN.h #error if N exceeds the exported count (accumulator headroom too small;
+#   they wrap silently). N below the exported count is allowed (over-sized headroom).
+#   Default 0 = take NPARTICLES from the header. Use reset=1 when changing it, and csim=0
+#   for N > 20: the golden vectors hold 20 particles (the TB would read past each line).
+#   Recipe: docs/RESOURCE_REDUCTION_LEVERS.md, "Particle-count scaling".
+set tb_cflags "-std=c++0x"
+if {$opt(nparticles) != 0} {
+    append fw_cflags " -DNPARTICLES=$opt(nparticles)"
+    append tb_cflags " -DNPARTICLES=$opt(nparticles)"
+}
 
 if {$opt(reset)} {
     open_project -reset ${prj_dir}
@@ -249,7 +264,7 @@ if {$opt(reset)} {
 }
 set_top ${project_name}
 add_files ${src_file} -cflags ${fw_cflags}
-add_files -tb ${project_name}_tb.cpp -cflags "-std=c++0x"
+add_files -tb ${project_name}_tb.cpp -cflags ${tb_cflags}
 add_files -tb firmware/weights
 add_files -tb tb_data
 if {$opt(reset)} {

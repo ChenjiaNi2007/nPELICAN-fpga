@@ -45,7 +45,7 @@ int main(int argc, char **argv) {
 #ifdef RUN_EQUIVARIANCE
     // ---------------------------------------------------------------
     // Equivariance mode (equivariance/ harness): read momenta from
-    // tb_data/equiv_in_pmu.dat (one event/line, NPARTICLES*4 = 80 floats,
+    // tb_data/equiv_in_pmu.dat (one event/line, NPARTICLES*4 floats (80 at 20p),
     // beams added INSIDE the firmware exactly as in the golden path) and the
     // per-event RAW Nobj from tb_data/equiv_in_nobj.dat, run dot4+net, and
     // write the logit to tb_data/equiv_out_logits.dat (%.17g, one per line).
@@ -73,7 +73,7 @@ int main(int argc, char **argv) {
         int n_events = 0;
         std::string pmu_line, nobj_line, beams_line;
         while (std::getline(fepmu, pmu_line) && std::getline(fenobj, nobj_line)) {
-            // Parse NPARTICLES*4 = 80 floats from pmu_line
+            // Parse NPARTICLES*4 floats (80 at 20p) from pmu_line
             char *cstr = const_cast<char *>(pmu_line.c_str());
             char *current;
             std::vector<float> in;
@@ -82,8 +82,8 @@ int main(int argc, char **argv) {
                 in.push_back(atof(current));
                 current = strtok(NULL, " ");
             }
-            // golden_nobj.dat / *_nobj.dat hold the RAW constituent count (can exceed 31); the nobj_t
-            // port is ap_uint<5> and wraps at 32, so clamp here (firmware maps >=NPARTICLES to NPARTICLES2).
+            // golden_nobj.dat / *_nobj.dat hold the RAW constituent count (can exceed the port range); the nobj_t
+            // port is ap_uint<np_bits<NPARTICLES2>> (5 bits at 20p) and wraps, so clamp here (firmware maps >=NPARTICLES to NPARTICLES2).
             int nobj_val = std::min(std::stoi(nobj_line), NPARTICLES);
 
             input_t model_input[NPARTICLES*4];
@@ -142,7 +142,7 @@ int main(int argc, char **argv) {
                std::getline(fgnobj, nobj_line) &&
                std::getline(fglogits, logit_line)) {
 
-            // Parse NPARTICLES*4 = 80 floats from pmu_line
+            // Parse NPARTICLES*4 floats (80 at 20p) from pmu_line
             char *cstr = const_cast<char *>(pmu_line.c_str());
             char *current;
             std::vector<float> in;
@@ -153,8 +153,8 @@ int main(int argc, char **argv) {
             }
 
             // Parse nobj
-            // golden_nobj.dat / *_nobj.dat hold the RAW constituent count (can exceed 31); the nobj_t
-            // port is ap_uint<5> and wraps at 32, so clamp here (firmware maps >=NPARTICLES to NPARTICLES2).
+            // golden_nobj.dat / *_nobj.dat hold the RAW constituent count (can exceed the port range); the nobj_t
+            // port is ap_uint<np_bits<NPARTICLES2>> (5 bits at 20p) and wraps, so clamp here (firmware maps >=NPARTICLES to NPARTICLES2).
             int nobj_val = std::min(std::stoi(nobj_line), NPARTICLES);
 
             // Parse golden logit (double)
@@ -239,12 +239,12 @@ int main(int argc, char **argv) {
                 std::vector<float> in;
                 { char *c = const_cast<char*>(dpmu.c_str()); char *t = strtok(c, " ");
                   while (t) { in.push_back(atof(t)); t = strtok(NULL, " "); } }
-                // injected dots (484 values, row-major)
+                // injected dots (NPARTICLES2^2 values, 484 at 20p, row-major)
                 static dot_t dots_inj[NPARTICLES2*NPARTICLES2];
                 { char *c = const_cast<char*>(ddots.c_str()); char *t = strtok(c, " ");
                   int k = 0; while (t && k < NPARTICLES2*NPARTICLES2) { dots_inj[k++] = (dot_t)atof(t); t = strtok(NULL, " "); } }
-                // golden_nobj.dat / *_nobj.dat hold the RAW constituent count (can exceed 31); the nobj_t
-                // port is ap_uint<5> and wraps at 32, so clamp here (firmware maps >=NPARTICLES to NPARTICLES2).
+                // golden_nobj.dat / *_nobj.dat hold the RAW constituent count (can exceed the port range); the nobj_t
+                // port is ap_uint<np_bits<NPARTICLES2>> (5 bits at 20p) and wraps, so clamp here (firmware maps >=NPARTICLES to NPARTICLES2).
                 int nobj_val = std::min(std::stoi(dnobj), NPARTICLES);
                 double golden_logit = std::stod(dlogit);
 
@@ -296,8 +296,8 @@ int main(int argc, char **argv) {
                 in2.push_back(atof(current2));
                 current2 = strtok(NULL, " ");
             }
-            // golden_nobj.dat / *_nobj.dat hold the RAW constituent count (can exceed 31); the nobj_t
-            // port is ap_uint<5> and wraps at 32, so clamp here (firmware maps >=NPARTICLES to NPARTICLES2).
+            // golden_nobj.dat / *_nobj.dat hold the RAW constituent count (can exceed the port range); the nobj_t
+            // port is ap_uint<np_bits<NPARTICLES2>> (5 bits at 20p) and wraps, so clamp here (firmware maps >=NPARTICLES to NPARTICLES2).
             int nobj_val2 = std::min(std::stoi(nobj_line2), NPARTICLES);
 
             input_t model_input2[NPARTICLES*4];
@@ -389,8 +389,8 @@ int main(int argc, char **argv) {
             std::vector<int> vnobj;
             current = strtok(cstr, " ");
             while (current != NULL) {
-                // golden_nobj.dat / *_nobj.dat hold the RAW constituent count (can exceed 31); the nobj_t
-                // port is ap_uint<5> and wraps at 32, so clamp here (firmware maps >=NPARTICLES to NPARTICLES2).
+                // golden_nobj.dat / *_nobj.dat hold the RAW constituent count (can exceed the port range); the nobj_t
+                // port is ap_uint<np_bits<NPARTICLES2>> (5 bits at 20p) and wraps, so clamp here (firmware maps >=NPARTICLES to NPARTICLES2).
                 vnobj.push_back(std::min(std::stoi(current), NPARTICLES));
                 current = strtok(NULL, " ");
             }

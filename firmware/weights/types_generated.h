@@ -11,6 +11,7 @@
 #include "ap_int.h"
 
 #define NPELICAN_GENERATED_TYPES 1
+#define NPELICAN_NPARTICLES 20  // model_loader.py --nparticles; sizes H1=5/H2=9 below
 
 // ---- Quantization-point types: ap_fixed<B, B-k, AP_RND_CONV, AP_SAT> ----
 typedef ap_fixed<6, 9, AP_RND_CONV, AP_SAT> dot_t;  // input_quant (signed): scale=2^--3 (8.000000000e+00), bits=6, k=-3

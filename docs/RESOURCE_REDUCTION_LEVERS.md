@@ -84,6 +84,39 @@ Progress so far (all 6/6/6, 20p):
 Key empirical facts established:
 - **Particle count dominates and scales as (N+2)².** From the reports:
   12p→1794, 14p→2383, 20p→4677 DSP; ratios track `(N+2)²` (12p/20p=0.38 vs (14/22)²=0.41).
+
+  > **⚠ Particle-count scaling (fixed 2026-09-28, branch `bn1-fold`).** Before this fix three
+  > things did NOT follow `#define NPARTICLES`: `nobj_t` / `ncount` were a fixed `ap_uint<5>`
+  > (max 31) and `ncount2` a fixed `ap_uint<9>`, and `model_loader.py` hard-coded
+  > `NPARTICLES = 20` for the raw-sum accumulator headroom (H1 = ⌈log₂ NPARTICLES2⌉,
+  > H2 = ⌈log₂ NPARTICLES2²⌉ → `accdotrow_t`, `accdot2_t`, `accrelu_t`, `accrelurow_t`,
+  > `bn1fold_t` F). At 32 particles `nobj = NPARTICLES2 = 34` wrapped to 2 and `nobj < 32` was
+  > always true, so rows ≥ 32 could never be unmasked and HLS deleted their arithmetic
+  > (the 2026-09-28 32p csynth priced 29 particles' worth of multipliers): **that 32p build is
+  > INVALID**. At 24p (676 pairs > 512) the H2=9 full-sum accumulators could wrap on extreme
+  > events (no AP_SAT, silent). Builds at N ≤ 20 were unaffected (22 fits 5 bits; the
+  > 20p headroom over-covers 8–16p). Now: `nobj_t = ap_uint<np_bits<NPARTICLES2>::value>`,
+  > `npairs_t = ap_uint<np_bits<NPARTICLES2²>::value>` (`np_bits<N>` = bits to hold 0..N,
+  > a C++11 recursive template in `nPELICAN.h`: 5/9 bits at 20p, 6/11 at 32p, 4/7 at 8p), and
+  > the loader takes `--nparticles N` (default 20) and writes `#define NPELICAN_NPARTICLES N`
+  > into `types_generated.h`, which sets `NPARTICLES` in `nPELICAN.h` (fallback 20;
+  > `-DNPARTICLES=N` still overrides, and `nPELICAN.h` `#error`s if it exceeds the exported N).
+  > Headroom at 32p: H1=6, H2=11 (`accdot2_t <17,20>`, `accdotrow_t <12,15>`,
+  > `bn1fold_t <29,1>` on the `cap_h2_qatf12_s1` checkpoint).
+  >
+  > **Recipe for an N-particle resource build** (weights.h is N-independent; only
+  > `types_generated.h` changes):
+  > ```bash
+  > python model_loader.py --model ../PELICAN-nano/model/<ckpt>_best.pt --quant \
+  >     --repo ../PELICAN-nano --nparticles N          # prints H1/H2 for N
+  > vitis_hls -f build_prj.tcl "reset=1 csim=0 synth=1 cosim=0 validation=0 export=0 vsynth=1 nparticles=N"
+  > ```
+  > `nparticles=N` (optional; adds `-DNPARTICLES=N` to firmware + TB) is a cross-check that the
+  > export matches. Keep `csim=0` for N > 20: the golden vectors hold 20 particles and the TB
+  > would read past each line. Re-export at the default (no `--nparticles`) before the
+  > 20-particle gate; do not commit N≠20 headers. csim-only observables
+  > `npelican_last_ncount/ncount2` (firmware globals, `#ifndef __SYNTHESIS__`) let a C test
+  > confirm all NPARTICLES2 rows activate (verified locally at N = 8, 20, 32 for every nobj code).
 - **Bit-width flags barely touch DSP**: 6/6/6 → 6/6/**8** at 20p moved DSP 4677→4694 (noise).
   The DSPs live in the dot products, which the flags don't size.
 - **HLS CSE already exploits dot symmetry.** `840 = 210·4` (210 = upper triangle of

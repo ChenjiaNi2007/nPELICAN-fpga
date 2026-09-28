@@ -12,9 +12,13 @@
 #ifndef __SYNTHESIS__
 #include <cstdio>
 FILE* npelican_dump_fp = nullptr;
+// csim-only observables of the remapped particle counts (ncount/ncount2), for the
+// particle-count scaling check (nobj_t must hold NPARTICLES2 without wrapping at any
+// NPARTICLES). Written by every call; zero synthesis impact.
+unsigned npelican_last_ncount = 0, npelican_last_ncount2 = 0;
 // DOTS-LEVEL test hook (csim only, zero synthesis impact): when non-null, the dot4
-// front-end output is overwritten with these 484 externally-supplied dots (row-major
-// i*22+j) so the testbench can feed PyTorch's quantized d_ij directly and isolate the
+// front-end output is overwritten with these NPARTICLES2^2 (484 at 20p) externally-supplied
+// dots (row-major i*NPARTICLES2+j) so the testbench can feed PyTorch's quantized d_ij directly and isolate the
 // network from the float32 d_ij-cancellation caveat (FIRMWARE_QAT_PLAN D4).
 dot_t* npelican_dots_override = nullptr;
 #endif
@@ -231,8 +235,11 @@ void nPELICAN(
 
     //unmasked-entry counts (nobj already remapped to the active row/col count incl. spurions).
     //Shared by the BN1 fold (Lever 8) and the BN2 collapse (Lever 4) below.
-    ap_uint<5> ncount  = (ap_uint<5>)nobj;     // active rows/cols, 0..22
-    ap_uint<9> ncount2 = ncount * ncount;      // unmasked (i,j) pairs, 0..484
+    nobj_t   ncount  = nobj;                   // active rows/cols, 0..NPARTICLES2 (22 at 20p)
+    npairs_t ncount2 = ncount * ncount;        // unmasked (i,j) pairs, 0..NPARTICLES2^2 (484 at 20p)
+#ifndef __SYNTHESIS__
+    npelican_last_ncount = ncount; npelican_last_ncount2 = ncount2;
+#endif
 
     //Lever 8: BN1 PAST THE AGGREGATION + T0 ROM. BN1 (batch1 = (s·d + β')·m, β' = β − μ·s)
     //is consumed only (A) per element as T0 = Q_t2(batch1) and (B) linearly by the 2->2
@@ -505,14 +512,14 @@ void nPELICAN(
     if (npelican_dump_fp) {
         FILE* fp = npelican_dump_fp;
 
-        // dots: 484 values, row-major i*22+j
+        // dots: NPARTICLES2^2 values (484 at 20p), row-major i*NPARTICLES2+j
         fprintf(fp, "dots:");
         for (unsigned int i = 0; i < NPARTICLES2; i++)
             for (unsigned int j = 0; j < NPARTICLES2; j++)
                 fprintf(fp, " %.17g", (double)dots[i*NPARTICLES2+j]);
         fprintf(fp, "\n");
 
-        // batch1: 484 values, row-major (approx, dump-only). Lever 8 never materializes
+        // batch1: NPARTICLES2^2 values, row-major (approx, dump-only). Lever 8 never materializes
         // batch1; reconstructed in double as (d·s + β')·m from the batch1_2to2 constants.
         {
             const double s1 = (double)batch1_2to2[1];
@@ -527,13 +534,13 @@ void nPELICAN(
         // jmass: 1 value (post-normalization, t2-grid; approx)
         fprintf(fp, "jmass: %.17g\n", (double)jmass);
 
-        // jdotp: 22 values (post-normalization, t2-grid; approx)
+        // jdotp: NPARTICLES2 values (post-normalization, t2-grid; approx)
         fprintf(fp, "jdotp:");
         for (unsigned int i = 0; i < NPARTICLES2; i++)
             fprintf(fp, " %.17g", (double)jdotp[i]);
         fprintf(fp, "\n");
 
-        // T0..T5: six lines, each 484 values row-major T[i][j][b] (exact)
+        // T0..T5: six lines, each NPARTICLES2^2 values row-major T[i][j][b] (exact)
         for (unsigned int b = 0; b < 6; b++) {
             fprintf(fp, "T%u:", b);
             for (unsigned int i = 0; i < NPARTICLES2; i++)

@@ -34,8 +34,35 @@
 #error "NPELICAN_WINOGRAD_DOT (Lever 9) is incompatible with NPELICAN_BLOCK_FP (Lever 7 block-FP momenta); build without winograd=1"
 #endif
 
-#define NPARTICLES  20
-#define NPARTICLES2 22  //Max number of particles plus number of spurions
+// ---- Particle count --------------------------------------------------------------
+// NPARTICLES (real constituents) is set, in priority order, by
+//   1. -DNPARTICLES=N on the compiler line (build_prj.tcl nparticles=N; build_local.sh
+//      passes extra flags through), else
+//   2. NPELICAN_NPARTICLES from weights/types_generated.h (model_loader.py --nparticles N;
+//      the loader sizes the accumulator headroom H1/H2 for that N), else
+//   3. 20 (float-export path / float-reference build: types_float.h defines no N).
+// The accumulators in types_generated.h hold N_exported + 2 rows exactly; a build with MORE
+// particles than the header was exported for could overflow them silently (they wrap), so
+// that combination is a hard error. Fewer particles is safe (over-sized headroom).
+#if defined(NPARTICLES)
+  #if defined(NPELICAN_NPARTICLES) && (NPARTICLES > NPELICAN_NPARTICLES)
+    #error "NPARTICLES exceeds the particle count types_generated.h was exported for; re-run model_loader.py --nparticles N"
+  #endif
+#elif defined(NPELICAN_NPARTICLES)
+  #define NPARTICLES NPELICAN_NPARTICLES
+#else
+  #define NPARTICLES 20
+#endif
+#define NPARTICLES2 (NPARTICLES + 2)  //Max number of particles plus number of spurions
+
+// np_bits<N>::value = number of bits needed to hold every value 0..N (N >= 1):
+// np_bits<22> = 5 (0..31), np_bits<34> = 6, np_bits<484> = 9, np_bits<1156> = 11.
+// C++11 recursive template (Vitis builds with -std=c++0x); compile-time constant only.
+template<unsigned long N> struct np_bits {
+    enum { value = 1 + np_bits<(N >> 1)>::value };
+};
+template<> struct np_bits<0> { enum { value = 0 }; };
+static_assert(NPARTICLES >= 1, "NPARTICLES must be >= 1");
 #define NHIDDEN 2       //Number of parallel channels
 #define NOUT 1          //Two classes means one out dimension is sufficient 
 #define N_TABLE_PSLOG 1024 //want to cover 10^6 max input 
@@ -119,8 +146,13 @@ void dot4_winograd(input_t p1[4], input_t p2[4], dotxi_t xi_i, dotxi_t eta_j, do
 // nobj is a PARTICLE COUNT (0..NPARTICLES2), not a momentum: it must not share
 // input_t. With input_t capped below 12 bits (negative F, momentum LSB > 1 GeV)
 // an input_t nobj would round odd counts to even, corrupting the mask and the
-// BN2 β'·count terms. ap_uint<5> covers 0..31 and is exact at every input width.
-typedef ap_uint<5> nobj_t;
+// BN2 β'·count terms. Width is DERIVED from NPARTICLES2 so the remapped count
+// (nobj += 2 up to NPARTICLES2) never wraps: ap_uint<5> (0..31) at 20 particles,
+// ap_uint<6> at 32. (A fixed ap_uint<5> at 32 particles wrapped nobj=34 to 2 and made
+// rows >= 32 unreachable -- HLS deleted their arithmetic.) ncount2 (unmasked pairs,
+// 0..NPARTICLES2^2) is ap_uint<np_bits<NPARTICLES2*NPARTICLES2>::value>: 9 bits at 20p.
+typedef ap_uint<np_bits<NPARTICLES2>::value> nobj_t;
+typedef ap_uint<np_bits<(NPARTICLES2)*(NPARTICLES2)>::value> npairs_t;
 
 void nPELICAN(
     input_t model_input[(NPARTICLES)*4],

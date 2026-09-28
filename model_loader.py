@@ -76,6 +76,15 @@ parser.add_argument('--bn-eps', type=float, default=1e-5,
 parser.add_argument('--out-types', type=str, default=None,
                     help='Path for generated typedef header (default: dirname(--out)/types_generated.h). '
                          'The firmware build expects both weights.h and types_generated.h under firmware/weights/.')
+parser.add_argument('--nparticles', type=int, default=20,
+                    help='Firmware particle count NPARTICLES (real constituents; NPARTICLES2 = N + 2 '
+                         'with the beam spurions). Sizes the raw-sum accumulator headroom '
+                         'H1 = ceil(log2(N+2)) (row sums/trace) and H2 = ceil(log2((N+2)^2)) (full '
+                         'sums) and is emitted as "#define NPELICAN_NPARTICLES N" in '
+                         'types_generated.h, which sets NPARTICLES in firmware/nPELICAN.h. Default 20. '
+                         'The accumulators wrap (no AP_SAT), so exporting for FEWER particles than '
+                         'the build uses overflows silently on busy events -- nPELICAN.h refuses '
+                         'NPARTICLES > NPELICAN_NPARTICLES at compile time.')
 parser.add_argument('--max-input-bits', type=int, default=None,
                     help='Cap input_t total width to N bits (Lever 2): trades dot4 front-end '
                          'precision for DSP. The dots are only dot_t-bit; the un-capped width '
@@ -87,6 +96,8 @@ parser.add_argument('--max-input-bits', type=int, default=None,
                          'with I > W, momentum LSB 2^-F > 1 GeV) — legal, but expect heavy dot4 '
                          'precision loss. No effect if N >= the derived bit-exact width.')
 args = parser.parse_args()
+if args.nparticles < 1:
+    parser.error('--nparticles must be >= 1')
 
 if args.out_types is None:
     args.out_types = os.path.join(os.path.dirname(args.out) or '.', 'types_generated.h')
@@ -861,13 +872,22 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
               f'multiplies bind as: {_verdict}')
 
     # --- accumulator headroom from NPARTICLES2 (NPARTICLES + 2 spurions).
-    # NPARTICLES2 is a firmware constant the loader already mirrors (NPELICAN.h:
-    # NPARTICLES2 = NPARTICLES + 2 = 22); accumulators are NOT covered by any
-    # learned scale, so they get explicit integer headroom over the summand type.
-    NPARTICLES = 20
+    # NPARTICLES comes from --nparticles (default 20) and is emitted as NPELICAN_NPARTICLES,
+    # which sets the firmware's NPARTICLES (nPELICAN.h; NPARTICLES2 = NPARTICLES + 2).
+    # Accumulators are NOT covered by any learned scale, so they get explicit integer
+    # headroom over the summand type. At 20p: H2 = 9 (484 pairs), H1 = 5; at 32p: 11 / 6.
+    NPARTICLES = int(args.nparticles)
     NPARTICLES2 = NPARTICLES + 2
-    H2 = math.ceil(math.log2(NPARTICLES2 ** 2))   # full-sum headroom = 9
-    H1 = math.ceil(math.log2(NPARTICLES2))        # row-sum headroom  = 5
+    H2 = math.ceil(math.log2(NPARTICLES2 ** 2))   # full-sum headroom (9 at 20p)
+    H1 = math.ceil(math.log2(NPARTICLES2))        # row-sum headroom  (5 at 20p)
+    print(f'  particle count: NPARTICLES={NPARTICLES} (NPARTICLES2={NPARTICLES2}, '
+          f'{NPARTICLES2 ** 2} pairs) -> accumulator headroom H1={H1} (row/trace), '
+          f'H2={H2} (full sum)')
+    _ckpt_nobj = _arg('nobj', None)
+    if _ckpt_nobj is not None and int(_ckpt_nobj) != NPARTICLES:
+        print(f'   note: checkpoint was trained with nobj={_ckpt_nobj}; firmware built for '
+              f'{NPARTICLES} particles (the model is size-agnostic; the golden vectors are '
+              f'{_ckpt_nobj}-particle)')
 
     # --- Aggregation summands (batch1 for 2->2, Tr for 2->0) are the UNQUANTIZED BatchNorm
     # outputs that PyTorch sums in float; only the NORMALIZED result hits a learned quantizer.
@@ -967,6 +987,7 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     L.append('#include "ap_int.h"')
     L.append('')
     L.append('#define NPELICAN_GENERATED_TYPES 1')
+    L.append(f'#define NPELICAN_NPARTICLES {NPARTICLES}  // model_loader.py --nparticles; sizes H1={H1}/H2={H2} below')
     L.append('')
     L.append('// ---- Quantization-point types: ap_fixed<B, B-k, AP_RND_CONV, AP_SAT> ----')
 

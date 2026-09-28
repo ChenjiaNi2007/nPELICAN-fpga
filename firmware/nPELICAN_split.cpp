@@ -11,6 +11,10 @@
 #ifndef __SYNTHESIS__
 #include <cstdio>
 FILE* npelican_dump_fp = nullptr;
+// csim-only observables of the remapped particle counts (ncount/ncount2), for the
+// particle-count scaling check (nobj_t must hold NPARTICLES2 without wrapping at any
+// NPARTICLES). Written by every call; zero synthesis impact.
+unsigned npelican_last_ncount = 0, npelican_last_ncount2 = 0;
 // DOTS-LEVEL test hook (csim only, zero synthesis impact): see nPELICAN.cpp.
 dot_t* npelican_dots_override = nullptr;
 #endif
@@ -311,8 +315,8 @@ void np_agg2to2(
     accdot2_t dsum,
     accdotrow_t rowsum[NPARTICLES2],
     ap_uint<1> nobjmask[NPARTICLES2][NPARTICLES2],
-    ap_uint<5> ncount,
-    ap_uint<9> ncount2,
+    nobj_t ncount,
+    npairs_t ncount2,
     t2_t &jmass,
     t2_t jdotp[NPARTICLES2]
 ) {
@@ -452,8 +456,8 @@ void np_eq2to2(
 void np_agg2to0(
     relu_t Tp_q[NPARTICLES2][NPARTICLES2][NHIDDEN],
     ap_uint<1> nobjmask[NPARTICLES2][NPARTICLES2],
-    ap_uint<5> ncount,
-    ap_uint<9> ncount2,
+    nobj_t ncount,
+    npairs_t ncount2,
     t0_t R[NHIDDEN][2]
 ) {
 #if NP_SPLIT_AGG2TO0
@@ -593,7 +597,7 @@ void nPELICAN(
 #ifndef __SYNTHESIS__
     // DOTS-LEVEL injection (csim only): same hook/placement as the monolith —
     // after the dot4 front-end, before BN1. The override buffer is always full
-    // 484 row-major; under NPELICAN_SPLIT_TRI only the upper triangle is stored
+    // NPARTICLES2^2 row-major; under NPELICAN_SPLIT_TRI only the upper triangle is stored
     // (the golden dots are symmetric; every read goes through NP_SYMIDX).
     if (npelican_dots_override) {
       for (unsigned int i = 0; i < NPARTICLES2; i++)
@@ -608,8 +612,11 @@ void nPELICAN(
 
     //unmasked-entry counts (nobj remapped above): shared by np_agg2to2 (BN1 fold, Lever 8)
     //and np_agg2to0 (BN2 collapse, Lever 4).
-    ap_uint<5> ncount  = (ap_uint<5>)nobj;     // active rows/cols, 0..22
-    ap_uint<9> ncount2 = ncount * ncount;      // unmasked (i,j) pairs, 0..484
+    nobj_t   ncount  = nobj;                   // active rows/cols, 0..NPARTICLES2 (22 at 20p)
+    npairs_t ncount2 = ncount * ncount;        // unmasked (i,j) pairs, 0..NPARTICLES2^2 (484 at 20p)
+#ifndef __SYNTHESIS__
+    npelican_last_ncount = ncount; npelican_last_ncount2 = ncount2;
+#endif
 
     t2_t T0[NP_SYMSZ];
     #pragma HLS ARRAY_PARTITION variable=T0 complete dim=0
@@ -643,7 +650,7 @@ void nPELICAN(
     if (npelican_dump_fp) {
         FILE* fp = npelican_dump_fp;
 
-        // dots: 484 values, row-major i*22+j (NP_SYMIDX keeps the dump full-size
+        // dots: NPARTICLES2^2 values (484 at 20p), row-major i*NPARTICLES2+j (NP_SYMIDX keeps the dump full-size
         // and byte-identical under NPELICAN_SPLIT_TRI: (j,i) reads element (i,j))
         fprintf(fp, "dots:");
         for (unsigned int i = 0; i < NPARTICLES2; i++)
@@ -651,7 +658,7 @@ void nPELICAN(
                 fprintf(fp, " %.17g", (double)dots[NP_SYMIDX(i, j)]);
         fprintf(fp, "\n");
 
-        // batch1: 484 values, row-major (approx, dump-only). Lever 8 never materializes
+        // batch1: NPARTICLES2^2 values, row-major (approx, dump-only). Lever 8 never materializes
         // batch1; reconstructed in double as (d·s + β')·m from the batch1_2to2 constants.
         {
             const double s1 = (double)batch1_2to2[1];
@@ -666,7 +673,7 @@ void nPELICAN(
         // jmass: 1 value (post-normalization, t2-grid; approx)
         fprintf(fp, "jmass: %.17g\n", (double)jmass);
 
-        // jdotp: 22 values (post-normalization, t2-grid; approx)
+        // jdotp: NPARTICLES2 values (post-normalization, t2-grid; approx)
         fprintf(fp, "jdotp:");
         for (unsigned int i = 0; i < NPARTICLES2; i++)
             fprintf(fp, " %.17g", (double)jdotp[i]);

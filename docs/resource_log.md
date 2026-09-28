@@ -59,6 +59,17 @@ commits first (see `RESOURCE_REDUCTION_LEVERS.md` Lever 8 ⚠1/⚠2).
 Reading: Lever 8 is the LUT/FF minimum; adding Lever 9 (+ const beams) converts ~9-13k LUT into a further −50% DSP
 at unchanged FF. Both are bit-exact vs PyTorch. Pick by budget: `winograd=0` for LUT, `winograd=1 const_beams=1` for DSP.
 
+**⚠ Particle-count scaling (2026-09-28).** Any build above 29 particles made before the
+`bn1-fold` particle-count fix is INVALID: `nobj_t`/`ncount` were a fixed `ap_uint<5>`, so at
+32p `nobj = 34` wrapped to 2, rows ≥ 32 could never be unmasked and HLS deleted their
+arithmetic (the 32p csynth showed 29 particles' worth of multipliers — 870 pair products,
+58 xi/eta, 31 row multiplies). The loader also hard-coded 20 particles for the accumulator
+headroom, so 24p/32p full sums (676/1156 pairs > 512) could wrap silently. Now `nobj_t`,
+`ncount2` and H1/H2 derive from NPARTICLES (`np_bits<>` in `nPELICAN.h`; `model_loader.py
+--nparticles N` → `NPELICAN_NPARTICLES`). N ≤ 20 rows (8/12/16/20p) are unaffected. Recipe and
+details: `docs/RESOURCE_REDUCTION_LEVERS.md`, "Particle-count scaling". Re-run 24p/32p with
+`--nparticles N` exports.
+
 ### 2026-08-25 — BN1 constant evicted to fabric (`--bn-frac-bits 12`), 16 particles
 
 Same epoch-34 pmu-12 checkpoint and weights as the 2026-08-22 16p build; the ONLY change is

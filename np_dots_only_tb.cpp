@@ -24,8 +24,8 @@ void np_dots_only(input_t model_input[(NPARTICLES)*4],
 int main() {
     // ---- Simple event ----------------------------------------------------
     // 20 identical particles, each 4-vector (E,px,py,pz) = (6,0,0,2); standard
-    // beam spurions (1,0,0,+1)/(1,0,0,-1); full occupancy (nobj=20 -> remaps to
-    // 22 so all 20 particles + 2 beams are active, mask all ones).
+    // beam spurions (1,0,0,+1)/(1,0,0,-1); full occupancy (nobj=NPARTICLES -> remaps
+    // to NPARTICLES2 so all particles + 2 beams are active, mask all ones).
     //   raw Minkowski dots (E1 E2 - px1 px2 - py1 py2 - pz1 pz2):
     //     particle.particle = 36 - 4      = 32
     //     beam0.particle    = 6 - 2       = 4
@@ -42,7 +42,7 @@ int main() {
         model_input[p*4+3] = 2;   // pz
     }
     input_t beam_input[8] = {1, 0, 0, 1,   1, 0, 0, -1};
-    nobj_t  nobj = 20;
+    nobj_t  nobj = NPARTICLES;
 
     dot_t dots[NPARTICLES2*NPARTICLES2];
     np_dots_only(model_input, beam_input, nobj, dots);

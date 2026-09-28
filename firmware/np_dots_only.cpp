@@ -9,7 +9,7 @@
 // ReLU, or learned weights. There is no weights.h include: the dot front-end
 // is parameter-free (a good self-check that the stage is truly isolated).
 //
-// Output is the full 22x22 = 484 dot matrix, row-major i*NPARTICLES2+j, each
+// Output is the full NPARTICLES2^2 dot matrix (22x22 = 484 at 20p), row-major i*NPARTICLES2+j, each
 // rounded once onto the input_quant grid (dot_t). Types (input_t, dot_t,
 // nobj_t) and sizes come from nPELICAN.h / weights/types_generated.h, so the
 // dot4 multiplier width tracks the current checkpoint exactly (presently
@@ -28,10 +28,10 @@ static void dot4_local(input_t p1[4], input_t p2[4], dot_t& dot) {
 }
 
 void np_dots_only(
-    input_t model_input[(NPARTICLES)*4],   // 20 particle 4-vectors (E,px,py,pz)
+    input_t model_input[(NPARTICLES)*4],   // NPARTICLES particle 4-vectors (E,px,py,pz)
     input_t beam_input[2*4],               // 2 beam spurions
-    nobj_t  nobj,                          // particle count (exact, ap_uint<5>)
-    dot_t   dots_out[(NPARTICLES2)*(NPARTICLES2)]   // 484 dots, row-major i*22+j
+    nobj_t  nobj,                          // particle count (exact, nobj_t = ap_uint<np_bits<NPARTICLES2>>)
+    dot_t   dots_out[(NPARTICLES2)*(NPARTICLES2)]   // NPARTICLES2^2 dots, row-major i*NPARTICLES2+j
 ) {
     #pragma HLS ARRAY_RESHAPE variable=model_input complete dim=0
     #pragma HLS ARRAY_RESHAPE variable=beam_input complete dim=0
