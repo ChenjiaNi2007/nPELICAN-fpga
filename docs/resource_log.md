@@ -82,14 +82,19 @@ N set by editing `NPARTICLES` (pre-5a4b9f9 flow). Reports: `reports/particle_cou
 | 16 | 47,346 | 12,662 | 4,108 | 370 | 15 | −0.08 | 356 / 34,323 / 217,214 |
 | 20 | 69,742 | 17,636 | 6,036 | 534 | 15 | −0.08 | 516 / 49,244 / 319,003 |
 | 24 | 96,442 | 23,660 | 8,468 | 730 | 15 | −0.08 | 708 / 67,518 / 441,289 |
-| 32 | **INVALID** 135,201 | 31,994 | 11,916 | 1,020 | 15 | −0.08 | 993 — see below |
+| 32 | **159,446** (155,844 logic + 3,602 SRL) | 43,122 | 15,412 | 1,218 | 15 | −0.09 | 1,188 / 122,291 / 744,457 |
+| 32 (pre-fix, INVALID) | 135,201 | 31,994 | 11,916 | 1,020 | 15 | −0.08 | 993 — effectively 29 particles, see below |
 
 Fits in M = N + 2 (least squares over N = 8…24):
 - **DSP = M² + M + 28, exact (zero residual)** = N(N+1) Winograd pair products + 2N ξ/η + (N+2) row
   normalizations + (N+2) small products + 28 fixed (BN2/normalize wide multiplies).
 - LUT ≈ 133.6·M² + 279·M − 1,083 (max residual 194); LUT per particle pair falls 421 → 322 from 8p to 24p.
 - FF ≈ 20.3·M² + 376·M (residual ≤ 1.1k); CARRY8 ≈ 12.8·M² (residual ≤ 28).
-- Predicted valid 32p: **162.8k LUT / 36.1k FF / 14.5k CARRY8 / 1,218 DSP.**
+- Predicted valid 32p (from 8–24): 162.8k LUT / 36.1k FF / 14.5k CARRY8 / 1,218 DSP. **Measured 2026-09-29 (post-fix,
+  `select_nparticles.sh 32`, `nparticles=32`): 159,446 / 43,122 / 15,412 / 1,218** — DSP exact; LUT −2.1% (per-pair LUT
+  keeps amortizing: 421 → 302 from 8p to 32p); FF +19% and CARRY8 +6% above the quadratic (extra pipeline/SRL registers at
+  the largest unroll: 3.6k SRL16E vs 2.1k at 24p). 6-point refit: LUT ≈ 129.4·M² + 445·M − 2,213; FF ≈ 26.9·M² + 117·M;
+  CARRY8 ≈ 13.5·M² − 43·M; DSP = M² + M + 28 (still exact). Device use at 32p: LUT 9.2%, DSP 9.9%, FF 1.2%, CARRY8 7.1%.
 
 **32p row is INVALID (pre-fix firmware):** `nobj_t`/`ncount` were `ap_uint<5>` (max 31), so NPARTICLES2 = 34
 wrapped and rows ≥ 31 could never be unmasked; HLS deleted their arithmetic. The inventory is a 29-particle

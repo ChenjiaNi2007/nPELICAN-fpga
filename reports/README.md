@@ -155,6 +155,7 @@ confirm the report's internal `Date` is newer than the header you just generated
 | `{csynth,vsynth}_monolith_lever9_constbeams*.rpt` | `bn1-fold` bce5b20 `winograd=1 const_beams=1` (deployment config) | xcu250-2L | **534** | 17,636 | 69,742 | 15 | vs pre-Lever-8 baseline: DSP −49%, LUT −6%, FF −16% |
 | `particle_count/{csynth,vsynth}_16p_lever9_constbeams*.rpt` | same at 16 particles | xcu250-2L | **370** | 12,662 | 47,346 | 15 | vs best archived 16p: DSP −52% (vs 769) / −61% (vs 941), LUT −2%/−5% |
 | `particle_count/{csynth,vsynth}_{8,12,24}p_lever9_constbeams*.rpt` | deployment config at N=8/12/24 (2026-09-28) | xcu250-2L | 138 / 238 / 730 | 5,218 / 10,246 / 23,660 | 15,143 / 28,813 / 96,442 | 13/14/15 | DSP = (N+2)²+(N+2)+28 exactly; LUT ≈ 133.6(N+2)²; see resource_log sweep section |
+| `particle_count/{csynth,vsynth}_32p_lever9_constbeams*.rpt` | deployment config at N=32, post-fix (2026-09-29) | xcu250-2L | 1,218 | 43,122 | 159,446 | 15 | VALID; DSP exactly (N+2)²+(N+2)+28, LUT 2% under the 8–24p extrapolation |
 | `particle_count/*_32p_lever9_constbeams_INVALID_nobj5bit*.rpt` | 32p on pre-5a4b9f9 firmware | xcu250-2L | 1,020 | 31,994 | 135,201 | 15 | INVALID: 5-bit nobj wrapped, effectively 29 particles; re-run with `--nparticles 32` |
 | `vsynth_monolith_lever8.rpt` | `01772ab`+ | xcu250-2L | 1,067 | 18,338 | 72,467 | – | ground truth; vs pmu-12 monolith (July): LUT +4.9%, FF −26%, DSP −8.7% (different checkpoint) |
 
