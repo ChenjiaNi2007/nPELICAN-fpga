@@ -10,7 +10,7 @@ FILE* npelican_dump_fp = nullptr;
 // front-end output is overwritten with these 484 externally-supplied dots (row-major
 // i*22+j) so the testbench can feed PyTorch's quantized d_ij directly and isolate the
 // network from the float32 d_ij-cancellation caveat (FIRMWARE_QAT_PLAN D4).
-dot_t* npelican_dots_override = nullptr;
+dotall_t* npelican_dots_override = nullptr;   // dotall_t: holds every dot population's grid (== dot_t without the jet split)
 #endif
 
 // ============================================================================
@@ -41,16 +41,37 @@ dot = p1[0]*p2[0]-p1[1]*p2[1]-p1[2]*p2[2]-p1[3]*p2[3];
 
 }
 
+#ifdef NPELICAN_JET_QUANT_SPLIT
+// --jet-quant-split: the jet row/col of the Gram matrix has its own learned grids. The jet
+// momenta stay on jet_t (pmu_quant_jet) -- casting them into input_t would re-quantize them
+// onto the particle grid. Products/sums are exact in HLS's promoted type; ONE AP_RND_CONV
+// cast onto the population's grid (input_quant_jet / input_quant_mjet), as in PyTorch.
+void dot4j(input_t p[4], jet_t q[4], dotj_t& dot) {
+dot = p[0]*q[0]-p[1]*q[1]-p[2]*q[2]-p[3]*q[3];
+}
+void dot4m(jet_t q[4], dotm_t& dot) {
+dot = q[0]*q[0]-q[1]*q[1]-q[2]*q[2]-q[3]*q[3];
+}
+#endif
+
 void nPELICAN(
     input_t model_input[(NPARTICLES)*4],
     input_t beam_input[2*4],            // 2 beam spurions as a top-level input
+#ifdef NPELICAN_JET_SPURION
+    jet_t jet_input[4],                 // full-jet 4-momentum -> spurion slot 2 (never masked)
+#endif
     nobj_t nobj,                        // particle count — exact at any input width
-    result_t model_out[1]
+    result_t model_out[NOUT]
 ) {
     #pragma HLS ARRAY_RESHAPE variable=model_input complete dim=0
     #pragma HLS ARRAY_RESHAPE variable=beam_input complete dim=0
     #pragma HLS ARRAY_PARTITION variable=model_out complete dim=0
+#ifdef NPELICAN_JET_SPURION
+    #pragma HLS ARRAY_RESHAPE variable=jet_input complete dim=0
+    #pragma HLS INTERFACE ap_vld port=model_input,beam_input,jet_input,model_out
+#else
     #pragma HLS INTERFACE ap_vld port=model_input,beam_input,model_out
+#endif
 //    #pragma HLS DATAFLOW
     #pragma HLS PIPELINE II=1
 
@@ -64,6 +85,8 @@ void nPELICAN(
     #pragma HLS ARRAY_PARTITION variable=b2_2to0 complete dim=0
 
 
+    //nobj remap: present-particle count -> active row/col count incl. spurions,
+    //i.e. nobj + NSPURIONS (NPARTICLES2 - NPARTICLES == NSPURIONS: 2 beams [+ jet]).
     if (nobj != 0 ) {
       if (nobj < NPARTICLES) {
         nobj += (NPARTICLES2 - NPARTICLES);
@@ -88,7 +111,7 @@ void nPELICAN(
       }
     }
 
-    dot_t dots[(NPARTICLES2)*(NPARTICLES2)];
+    dotall_t dots[(NPARTICLES2)*(NPARTICLES2)];   // == dot_t unless NPELICAN_JET_QUANT_SPLIT
     #pragma HLS ARRAY_PARTITION variable=dots complete dim=0
     input_t p1[(NPARTICLES2)][4];
     #pragma HLS ARRAY_PARTITION variable=p1 complete dim=0
@@ -128,6 +151,27 @@ void nPELICAN(
     }
 #endif
 
+#ifdef NPELICAN_JET_SPURION
+    //full-jet spurion at slot 2 (PyTorch collate add_jet: beams, jet, constituents).
+    //NOT masked: the jet is always present (E>0), exactly like the beams. Taken from the
+    //port in both the runtime-beam and NPELICAN_CONST_BEAMS builds.
+#ifdef NPELICAN_JET_QUANT_SPLIT
+    //split: the jet keeps its own grid (jet_t) in pj; p1[2] is unused (its dots are dot4j/dot4m).
+    jet_t pj[4];
+    #pragma HLS ARRAY_PARTITION variable=pj complete dim=0
+    JetPrep: for (unsigned int k = 0; k < 4; k++) {
+      #pragma HLS unroll
+      pj[k] = jet_input[k];
+      p1[2][k] = 0;
+    }
+#else
+    JetPrep: for (unsigned int k = 0; k < 4; k++) {
+      #pragma HLS unroll
+      p1[2][k] = jet_input[k];
+    }
+#endif
+#endif
+
 #ifdef NPELICAN_BLOCK_FP
     //Lever 7: encode each particle once into (mantissa[4], exponent), then dot the
     //mantissas and realign. p1 is already masked, so a padded particle encodes to
@@ -150,6 +194,23 @@ void nPELICAN(
         #pragma HLS unroll
 #ifdef NPELICAN_BLOCK_FP
         Dot: np_bfp_dot4(p1m[i], p1e[i], p1m[j], p1e[j], dots[i*NPARTICLES2+j]);
+#elif defined(NPELICAN_JET_QUANT_SPLIT)
+        //three populations, compile-time branches after unrolling (j >= i, so i==2 && j==2 is
+        //m_jet^2, i==2 || j==2 the jet row/col, else particle/beam pairs). Round into the
+        //population grid first, then widen EXACTLY into dotall_t.
+        if (i == 2 && j == 2) {
+          dotm_t dm;
+          DotM: dot4m(pj, dm);
+          dots[i*NPARTICLES2+j] = dm;
+        } else if (i == 2 || j == 2) {
+          dotj_t dj;
+          DotJ: dot4j(p1[i == 2 ? j : i], pj, dj);
+          dots[i*NPARTICLES2+j] = dj;
+        } else {
+          dot_t dp;
+          Dot: dot4(p1[i], p1[j], dp);
+          dots[i*NPARTICLES2+j] = dp;
+        }
 #else
         Dot: dot4(p1[i], p1[j], dots[i*NPARTICLES2+j]);
 #endif
@@ -270,8 +331,9 @@ void nPELICAN(
       LinEq2to2_3: T[i][i][1] = jdotp[i];
     }
 
-    //"dense" 2->2 mix. MAC accumulates in mac2_t (exact product width), so the only
-    //rounding is the act_layer quantizer below. Bias is NOT folded into BN/weights.
+    //"dense" 2->2 mix. Products accumulate in mac2_t (exact product width); the bias is
+    //added once afterwards in mac2b_t (product grid + guard bits), so the only rounding is
+    //the act_layer quantizer below. Bias is NOT folded into BN/weights.
     mac2_t Tp[NPARTICLES2][NPARTICLES2][NHIDDEN];
     #pragma HLS ARRAY_PARTITION variable=Tp complete dim=0
 #ifdef NPELICAN_MAC_DSP
@@ -281,25 +343,19 @@ void nPELICAN(
     #pragma HLS BIND_OP variable=Tp op=mul impl=dsp
 #endif
 
-    // initialize with bias
+    // initialize to 0: the bias is NOT added here. Products accumulate exactly on the
+    // mac2_t product grid; b1/b1_diag carry guard bits below that grid and are added ONCE
+    // in mac2b_t just before the relu quantizer (avoids exact rounding ties there).
     for (unsigned int i = 0; i < NPARTICLES2; i++) {
     #pragma HLS unroll
       for (unsigned int j = 0; j < NPARTICLES2; j++) {
       #pragma HLS unroll
         for (unsigned int h = 0; h < NHIDDEN; h++) {
         #pragma HLS unroll
-          Tp[i][j][h] = b1_2to2[h]*nobjmask[i][j];
+          Tp[i][j][h] = 0;
           }
         }
       }
-
-    for (unsigned int i = 0; i < NPARTICLES2; i++){
-    #pragma HLS unroll
-      for (unsigned int h = 0; h < NHIDDEN; h++) {
-      #pragma HLS unroll
-        Tp[i][i][h] += b1_diag_2to2[h]*nobjmask[i][i];
-      }
-    }
 
     // 2->2 weights (frozen element order w1_2to2[h*6+b])
     for (unsigned int i = 0; i < NPARTICLES2; i++) {
@@ -317,8 +373,8 @@ void nPELICAN(
       }
     }
 
-    // ReLU, then quantize onto the act_layer grid (relu_t, AP_RND_CONV). The compare
-    // is against a typed 0 (mac2_t), not a double literal.
+    // Bias add (mac2b_t), ReLU, then quantize onto the act_layer grid (relu_t,
+    // AP_RND_CONV). The compare is against an integer 0 (exact), not a double literal.
     relu_t Tp_q[NPARTICLES2][NPARTICLES2][NHIDDEN];
     #pragma HLS ARRAY_PARTITION variable=Tp_q complete dim=0
     for (unsigned int i = 0; i < NPARTICLES2; i++) {
@@ -327,10 +383,13 @@ void nPELICAN(
       #pragma HLS unroll
         for (unsigned int h = 0; h < NHIDDEN; h++) {
         #pragma HLS unroll
-          if (Tp[i][j][h] < 0){
-            Tp[i][j][h] = 0;
+          // bias add at full bias precision (mac2b_t), same nobjmask factors as before
+          mac2b_t v = (mac2b_t)Tp[i][j][h] + b1_2to2[h]*nobjmask[i][j];
+          if (i == j) v += b1_diag_2to2[h]*nobjmask[i][i];
+          if (v < 0){
+            v = 0;
             }
-          Tp_q[i][j][h] = (relu_t)Tp[i][j][h];
+          Tp_q[i][j][h] = (relu_t)v;
         }
       }
     }
@@ -391,8 +450,8 @@ void nPELICAN(
     }
 
     //unmasked-entry counts (nobj already remapped to the active row/col count incl. spurions).
-    ap_uint<5> ncount  = (ap_uint<5>)nobj;     // active rows/cols, 0..22
-    ap_uint<9> ncount2 = ncount * ncount;      // unmasked (i,j) pairs, 0..484
+    ap_uint<NOBJ_BITS> ncount  = (ap_uint<NOBJ_BITS>)nobj;     // active rows/cols, 0..22
+    ap_uint<2*NOBJ_BITS-1> ncount2 = ncount * ncount;      // unmasked (i,j) pairs, 0..484
 
     //apply the per-channel BN2 affine to the raw aggregate, then normalize-late: ONE rescale
     //rounding onto the post_agg-2to0 grid (t0_t). R[h][0]=normalized sum; R[h][1]=trace. The
@@ -407,26 +466,61 @@ void nPELICAN(
 
     //Final 1D output: 2->0 dense MAC in mac0_t (exact product width), then round onto
     //the output_quant grid (result_t == out_t, AP_RND_CONV).
-    mac0_t Rp[NOUT];
+    //N2TO0_OUT == NOUT without a head; == NPELICAN_HEAD (K hidden channels) with one.
+    mac0_t Rp[N2TO0_OUT];
     #pragma HLS ARRAY_PARTITION variable=Rp complete dim=0
 
     // initialize with bias
-    for (unsigned int o = 0; o < NOUT; o++) {
+    for (unsigned int o = 0; o < N2TO0_OUT; o++) {
     #pragma HLS unroll
       Rp[o] = b2_2to0[o];
     }
 
-    // 2->0 weights (frozen element order w2_2to0[h*2+a])
+    // 2->0 weights. Frozen element order = row-major (N2TO0_OUT, NHIDDEN*2)
+    // = np.ravel(agg_2to0.mixing.weight): w2_2to0[o*(NHIDDEN*2) + h*2 + a].
+    // N2TO0_OUT=1 reduces to w2_2to0[h*2+a].
     for (unsigned int h = 0; h < NHIDDEN; h++) {
     #pragma HLS unroll
       for (unsigned int a = 0; a < 2; a++) {
       #pragma HLS unroll
-        for (unsigned int o = 0; o < NOUT; o++) {
+        for (unsigned int o = 0; o < N2TO0_OUT; o++) {
         #pragma HLS unroll
-          Mult2to0: Rp[o] += w2_2to0[(h*2)+a*(NOUT)+o]*R[h][a];
+          Mult2to0: Rp[o] += w2_2to0[o*(NHIDDEN*2) + (h*2) + a]*R[h][a];
         }
       }
     }
+
+#ifdef NPELICAN_HEAD
+    //Nonlinear head (--head-hidden K): ReLU, then the agg_2to0.act_layer quantizer
+    //(relu0_t, AP_RND_CONV) on the K channels; then the K->NOUT head MAC in mach_t
+    //(exact products, float bias with guard bits), rounded once at the result_t cast.
+    #pragma HLS ARRAY_PARTITION variable=w_head complete dim=0
+    #pragma HLS ARRAY_PARTITION variable=b_head complete dim=0
+    relu0_t Rq[NPELICAN_HEAD];
+    #pragma HLS ARRAY_PARTITION variable=Rq complete dim=0
+    for (unsigned int k = 0; k < NPELICAN_HEAD; k++) {
+    #pragma HLS unroll
+      mac0_t v = Rp[k];
+      if (v < 0){
+        v = 0;
+        }
+      Rq[k] = (relu0_t)v;
+    }
+    mach_t Hp[NOUT];
+    #pragma HLS ARRAY_PARTITION variable=Hp complete dim=0
+    for (unsigned int o = 0; o < NOUT; o++) {
+    #pragma HLS unroll
+      Hp[o] = b_head[o];
+    }
+    // head weights: row-major (NOUT, K) = np.ravel(head.weight): w_head[o*K + k]
+    for (unsigned int k = 0; k < NPELICAN_HEAD; k++) {
+    #pragma HLS unroll
+      for (unsigned int o = 0; o < NOUT; o++) {
+      #pragma HLS unroll
+        MultHead: Hp[o] += w_head[o*NPELICAN_HEAD + k]*Rq[k];
+      }
+    }
+#endif
 
 #ifndef __SYNTHESIS__
     // Stage dump (csim only): written when npelican_dump_fp is non-null.
@@ -438,14 +532,14 @@ void nPELICAN(
     if (npelican_dump_fp) {
         FILE* fp = npelican_dump_fp;
 
-        // dots: 484 values, row-major i*22+j
+        // dots: NPARTICLES2^2 values (484 at default), row-major i*NPARTICLES2+j
         fprintf(fp, "dots:");
         for (unsigned int i = 0; i < NPARTICLES2; i++)
             for (unsigned int j = 0; j < NPARTICLES2; j++)
                 fprintf(fp, " %.17g", (double)dots[i*NPARTICLES2+j]);
         fprintf(fp, "\n");
 
-        // batch1: 484 values, row-major (t2-grid; approx)
+        // batch1: NPARTICLES2^2 values, row-major (t2-grid; approx)
         fprintf(fp, "batch1:");
         for (unsigned int i = 0; i < NPARTICLES2; i++)
             for (unsigned int j = 0; j < NPARTICLES2; j++)
@@ -455,13 +549,13 @@ void nPELICAN(
         // jmass: 1 value (post-normalization, t2-grid; approx)
         fprintf(fp, "jmass: %.17g\n", (double)jmass);
 
-        // jdotp: 22 values (post-normalization, t2-grid; approx)
+        // jdotp: NPARTICLES2 values (post-normalization, t2-grid; approx)
         fprintf(fp, "jdotp:");
         for (unsigned int i = 0; i < NPARTICLES2; i++)
             fprintf(fp, " %.17g", (double)jdotp[i]);
         fprintf(fp, "\n");
 
-        // T0..T5: six lines, each 484 values row-major T[i][j][b] (exact)
+        // T0..T5: six lines, each NPARTICLES2^2 values row-major T[i][j][b] (exact)
         for (unsigned int b = 0; b < 6; b++) {
             fprintf(fp, "T%u:", b);
             for (unsigned int i = 0; i < NPARTICLES2; i++)
@@ -470,7 +564,7 @@ void nPELICAN(
             fprintf(fp, "\n");
         }
 
-        // Tp: 968 values, order i,j,h with h fastest (act_layer output, relu_t; exact)
+        // Tp: NPARTICLES2^2*NHIDDEN values, order i,j,h with h fastest (act_layer output, relu_t; exact)
         fprintf(fp, "Tp:");
         for (unsigned int i = 0; i < NPARTICLES2; i++)
             for (unsigned int j = 0; j < NPARTICLES2; j++)
@@ -478,7 +572,7 @@ void nPELICAN(
                     fprintf(fp, " %.17g", (double)Tp_q[i][j][h]);
         fprintf(fp, "\n");
 
-        // Tr: 968 values, same order (t0-grid; approx). Reconstructed for the dump ONLY —
+        // Tr: NPARTICLES2^2*NHIDDEN values, same order (t0-grid; approx). Reconstructed for the dump ONLY —
         // the datapath now folds BN2 past the aggregation (#2), so Tr is never materialized.
         // Uses the same folded affine (Tp_q·s + β') the collapsed path is derived from.
         fprintf(fp, "Tr:");
@@ -490,15 +584,45 @@ void nPELICAN(
                 }
         fprintf(fp, "\n");
 
-        // R: 4 values, order R[0][0] R[0][1] R[1][0] R[1][1] (exact)
-        fprintf(fp, "R: %.17g %.17g %.17g %.17g\n",
-                (double)R[0][0], (double)R[0][1],
-                (double)R[1][0], (double)R[1][1]);
+        // R: NHIDDEN*2 values, order R[0][0] R[0][1] R[1][0] R[1][1] ... (exact)
+        fprintf(fp, "R:");
+        for (unsigned int h = 0; h < NHIDDEN; h++)
+            for (unsigned int a = 0; a < 2; a++)
+                fprintf(fp, " %.17g", (double)R[h][a]);
+        fprintf(fp, "\n");
 
-        // Rp: 1 value (output_quant grid; exact)
-        fprintf(fp, "Rp: %.17g\n", (double)Rp[0]);
+#ifdef NPELICAN_HEAD
+        // Rq: K values (agg_2to0.act_layer output, relu0_t; exact)
+        fprintf(fp, "Rq:");
+        for (unsigned int k = 0; k < NPELICAN_HEAD; k++)
+            fprintf(fp, " %.17g", (double)Rq[k]);
+        fprintf(fp, "\n");
+        // Hp: NOUT values (head MAC, pre output_quant)
+        fprintf(fp, "Hp:");
+        for (unsigned int o = 0; o < NOUT; o++)
+            fprintf(fp, " %.17g", (double)Hp[o]);
+        fprintf(fp, "\n");
+        // Rp: ALWAYS the final logits (== golden dump Rp), here the head output
+        fprintf(fp, "Rp:");
+        for (unsigned int o = 0; o < NOUT; o++)
+            fprintf(fp, " %.17g", (double)Hp[o]);
+        fprintf(fp, "\n");
+#else
+        // Rp: NOUT values (output_quant grid; exact)
+        fprintf(fp, "Rp:");
+        for (unsigned int o = 0; o < NOUT; o++)
+            fprintf(fp, " %.17g", (double)Rp[o]);
+        fprintf(fp, "\n");
+#endif
     }
 #endif
 
-    model_out[0] = (result_t)Rp[0];
+    for (unsigned int o = 0; o < NOUT; o++) {
+    #pragma HLS unroll
+#ifdef NPELICAN_HEAD
+      model_out[o] = (result_t)Hp[o];
+#else
+      model_out[o] = (result_t)Rp[o];
+#endif
+    }
 }

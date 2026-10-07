@@ -21,7 +21,7 @@ size_t trace_type_size = sizeof(double);
 // Stage-dump file pointer: set by TB around the single re-run (Task 3).
 #ifndef __SYNTHESIS__
 extern FILE* npelican_dump_fp;
-extern dot_t* npelican_dots_override;   // DOTS-LEVEL injection hook (see nPELICAN.cpp)
+extern dotall_t* npelican_dots_override;   // DOTS-LEVEL injection hook (see nPELICAN.cpp)
 #endif
 
 // Constant beam spurions (1,0,0,+1)/(1,0,0,-1). The firmware now takes the two
@@ -32,6 +32,70 @@ extern dot_t* npelican_dots_override;   // DOTS-LEVEL injection hook (see nPELIC
 static void fill_const_beams(input_t b[8]) {
     static const double c[8] = {1, 0, 0, 1, 1, 0, 0, -1};
     for (int k = 0; k < 8; k++) b[k] = c[k];
+}
+
+// NOUT-logit line I/O. A golden_logits.dat line carries NOUT space-separated values
+// (NOUT=1: one value, the historical format). parse_logits returns how many values
+// it read (at most NOUT); format_logits writes NOUT "%.17g" values separated by
+// single spaces, newline-terminated (NOUT=1 -> exactly "%.17g\n").
+// The nobj port is a COUNT OF PARTICLES PRESENT IN THE NPARTICLES INPUT SLOTS (0..NPARTICLES);
+// the firmware remaps it to the active row/col count incl. beams. Dataset files may carry
+// the RAW multiplicity (hls4ml: up to 150), which would wrap in the narrow port and mask
+// out real particles -- clamp exactly as the exporter does (min(raw, NPARTICLES)).
+static int clamp_nobj(int n) { return n > NPARTICLES ? NPARTICLES : (n < 0 ? 0 : n); }
+
+// Jet spurion (NPELICAN_JET_SPURION, checkpoints trained with --add-jet): the top gains a
+// jet_input[4] port (full-jet E,px,py,pz in GeV -> spurion slot 2). NP_CALL hides the
+// extra argument so every call site reads the same with and without the define.
+#ifdef NPELICAN_JET_SPURION
+#define NP_CALL(mi, bi, ji, n, out) nPELICAN(mi, bi, ji, n, out)
+// Parse one line of 4 floats (E px py pz) into jet[4]; false on a short/missing line.
+static bool read_jet_line(std::istream &is, jet_t jet[4]) {
+    std::string line;
+    if (!std::getline(is, line)) return false;
+    std::vector<float> v;
+    char *c = const_cast<char *>(line.c_str());
+    char *t = strtok(c, " ");
+    while (t != NULL) { v.push_back(atof(t)); t = strtok(NULL, " "); }
+    if (v.size() < 4) return false;
+    nnet::copy_data<float, jet_t, 0, 4>(v, jet);
+    return true;
+}
+// Harnesses not yet updated for the jet (equivariance, legacy 10k): zero jet + ONE warning.
+static void zero_jet_warn(jet_t jet[4], const char *missing) {
+    static bool warned = false;
+    for (int k = 0; k < 4; k++) jet[k] = 0;
+    if (!warned) {
+        printf("WARNING: %s not found -- driving the jet spurion with ZEROS (this harness is "
+               "not updated for --add-jet checkpoints; outputs are NOT the trained model's)\n",
+               missing);
+        warned = true;
+    }
+}
+#else
+#define NP_CALL(mi, bi, ji, n, out) nPELICAN(mi, bi, n, out)
+#endif
+
+static int parse_logits(const std::string &line, double out[NOUT]) {
+    std::vector<char> buf(line.begin(), line.end());
+    buf.push_back('\0');
+    int k = 0;
+    char *t = strtok(buf.data(), " ");
+    while (t != NULL && k < NOUT) {
+        out[k++] = std::stod(t);
+        t = strtok(NULL, " ");
+    }
+    return k;
+}
+static std::string format_logits(const result_t v[NOUT]) {
+    std::string s;
+    char buf[64];
+    for (int o = 0; o < NOUT; o++) {
+        snprintf(buf, sizeof(buf), (o == 0) ? "%.17g" : " %.17g", double(v[o]));
+        s += buf;
+    }
+    s += "\n";
+    return s;
 }
 
 // The golden-vector / dots-level gate is OPT-IN. By default csim runs the legacy
@@ -48,7 +112,7 @@ int main(int argc, char **argv) {
     // tb_data/equiv_in_pmu.dat (one event/line, NPARTICLES*4 = 80 floats,
     // beams added INSIDE the firmware exactly as in the golden path) and the
     // per-event RAW Nobj from tb_data/equiv_in_nobj.dat, run dot4+net, and
-    // write the logit to tb_data/equiv_out_logits.dat (%.17g, one per line).
+    // write the NOUT logits to tb_data/equiv_out_logits.dat (%.17g, one event per line).
     // No comparison: this is a batch oracle for f_b(x). Mirrors the
     // RUN_GOLDEN_GATE reader/writer so the path is byte-identical to the
     // validated golden path (the harness proves this via a golden-gate check
@@ -68,12 +132,16 @@ int main(int argc, char **argv) {
         // fixed-beam path stays available against the same binary.
         std::ifstream febeams("tb_data/equiv_in_beams.dat");
         bool have_beams = febeams.good();
+#ifdef NPELICAN_JET_SPURION
+        std::ifstream fejet("tb_data/equiv_in_jet.dat");
+        bool have_jet = fejet.good();
+#endif
         std::ofstream feout("tb_data/equiv_out_logits.dat");
 
         int n_events = 0;
         std::string pmu_line, nobj_line, beams_line;
         while (std::getline(fepmu, pmu_line) && std::getline(fenobj, nobj_line)) {
-            // Parse NPARTICLES*4 = 80 floats from pmu_line
+            // Parse NPARTICLES*4 floats from pmu_line
             char *cstr = const_cast<char *>(pmu_line.c_str());
             char *current;
             std::vector<float> in;
@@ -99,12 +167,15 @@ int main(int argc, char **argv) {
                 fill_const_beams(beam_input);
             }
 
-            result_t model_out[1];
-            nPELICAN(model_input, beam_input, nobj_val, model_out);
+            jet_t jet_input[4];
+#ifdef NPELICAN_JET_SPURION
+            if (!(have_jet && read_jet_line(fejet, jet_input)))
+                zero_jet_warn(jet_input, "tb_data/equiv_in_jet.dat");
+#endif
+            result_t model_out[NOUT];
+            NP_CALL(model_input, beam_input, jet_input, clamp_nobj(nobj_val), model_out);
 
-            char buf[64];
-            snprintf(buf, sizeof(buf), "%.17g\n", double(model_out[0]));
-            feout << buf;
+            feout << format_logits(model_out);
             n_events++;
         }
         feout.close();
@@ -127,6 +198,17 @@ int main(int argc, char **argv) {
         std::ifstream fgpmu("tb_data/golden_pmu.dat");
         std::ifstream fgnobj("tb_data/golden_nobj.dat");
         std::ifstream fglogits("tb_data/golden_logits.dat");
+#ifdef NPELICAN_JET_SPURION
+        // Jet-spurion firmware: the full-jet 4-momentum per event is REQUIRED (no fallback;
+        // a zero jet would silently gate a different model).
+        std::ifstream fgjet("tb_data/golden_jet.dat");
+        if (!fgjet.good()) {
+            printf("GOLDEN GATE: ERROR tb_data/golden_jet.dat missing but the firmware was built "
+                   "with NPELICAN_JET_SPURION (re-export golden vectors with export_golden.py "
+                   "for this --add-jet checkpoint)\n");
+            return 1;
+        }
+#endif
         std::ofstream fgout("tb_data/golden_fw_results.log");
 
         int n_events = 0;
@@ -140,7 +222,7 @@ int main(int argc, char **argv) {
                std::getline(fgnobj, nobj_line) &&
                std::getline(fglogits, logit_line)) {
 
-            // Parse NPARTICLES*4 = 80 floats from pmu_line
+            // Parse NPARTICLES*4 floats from pmu_line
             char *cstr = const_cast<char *>(pmu_line.c_str());
             char *current;
             std::vector<float> in;
@@ -153,27 +235,43 @@ int main(int argc, char **argv) {
             // Parse nobj
             int nobj_val = std::stoi(nobj_line);
 
-            // Parse golden logit (double)
-            double golden_logit = std::stod(logit_line);
+            // Parse NOUT golden logits (double)
+            double golden_logit[NOUT];
+            int n_gl = parse_logits(logit_line, golden_logit);
+            if (n_gl < NOUT) {
+                printf("GOLDEN GATE: ERROR golden_logits.dat has %d value(s)/line but firmware NOUT=%d (re-export golden vectors for this checkpoint)\n",
+                       n_gl, (int)NOUT);
+                return 1;
+            }
 
             // Run firmware
             input_t model_input[NPARTICLES*4];
             nnet::copy_data<float, input_t, 0, NPARTICLES*4>(in, model_input);
             input_t beam_input[8];
             fill_const_beams(beam_input);
-            result_t model_out[1];
-            nPELICAN(model_input, beam_input, nobj_val, model_out);
+            jet_t jet_input[4];
+#ifdef NPELICAN_JET_SPURION
+            if (!read_jet_line(fgjet, jet_input)) {
+                printf("GOLDEN GATE: ERROR tb_data/golden_jet.dat ran out / malformed at event %d\n", n_events);
+                return 1;
+            }
+#endif
+            result_t model_out[NOUT];
+            NP_CALL(model_input, beam_input, jet_input, clamp_nobj(nobj_val), model_out);
 
-            double fw_logit = double(model_out[0]);
+            // Write firmware logits to log (NOUT x %.17g per line, space-separated)
+            fgout << format_logits(model_out);
 
-            // Write firmware logit to log (%.17g, one value per line)
-            char buf[64];
-            snprintf(buf, sizeof(buf), "%.17g\n", fw_logit);
-            fgout << buf;
-
-            // Compare
-            double delta = fabs(fw_logit - golden_logit);
-            if (fw_logit == golden_logit) {
+            // Compare: exact iff ALL NOUT outputs match; delta = max over outputs
+            bool all_eq = true;
+            double delta = 0.0;
+            for (int o = 0; o < NOUT; o++) {
+                double fw_logit = double(model_out[o]);
+                if (fw_logit != golden_logit[o]) all_eq = false;
+                double d = fabs(fw_logit - golden_logit[o]);
+                if (d > delta) delta = d;
+            }
+            if (all_eq) {
                 n_exact++;
             } else {
                 n_mismatch++;
@@ -225,6 +323,9 @@ int main(int argc, char **argv) {
             std::ifstream fdnobj("tb_data/golden_nobj.dat");
             std::ifstream fddots("tb_data/golden_dots.dat");
             std::ifstream fdlogits("tb_data/golden_logits.dat");
+#ifdef NPELICAN_JET_SPURION
+            std::ifstream fdjet("tb_data/golden_jet.dat");
+#endif
 
             int d_events = 0, d_exact = 0, d_mismatch = 0, d_first = -1;
             double d_maxdelta = 0.0;
@@ -236,24 +337,43 @@ int main(int argc, char **argv) {
                 { char *c = const_cast<char*>(dpmu.c_str()); char *t = strtok(c, " ");
                   while (t) { in.push_back(atof(t)); t = strtok(NULL, " "); } }
                 // injected dots (484 values, row-major)
-                static dot_t dots_inj[NPARTICLES2*NPARTICLES2];
+                static dotall_t dots_inj[NPARTICLES2*NPARTICLES2];
                 { char *c = const_cast<char*>(ddots.c_str()); char *t = strtok(c, " ");
-                  int k = 0; while (t && k < NPARTICLES2*NPARTICLES2) { dots_inj[k++] = (dot_t)atof(t); t = strtok(NULL, " "); } }
+                  int k = 0; while (t && k < NPARTICLES2*NPARTICLES2) { dots_inj[k++] = (dotall_t)atof(t); t = strtok(NULL, " "); } }
                 int nobj_val = std::stoi(dnobj);
-                double golden_logit = std::stod(dlogit);
+                double golden_logit[NOUT];
+                int n_dl = parse_logits(dlogit, golden_logit);
+                if (n_dl < NOUT) {
+                    printf("GOLDEN GATE: ERROR golden_logits.dat has %d value(s)/line but firmware NOUT=%d (re-export golden vectors for this checkpoint)\n",
+                           n_dl, (int)NOUT);
+                    return 1;
+                }
 
                 input_t model_input[NPARTICLES*4];
                 nnet::copy_data<float, input_t, 0, NPARTICLES*4>(in, model_input);
                 input_t beam_input[8];
                 fill_const_beams(beam_input);
-                result_t model_out[1];
+                jet_t jet_input[4];
+#ifdef NPELICAN_JET_SPURION
+                if (!read_jet_line(fdjet, jet_input)) {
+                    printf("DOTS-LEVEL: ERROR tb_data/golden_jet.dat ran out / malformed at event %d\n", d_events);
+                    return 1;
+                }
+#endif
+                result_t model_out[NOUT];
                 npelican_dots_override = dots_inj;
-                nPELICAN(model_input, beam_input, nobj_val, model_out);
+                NP_CALL(model_input, beam_input, jet_input, clamp_nobj(nobj_val), model_out);
                 npelican_dots_override = nullptr;
 
-                double fw_logit = double(model_out[0]);
-                double delta = fabs(fw_logit - golden_logit);
-                if (fw_logit == golden_logit) d_exact++;
+                bool all_eq = true;
+                double delta = 0.0;
+                for (int o = 0; o < NOUT; o++) {
+                    double fw_logit = double(model_out[o]);
+                    if (fw_logit != golden_logit[o]) all_eq = false;
+                    double d = fabs(fw_logit - golden_logit[o]);
+                    if (d > delta) delta = d;
+                }
+                if (all_eq) d_exact++;
                 else { d_mismatch++; if (d_first == -1) d_first = d_events; }
                 if (delta > d_maxdelta) d_maxdelta = delta;
                 d_events++;
@@ -296,29 +416,41 @@ int main(int argc, char **argv) {
             nnet::copy_data<float, input_t, 0, NPARTICLES*4>(in2, model_input2);
             input_t beam_input2[8];
             fill_const_beams(beam_input2);
-            result_t model_out2[1];
+            jet_t jet_input2[4];
+#ifdef NPELICAN_JET_SPURION
+            {
+                std::ifstream fgjet2("tb_data/golden_jet.dat");
+                for (int e = 0; e <= dump_event; e++) {
+                    if (!read_jet_line(fgjet2, jet_input2)) {
+                        printf("GOLDEN GATE: ERROR tb_data/golden_jet.dat has no line for dump event %d\n", dump_event);
+                        return 1;
+                    }
+                }
+            }
+#endif
+            result_t model_out2[NOUT];
 
 #ifndef __SYNTHESIS__
             // If golden dots exist, dump the DOTS-LEVEL path (network isolated from dot4)
             // so the stage dump reflects identical inputs to PyTorch.
-            static dot_t dump_dots_inj[NPARTICLES2*NPARTICLES2];
+            static dotall_t dump_dots_inj[NPARTICLES2*NPARTICLES2];
             std::ifstream fddump("tb_data/golden_dots.dat");
             if (fddump.good()) {
                 std::string dl;
                 for (int e = 0; e <= dump_event; e++) std::getline(fddump, dl);
                 char *c = const_cast<char*>(dl.c_str()); char *t = strtok(c, " ");
-                int k = 0; while (t && k < NPARTICLES2*NPARTICLES2) { dump_dots_inj[k++] = (dot_t)atof(t); t = strtok(NULL, " "); }
+                int k = 0; while (t && k < NPARTICLES2*NPARTICLES2) { dump_dots_inj[k++] = (dotall_t)atof(t); t = strtok(NULL, " "); }
                 npelican_dots_override = dump_dots_inj;
             }
             // Open dump file and set global pointer
             FILE* dump_fp = fopen("tb_data/fw_stage_dump.txt", "w");
             npelican_dump_fp = dump_fp;
-            nPELICAN(model_input2, beam_input2, nobj_val2, model_out2);
+            NP_CALL(model_input2, beam_input2, jet_input2, clamp_nobj(nobj_val2), model_out2);
             npelican_dump_fp = nullptr;
             npelican_dots_override = nullptr;
             fclose(dump_fp);
 #else
-            nPELICAN(model_input2, beam_input2, nobj_val2, model_out2);
+            NP_CALL(model_input2, beam_input2, jet_input2, clamp_nobj(nobj_val2), model_out2);
 #endif
 
             fgpmu2.close();
@@ -342,6 +474,10 @@ int main(int argc, char **argv) {
     std::ifstream fnobj("tb_data/full_nobj.dat");//get nobj per event
     // load predictions from text file
     std::ifstream fpr("tb_data/full_signal.dat");
+#ifdef NPELICAN_JET_SPURION
+    std::ifstream fjet("tb_data/full_jet.dat");
+    bool have_jet = fjet.good();
+#endif
 
 #ifdef RTL_SIM
     std::string RESULTS_LOG = "tb_data/rtl_cosim_results.log";
@@ -390,11 +526,16 @@ int main(int argc, char **argv) {
       nnet::copy_data<float, input_t, 0, NPARTICLES*4>(in, model_input);
       input_t beam_input[8];
       fill_const_beams(beam_input);
-      result_t model_out[1];
+      jet_t jet_input[4];
+#ifdef NPELICAN_JET_SPURION
+      if (!(have_jet && read_jet_line(fjet, jet_input)))
+          zero_jet_warn(jet_input, "tb_data/full_jet.dat");
+#endif
+      result_t model_out[NOUT];
 
             // hls-fpga-machine-learning insert top-level-function
             //input_t nobj = vnobj[0];
-            nPELICAN(model_input,beam_input,vnobj[0],model_out);
+            NP_CALL(model_input,beam_input,jet_input,clamp_nobj(vnobj[0]),model_out);
 
             if (e % CHECKPOINT == 0) {
                 std::cout << "Predictions" << std::endl;
@@ -407,12 +548,12 @@ int main(int argc, char **argv) {
                 std::cout << std::endl;
                 std::cout << "Quantized predictions" << std::endl;
                 // hls-fpga-machine-learning insert quantized
-                nnet::print_result<result_t, 1>(model_out, std::cout, true);
+                nnet::print_result<result_t, NOUT>(model_out, std::cout, true);
             }
             e++;
 
             // hls-fpga-machine-learning insert tb-output
-            nnet::print_result<result_t, 1>(model_out, fout);
+            nnet::print_result<result_t, NOUT>(model_out, fout);
         }
         fin.close();
         fpr.close();
@@ -424,16 +565,20 @@ int main(int argc, char **argv) {
     nnet::fill_zero<input_t, NPARTICLES*4>(model_input);
     input_t beam_input[8];
     fill_const_beams(beam_input);
-    result_t model_out[1];
+    jet_t jet_input[4];
+#ifdef NPELICAN_JET_SPURION
+    zero_jet_warn(jet_input, "tb_data/full_jet.dat");
+#endif
+    result_t model_out[NOUT];
 
         // hls-fpga-machine-learning insert top-level-function
-        nPELICAN(model_input,beam_input,1,model_out);
+        NP_CALL(model_input,beam_input,jet_input,1,model_out);
 
         // hls-fpga-machine-learning insert output
-        nnet::print_result<result_t, 1>(model_out, std::cout, true);
+        nnet::print_result<result_t, NOUT>(model_out, std::cout, true);
 
         // hls-fpga-machine-learning insert tb-output
-        nnet::print_result<result_t, 1>(model_out, fout);
+        nnet::print_result<result_t, NOUT>(model_out, fout);
     }
 
     fout.close();

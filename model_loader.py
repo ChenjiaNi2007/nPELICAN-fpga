@@ -4,6 +4,13 @@ model_loader.py  — export a nanoPELICAN checkpoint to firmware/weights/weights
 Merged version:
   * Auto-detects pre-refactor (.coefs) vs post-refactor (.mixing.weight) checkpoints.
   * Infers NHIDDEN / NOUT from tensor shapes.
+  * Jet spurion (ckpt args.add_jet): NSPURIONS=3 -> NPELICAN_JET_SPURION (jet_input port).
+  * --jet-quant-split (ckpt args.jet_quant_split): input_quant_jet / input_quant_mjet /
+    pmu_quant_jet -> NPELICAN_JET_QUANT_SPLIT + dotj_t / dotm_t / jet_t (+ dotall_t, the
+    exact container of all three dot grids). Without it they alias dot_t / input_t.
+  * Nonlinear head (head.weight present, ckpt args.head_hidden=K): agg_2to0 mixes to K
+    channels -> QuantReLU (relu0_t) -> head QuantLinear(K, NOUT) -> NPELICAN_HEAD K,
+    N2TO0_OUT K, w_head/b_head. --quant only (the float path refuses jet/head ckpts).
   * Float path runs STANDALONE (stub-unpickling, no PELICAN-nano install needed).
   * Quant path (--quant) rebuilds the model through Brevitas and exports the
     SNAPPED on-grid weights via quant_weight().value — the authoritative grid,
@@ -95,6 +102,25 @@ parser.add_argument('--pmu-extra-int-bits', type=int, default=0,
                          'PyTorch pmu_quant on clipped momenta — not a deployable export.')
 parser.add_argument('--pmu-keep-width', action='store_true', default=False,
                     help='With --pmu-extra-int-bits: hold input_t width fixed (coarser LSB).')
+parser.add_argument('--bias-guard-bits', type=int, default=8,
+                    help='Extra fractional bits kept in the bias literals beyond the MAC product '
+                         'grid, so the float bias is not snapped onto that grid and cannot create '
+                         'exact rounding ties at the following quantizer; 0 reproduces the '
+                         'pre-2026-10-06 single-grid behaviour.')
+parser.add_argument('--agg-guard-bits', type=int, default=8,
+                    help='Extra fractional bits for the stored BatchNorm1 output (bn1out_t) and its '
+                         'raw-sum accumulators beyond max(t2_F, t0_F)+1, so the N2-term aggregation sums '
+                         'cannot tip a post-aggregation rounding tie after the 1/Nbar rescale. 0 = the '
+                         'pre-2026-10-06 rule (default: 8).')
+parser.add_argument('--norm-guard-bits', type=int, default=8,
+                    help='Extra fractional bits for the 1/Nbar, 1/Nbar^2 normalize-late literals (norm_t) beyond '
+                         'the exact-product rule, so their non-po2 rounding error cannot flip a post-aggregation '
+                         'rounding tie (default: 8; 0 = pre-2026-10-07 rule).')
+parser.add_argument('--bn-guard-bits', type=int, default=0,
+                    help='Extra fractional bits for the BatchNorm literals (bn_t_gen) beyond the derived '
+                         't2_F + dot_mag + 2. Default 0 keeps the DSP-tuned literal width; 8 removes the '
+                         'last post-agg tie flips on jet-spurion checkpoints at DSP/timing cost. --bn-frac-bits '
+                         'still caps the result.')
 args = parser.parse_args()
 
 if args.out_types is None:
@@ -170,14 +196,39 @@ print(f'Checkpoint format: {"post-refactor (mixing.weight)" if fmt == "new" else
 # ---------------------------------------------------------------------------
 if fmt == 'new':
     NHIDDEN = sd['net2to2.eq_layers.0.mixing.weight'].shape[0]   # [NHIDDEN, 6]
-    NOUT    = sd['agg_2to0.mixing.weight'].shape[0]              # [NOUT, NHIDDEN*2]
+    N2TO0_OUT = sd['agg_2to0.mixing.weight'].shape[0]            # [K or NOUT, NHIDDEN*2]
+    if 'head.weight' in sd:
+        # --head-hidden K: 2->0 mixes down to K hidden channels, head maps K -> NOUT
+        NOUT = sd['head.weight'].shape[0]                         # [NOUT, K]
+        HEAD = N2TO0_OUT
+        if sd['head.weight'].shape[1] != HEAD:
+            sys.exit(f'ERROR: head.weight is {tuple(sd["head.weight"].shape)} but '
+                     f'agg_2to0.mixing has {HEAD} output rows.')
+    else:
+        NOUT = N2TO0_OUT
+        HEAD = 0
 else:
     NHIDDEN = sd['net2to2.eq_layers.0.coefs'].shape[1]           # [1, NHIDDEN, 6]
     NOUT    = sd['agg_2to0.coefs'].shape[1]                      # [NHIDDEN, NOUT, 2]
+    N2TO0_OUT, HEAD = NOUT, 0
+# Spurions prepended before the constituents: 2 beams (+ the full-jet 4-vector when the
+# checkpoint was trained with --add-jet). Mirrors PELICAN-nano collate_fn(add_jet).
+NSPURIONS = 3 if bool(_arg('add_jet', False)) else 2
+# --jet-quant-split: three learned d_ij quantizers (pairs / jet row+col / m_jet^2) and a
+# separate jet-momentum quantizer. Model-shaping: the rebuild must replay it.
+JET_QUANT_SPLIT = bool(_arg('jet_quant_split', False))
+if not JET_QUANT_SPLIT and any(k.split('.')[0] in ('input_quant_jet', 'input_quant_mjet', 'pmu_quant_jet')
+                               for k in sd):
+    sys.exit('ERROR: checkpoint has input_quant_jet/input_quant_mjet/pmu_quant_jet keys but its '
+             'args do not record jet_quant_split=True. Refusing to guess the dot grids.')
+if JET_QUANT_SPLIT and NSPURIONS != 3:
+    sys.exit('ERROR: checkpoint records jet_quant_split=True without add_jet (the split '
+             'quantizes the jet spurion row/col at slot 2).')
 if args.n_hidden is not None and args.n_hidden != NHIDDEN:
     print(f'WARNING: --n-hidden {args.n_hidden} overrides inferred NHIDDEN={NHIDDEN}')
     NHIDDEN = args.n_hidden
-print(f'NHIDDEN={NHIDDEN}, NOUT={NOUT}')
+print(f'NHIDDEN={NHIDDEN}, NOUT={NOUT}, head_hidden={HEAD}, NSPURIONS={NSPURIONS}, '
+      f'jet_quant_split={JET_QUANT_SPLIT}')
 
 # ---------------------------------------------------------------------------
 # C initialiser formatting
@@ -211,6 +262,14 @@ batch2  = np.column_stack((mean2, weight2 / np.sqrt(var2 + BN_EPS), bias2))
 # Float path — raw state-dict tensors
 # ---------------------------------------------------------------------------
 def _extract_float_weights():
+    if HEAD > 0 or NSPURIONS != 2:
+        # The jet/head firmware switches (NPELICAN_JET_SPURION, NPELICAN_HEAD, N2TO0_OUT,
+        # NSPURIONS) live in types_generated.h, which only the --quant path writes; weights.h
+        # is included too late to define them. Refuse rather than emit a header the firmware
+        # would silently compile as a no-jet / no-head model.
+        sys.exit(f'ERROR: checkpoint has head_hidden={HEAD} / add_jet={NSPURIONS == 3}; the '
+                 f'float (no --quant) export does not support the jet spurion or the '
+                 f'nonlinear head. Export a QAT checkpoint with --quant.')
     if fmt == 'new':
         w1  = np.ravel(sd['net2to2.eq_layers.0.mixing.weight'].numpy())
         b2  = sd['agg_2to0.mixing.bias'].numpy()
@@ -362,7 +421,7 @@ def _extract_quant_weights():
                      'prepends the 2 beam spurions.')
         _nobj = _arg('nobj', None)
         _nobj = 20 if _nobj is None else int(_nobj)
-        bfp_nslots = _nobj + 2
+        bfp_nslots = _nobj + NSPURIONS
 
     # Signedness of the d_ij grid. MUST match training: Brevitas derives scale() from the
     # same stored stat divided by a signedness-dependent int threshold (2^(b-1)-1 signed
@@ -427,16 +486,51 @@ def _extract_quant_weights():
                      'PELICAN-nano checkout at --repo has no such QuantConfig field. '
                      'Update it, or the emitted dot_t will use an unclamped scale.')
         qkw['input_clip_min'] = float(icm)
+    if JET_QUANT_SPLIT:
+        # Replayed (model-shaping: adds input_quant_jet / input_quant_mjet / pmu_quant_jet).
+        if 'jet_quant_split' not in QuantConfig.__dataclass_fields__:
+            sys.exit('ERROR: checkpoint was trained with --jet-quant-split but the PELICAN-nano '
+                     'checkout at --repo has no such QuantConfig field. Update it.')
+        if bfp:
+            sys.exit('ERROR: jet_quant_split with pmu_block_fp is not supported (PyTorch refuses it).')
+        qkw['jet_quant_split'] = True
+        # Per-quantizer widths (--jet-input-bit-width / --mjet-input-bit-width / --jet-pmu-bit-width).
+        # MUST be replayed: the rebuilt module's bit_width() is what sizes dotj_t/dotm_t/jet_t, and
+        # load_state_dict succeeds even with the wrong width (only the clip stat is stored), so a
+        # missing replay silently emits 6/6/12-bit jet types for a 10/16/20-bit checkpoint
+        # (caught by the real-checkpoint gate: 51/200).
+        for _f in ('jet_input_bit_width', 'mjet_input_bit_width', 'jet_pmu_bit_width'):
+            _v = _arg(_f, None)
+            if _v is not None:
+                if _f not in QuantConfig.__dataclass_fields__:
+                    sys.exit(f'ERROR: checkpoint sets {_f}={_v} but the PELICAN-nano checkout at --repo '
+                             f'has no such QuantConfig field; update it.')
+                qkw[_f] = int(_v)
     qcfg = QuantConfig(**qkw)
 
     def _build():
+        # n_out only for K-class heads: older PELICAN-nano checkouts' constructor
+        # lacks the kwarg, and NOUT=1 is their (only) default.
+        extra = {'n_out': NOUT} if NOUT != 1 else {}
+        if HEAD > 0:
+            extra['head_hidden'] = HEAD
         return PELICANNano(NHIDDEN, quant_config=qcfg,
                            batchnorm=_arg('batchnorm', 'b'),
-                           activation=_arg('activation', 'relu'))
+                           activation=_arg('activation', 'relu'), **extra)
 
     model = _build()
     model.load_state_dict(sd)
     model.eval()
+    if JET_QUANT_SPLIT:
+        _jq = [getattr(model, n, None) for n in ('input_quant_jet', 'input_quant_mjet')]
+        if any(q is None for q in _jq) or not bool(getattr(model, 'jet_quant_split', False)):
+            sys.exit('ERROR: checkpoint records jet_quant_split=True but the rebuilt model has '
+                     'no input_quant_jet / input_quant_mjet.')
+        if (pbw is not None) != (getattr(model, 'pmu_quant_jet', None) is not None):
+            sys.exit('ERROR: rebuilt pmu_quant_jet presence disagrees with pmu_bit_width.')
+        for _n, _q in zip(('input_quant_jet', 'input_quant_mjet'), _jq):
+            if bool(_q.act_quant.is_signed) == iuns:
+                sys.exit(f'ERROR: rebuilt {_n} signedness disagrees with input_unsigned={iuns}.')
 
     # Same guard for the momentum grid: the rebuilt pmu_quant must actually BE the
     # block-FP module, with the mantissa width and exponent clamp the run recorded.
@@ -457,7 +551,10 @@ def _extract_quant_weights():
                                       exp_max=int(pq.exp_max),
                                       from_energy=bool(pq.from_energy))
         if bfp_static:
-            _FW_NPARTICLES2 = 22   # firmware/nPELICAN.h NPARTICLES2 (NPARTICLES + 2 beams)
+            # Firmware NPARTICLES2 = NPARTICLES + 2 beams; NPARTICLES is emitted into
+            # types_generated.h from the checkpoint's nobj (fallback 20 -> 22).
+            _FW_NPARTICLES2 = ((int(_arg('nobj')) if _arg('nobj', None) is not None else 20)
+                               + NSPURIONS)
             if not bool(getattr(pq, 'static', False)):
                 sys.exit('ERROR: checkpoint records pmu_static_exp=True but the rebuilt '
                          'BlockFPQuant is not static.')
@@ -468,7 +565,8 @@ def _extract_quant_weights():
             if len(etab) != _FW_NPARTICLES2:
                 sys.exit(f'ERROR: static exponent table has {len(etab)} slots but the '
                          f'firmware has NPARTICLES2={_FW_NPARTICLES2} (beams + NPARTICLES). '
-                         f'Checkpoint nobj={bfp_nslots - 2}; the firmware needs nobj=20.')
+                         f'Checkpoint nobj={bfp_nslots - NSPURIONS}; the firmware NPARTICLES '
+                         f'(from checkpoint args.nobj, else 20) must equal it.')
             bad = [v for v in etab if v < max(bfp_emin, 0) or v > bfp_emax]
             if bad:
                 sys.exit(f'ERROR: static exponent table entries {bad} outside '
@@ -502,7 +600,16 @@ def _extract_quant_weights():
     qw1 = model.net2to2.eq_layers[0].mixing.quant_weight()
     qw2 = model.agg_2to0.mixing.quant_weight()
     weight_info = {}
-    for name, qw in (('net2to2.eq_layers.0', qw1), ('agg_2to0', qw2)):
+    _wq = [('net2to2.eq_layers.0', qw1), ('agg_2to0', qw2)]
+    if HEAD > 0:
+        if getattr(model, 'head', None) is None:
+            sys.exit('ERROR: checkpoint has head.* keys but the rebuilt model has no head '
+                     '(PELICAN-nano checkout at --repo too old for --head-hidden?).')
+        qwh = model.head.quant_weight()
+        _wq.append(('head', qwh))
+        if 'agg_2to0.act_layer' not in [n for n, _ in model.named_modules()]:
+            sys.exit('ERROR: head checkpoint but the rebuilt agg_2to0 has no act_layer.')
+    for name, qw in _wq:
         s = float(qw.scale.reshape(-1)[0])
         signed = bool(qw.signed) if hasattr(qw, 'signed') and qw.signed is not None else True
         bw = int(round(float(qw.bit_width)))
@@ -524,6 +631,10 @@ def _extract_quant_weights():
     b1  = sd['net2to2.eq_layers.0.bias'].numpy()
     b1d = sd['net2to2.eq_layers.0.diag_bias'].numpy()
     b2  = sd['agg_2to0.mixing.bias'].numpy()
+    if HEAD > 0:
+        # head weights row-major (NOUT, K) -> w_head[o*K + k]; float bias (D6)
+        _quant_info['head'] = dict(w=np.ravel(qwh.value.detach().numpy()),
+                                   b=sd['head.bias'].numpy())
     return w1, b1, b1d, w2, b2
 
 # ---------------------------------------------------------------------------
@@ -539,15 +650,37 @@ def _momentum_absmax(repo, default=2048.0):
     the QAT bit-width flags. Falls back to `default` (the historical 2048 GeV
     assumption -> I=12) if the sample data is unavailable, so the loader never
     fails just because the dataset isn't checked out."""
+    # The checkpoint's OWN dataset first (args.datadir, relative to the repo root or
+    # absolute): e.g. the 5-class hls4ml files reach |p| ~2.5 TeV, so sizing from the
+    # toptag sample would clip them. Then the toptag sample, then `default`.
+    cands = []
+    ddir = _arg('datadir', None)
+    if ddir:
+        ddir = ddir if os.path.isabs(ddir) else os.path.join(os.path.abspath(repo), ddir)
+        cands += [os.path.join(ddir, 'valid.h5'), os.path.join(ddir, 'test.h5')]
+    cands.append(os.path.join(os.path.abspath(repo), 'data', 'sample_data', 'valid.h5'))
     try:
         import h5py
-        path = os.path.join(os.path.abspath(repo), 'data', 'sample_data', 'valid.h5')
-        with h5py.File(path, 'r') as f:
-            return float(np.abs(f['Pmu'][:]).max())
-    except Exception as e:  # noqa: BLE001 - any I/O / key error -> documented fallback
-        print(f'  (input_t: sample 4-momenta unavailable [{e}]); '
-              f'using |p|max default {default}')
+    except Exception as e:  # noqa: BLE001
+        print(f'  (input_t: h5py unavailable [{e}]); using |p|max default {default}')
         return float(default)
+    errs = []
+    for path in cands:
+        try:
+            with h5py.File(path, 'r') as f:
+                pmax = float(np.abs(f['Pmu'][:]).max())
+                if NSPURIONS == 3:
+                    # --add-jet: the full-jet 4-vector (~1-5 TeV) also enters input_t
+                    jmax = float(np.abs(f['Pjet'][:]).max())
+                    print(f'  input_t: |Pjet|max = {jmax:.6g} (jet spurion) from {path}')
+                    pmax = max(pmax, jmax)
+            print(f'  input_t: |p|max = {pmax:.6g} from {path}')
+            return pmax
+        except Exception as e:  # noqa: BLE001 - any I/O / key error -> next candidate
+            errs.append(f'{path}: {e}')
+    print(f'  (input_t: 4-momenta unavailable [{"; ".join(errs)}]); '
+          f'using |p|max default {default}')
+    return float(default)
 
 
 def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
@@ -591,6 +724,26 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     # follow the signedness or an unsigned dot_t under-sizes them by a full bit.
     dot_mag = dot_I - 1 if dot_s else dot_I
 
+    # --- --jet-quant-split: the Gram matrix carries THREE learned grids (pairs: dot_t;
+    # jet row/col: dotj_t; m_jet^2: dotm_t). The dots array holds all of them exactly in
+    # dotall_t (I = max I, F = max F). Every range/precision bound that previously used the
+    # dot_t span (input_t F, BN_F, bn1out_t) now uses dotall_t's. Without the split dotall
+    # == dot, so these stay byte-identical.
+    if JET_QUANT_SPLIT:
+        _aj, _am = act['input_quant_jet'], act['input_quant_mjet']
+        dotj_W, dotj_I, dotj_s, dotj_k = _pt(_aj['scale'], _aj['signed'], _aj['bits'], 'input_quant_jet')
+        dotm_W, dotm_I, dotm_s, dotm_k = _pt(_am['scale'], _am['signed'], _am['bits'], 'input_quant_mjet')
+        if not (dot_s == dotj_s == dotm_s):
+            sys.exit('ERROR: input_quant / input_quant_jet / input_quant_mjet signedness differ.')
+        dotall_I = max(dot_I, dotj_I, dotm_I)
+        dotall_F = max(dot_F, dotj_W - dotj_I, dotm_W - dotm_I)
+        dotall_W = dotall_I + dotall_F
+        print(f'  jet quant split: dot_t k={dot_k} (I={dot_I}), dotj_t k={dotj_k} (I={dotj_I}), '
+              f'dotm_t k={dotm_k} (I={dotm_I}) -> dotall_t <{dotall_W},{dotall_I}>')
+    else:
+        dotall_I, dotall_F, dotall_W = dot_I, dot_F, dot_W
+    dotall_mag = dotall_I - 1 if dot_s else dotall_I
+
     # --- input_t: raw-momentum / IO type feeding dot4 (the 36x36 multipliers that
     # dominate DSP). NOT a learned quantizer (input_quant grids the DOTS, dot_t), so it
     # is widened analytically. Two independent parts:
@@ -604,6 +757,7 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     pmax = _momentum_absmax(args.repo)
     pmu = act.get('pmu_quant')
     bfp = _quant_info.get('blockfp')
+    _pj = None   # pmu_quant_jet (only under --jet-quant-split with a trained pmu grid)
     if bfp is not None:
         # --- Lever 7: PER-PARTICLE BLOCK FLOATING POINT ---------------------------
         # p_k = m_k * 2^e with ONE exponent shared by a particle's four components:
@@ -704,6 +858,13 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
             sys.exit('ERROR: pmu_quant is unsigned; momenta need a signed type.')
         INPUT_W, INPUT_I, _, INPUT_k = _pt(pmu['scale'], pmu['signed'], pmu['bits'], 'pmu_quant')
         INPUT_F = INPUT_W - INPUT_I
+        _pj = act.get('pmu_quant_jet')
+        if _pj is not None:
+            if not _pj['signed']:
+                sys.exit('ERROR: pmu_quant_jet is unsigned; momenta need a signed type.')
+            JET_W, JET_I, _, JET_k = _pt(_pj['scale'], _pj['signed'], _pj['bits'], 'pmu_quant_jet')
+            print(f'  (jet_t from TRAINED pmu_quant_jet: W={JET_W}, I={JET_I}, '
+                  f'momentum LSB = 2^{-(JET_W - JET_I):+d} GeV)')
         print(f'  (input_t from TRAINED pmu_quant: W={INPUT_W}, I={INPUT_I}, '
               f'clip ±2^{INPUT_I - 1} vs |p|max={pmax:.1f} in sample, '
               f'momentum LSB = 2^{-INPUT_F:+d} GeV)')
@@ -721,7 +882,7 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
         INPUT_I = _int_bits(pmax)
         # Floor at 0: a very coarse dot grid (dot_F <= -(Pbits+3)) genuinely needs no
         # fractional momentum bits, but ap_fixed requires F >= 0 (W >= I).
-        INPUT_F = max(0, int(math.ceil(math.log2(pmax))) + dot_F + 3)
+        INPUT_F = max(0, int(math.ceil(math.log2(pmax))) + dotall_F + 3)   # dotall_F == dot_F w/o split
         INPUT_W = INPUT_I + INPUT_F
 
         # --- Lever 2: optional cap on input_t width (--max-input-bits). Trades dot4
@@ -751,9 +912,23 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     # the bias-rounding error (2^-(BIAS_F+1)) stays <= 1/4 LSB of whichever grid it feeds;
     # +1 = guard bit. Derived from the learned scales so it tracks the QAT bit-width flags
     # (was a hardcoded 24, sized for the old 24-bit grids).
-    BIAS_F = max(relu_F, out_F) + 1
+    BIAS_F = max(relu_F, out_F) + 1          # legacy single-grid rule (kept for the log only)
     BIAS_I = _int_bits(bias_max)
     BIAS_W = BIAS_I + BIAS_F
+    # Per-stage bias types (2026-10-06): a bias is added to a MAC sum whose grid is the exact
+    # product grid (w_F + t_F). The old max(relu_F,out_F)+1 rule left up to 1/4 LSB of bias
+    # error (6-bit 5-class ckpt: b2=-0.0053 -> 0, 146/200 golden mismatches, all in Rp).
+    # Snapping the bias onto the product grid itself is still not enough: the products are
+    # exact on that grid, so a grid-rounded bias can land the pre-quantizer sum EXACTLY on a
+    # half-LSB tie of the next quantizer (ev 34: Rp=0.21875=3.5 LSB -> RNE 0.25, while torch's
+    # float 0.218444 -> 0.1875). G = --bias-guard-bits extra fractional bits keep the bias off
+    # that grid (error <= 2^-(w_F+t_F+G+1)), so ties are as unlikely as in float32.
+    BIAS_G = args.bias_guard_bits
+    BIAS1_F = (w1_W - w1_I) + (t2_W - t2_I) + BIAS_G
+    BIAS2_F = (w2_W - w2_I) + (t0_W - t0_I) + BIAS_G
+    BIAS1_I = _int_bits(float(max(abs(np.asarray(b1)).max(), abs(np.asarray(b1d)).max())))
+    BIAS2_I = _int_bits(float(abs(np.asarray(b2)).max()))
+    BIAS1_W, BIAS2_W = BIAS1_I + BIAS1_F, BIAS2_I + BIAS2_F
 
     bn_max = float(np.abs(np.asarray(batch1)).max())
     bn_max = max(bn_max, float(np.abs(np.asarray(batch2)).max()))
@@ -761,7 +936,11 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     # error stays under half the t2 LSB even for dots spanning the full dot_t range
     # (data-independent / robust to the learned mean). +2 is margin.
     BN_I = _int_bits(bn_max)
-    BN_F = t2_F + dot_mag + 2
+    # BN guard bits (2026-10-07, default 0 = unchanged resource behaviour): the BN1 scale literal is
+    # DSP-bound and deliberately short (see --bn-frac-bits); its relative error (6.6e-5 at 13 bits)
+    # times a large dot sum can flip a post-agg rounding tie (measured: a jdotp 1.7e-5 LSB from the
+    # tie on a 6-bit 5-class jet checkpoint -> 199/200). G extra bits buy exactness at DSP cost.
+    BN_F = t2_F + dotall_mag + 2 + int(args.bn_guard_bits)      # dotall_mag == dot_mag without --jet-quant-split
     # --- BN1 DSP threshold cap (--bn-frac-bits) ---
     # The BN1 scale gamma/sigma is a SCALAR constant multiplying every dot, so its snapped
     # literal width decides the binding of NPARTICLES2*(NPARTICLES2+1)/2 multipliers at once.
@@ -796,8 +975,13 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     # NPARTICLES2 is a firmware constant the loader already mirrors (NPELICAN.h:
     # NPARTICLES2 = NPARTICLES + 2 = 22); accumulators are NOT covered by any
     # learned scale, so they get explicit integer headroom over the summand type.
-    NPARTICLES = 20
-    NPARTICLES2 = NPARTICLES + 2
+    # (legacy rule: sized for NPARTICLES=20 regardless of the checkpoint's nobj; the jet
+    # spurion adds one row/col -> 20 + NSPURIONS.)
+    # Accumulator headroom follows the CHECKPOINT's particle count (fallback 20): sums run over
+    # NPARTICLES2^2 (full) / NPARTICLES2 (row) terms, and the acc types have no AP_SAT, so an
+    # under-sized accumulator (e.g. a 20-slot rule applied to an N=32 export) would wrap silently.
+    NPARTICLES = int(_arg('nobj')) if _arg('nobj', None) is not None else 20
+    NPARTICLES2 = NPARTICLES + NSPURIONS
     H2 = math.ceil(math.log2(NPARTICLES2 ** 2))   # full-sum headroom = 9
     H1 = math.ceil(math.log2(NPARTICLES2))        # row-sum headroom  = 5
 
@@ -808,11 +992,17 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     # leave a ~2^-19 per-term error that, summed and renormalized, tips the post-agg rounding
     # boundary and breaks bit-exactness. AGG_F exceeds the finest post-agg grid so neither
     # path's rounding tips (normalized rounding error ~ 2^-(AGG_F+2.3) << half the t0 LSB).
-    AGG_F = max(t2_W - t2_I, t0_W - t0_I) + 1            # = max(t2_F, t0_F) + 1 = 24
+    # Aggregation guard bits (2026-10-06): batch1 is SUMMED over up to NPARTICLES2 entries
+    # before the single x1/Nbar rescale and t2 rounding, so its storage grid must be set by
+    # the SUM's error budget, not the per-element grid: N2 terms x 2^-(AGG_F+1) each, /Nbar,
+    # must stay far below half a t2 LSB or the rescaled sum tips a rounding tie (seen on a
+    # 6-bit checkpoint: jdotp row sum at exactly -0.25 = -1/2 LSB -> firmware 0, PyTorch -0.5).
+    # G extra bits make that error 2^-G smaller; same idea as --bias-guard-bits.
+    AGG_F = max(t2_W - t2_I, t0_W - t0_I) + 1 + int(args.agg_guard_bits)   # = max(t2_F, t0_F) + 1 + G
 
     # batch1 = BatchNorm1(dots): range bound from the dot_t span and the BN1 constants.
     bn1 = np.asarray(batch1).reshape(-1)                 # [mean, scale, beta]
-    dot_max = 2.0 ** dot_mag
+    dot_max = 2.0 ** dotall_mag   # dots span dotall_t (jet dots / m_jet^2 under the split)
     bn1_bound = (dot_max + abs(bn1[0])) * abs(bn1[1]) + abs(bn1[2])
     bn1_I = int(math.ceil(math.log2(bn1_bound))) + 1     # +1 sign bit
     bn1_W = bn1_I + AGG_F
@@ -850,7 +1040,32 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     mac2_I = w1_I + t2_I + math.ceil(math.log2(mac2_terms))
     mac2_W = mac2_I + (w1_F + t2_F)
     mac0_I = w2_I + t0_I + math.ceil(math.log2(mac0_terms))
-    mac0_W = mac0_I + (w2_F + t0_F)
+    # mac0_t also receives b2 (F = w2_F+t0_F+G): widen F to BIAS2_F so that add is exact.
+    mac0_W = mac0_I + BIAS2_F
+    # mac2_t is NOT widened (NPARTICLES2^2*NHIDDEN accumulators x 8 terms); the bias is added
+    # once per element in mac2b_t (same I, F = BIAS1_F) just before the relu quantizer.
+    mac2b_I = mac2_I
+    mac2b_W = mac2b_I + BIAS1_F
+
+    # --- Nonlinear head (--head-hidden K): agg_2to0.act_layer quantizer -> relu0_t, head
+    # weight quantizer -> wh_gen_t; float head bias with guard bits on the head product grid
+    # (biash_t_gen, same G as bias2_t_gen); head MAC mach_t with exact products + exact
+    # bias add (like mac0_t): I = wh_I + relu0_I + ceil(log2(K+1)), F = BIASH_F.
+    head = None
+    if HEAD > 0:
+        _ra = act['agg_2to0.act_layer']
+        r0_W, r0_I, r0_s, r0_k = _pt(_ra['scale'], _ra['signed'], _ra['bits'], 'agg_2to0.act_layer (head ReLU)')
+        _wh = wgt['head']
+        wh_W, wh_I, wh_s, wh_k = _pt(_wh['scale'], _wh['signed'], _wh['bits'], 'head weights')
+        b_head = _quant_info['head']['b']
+        BIASH_F = (wh_W - wh_I) + (r0_W - r0_I) + BIAS_G
+        BIASH_I = _int_bits(float(np.abs(np.asarray(b_head)).max()))
+        BIASH_W = BIASH_I + BIASH_F
+        mach_terms = HEAD + 1             # K products wh*relu0 + bias
+        mach_I = wh_I + r0_I + math.ceil(math.log2(mach_terms))
+        mach_W = mach_I + BIASH_F
+        head = dict(r0=(r0_W, r0_I, r0_s, r0_k, _ra['scale']), wh=(wh_W, wh_I, wh_s, wh_k, _wh['scale']),
+                    biash=(BIASH_W, BIASH_I, BIASH_F), mach=(mach_W, mach_I, mach_terms))
 
     def _fixed(W, I, signed, rnd='AP_RND_CONV', sat='AP_SAT'):
         base = 'ap_fixed' if signed else 'ap_ufixed'
@@ -859,6 +1074,22 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     L = []
     L.append('#ifndef NPELICAN_TYPES_GENERATED_H_')
     L.append('#define NPELICAN_TYPES_GENERATED_H_')
+    L.append('')
+    L.append('// Model dimensions read from the checkpoint. nPELICAN.h guards its hand')
+    L.append('// defaults with #ifndef, so these take precedence (NPARTICLES2 = NPARTICLES + NSPURIONS).')
+    _nobj = _arg('nobj', None)
+    if _nobj is not None:
+        L.append(f'#define NPARTICLES {int(_nobj)}')
+    else:
+        L.append('// checkpoint args.nobj was None: NPARTICLES keeps the nPELICAN.h hand default')
+    L.append(f'#define NHIDDEN {NHIDDEN}')
+    L.append(f'#define NOUT {NOUT}')
+    L.append(f'#define NSPURIONS {NSPURIONS}  // 2 beams' + (' + full-jet spurion (args.add_jet)' if NSPURIONS == 3 else ''))
+    if NSPURIONS == 3:
+        L.append('#define NPELICAN_JET_SPURION 1  // top gains jet_t jet_input[4] -> slot 2')
+    if HEAD > 0:
+        L.append(f'#define NPELICAN_HEAD {HEAD}  // args.head_hidden: 2->0 -> K ReLU -> K->NOUT head')
+        L.append(f'#define N2TO0_OUT {HEAD}')
     L.append('')
     L.append('// GENERATED by model_loader.py --quant. Do not hand-edit.')
     L.append('// Per-quantizer fixed-point types derived from the checkpoint\'s learned')
@@ -893,6 +1124,10 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     L.append(f'typedef {_fixed(out_W, out_I, out_s)} result_t;  // == out_t (output_quant grid)')
     L.append(_pt_line('w1_gen_t', w1_W,   w1_I,   w1_s,   wgt['net2to2.eq_layers.0']['scale'], w1_k, '2->2 weights'))
     L.append(_pt_line('w2_gen_t', w2_W,   w2_I,   w2_s,   wgt['agg_2to0']['scale'], w2_k, '2->0 weights'))
+    if head is not None:
+        _r0, _wh = head['r0'], head['wh']
+        L.append(_pt_line('relu0_t', _r0[0], _r0[1], _r0[2], _r0[4], _r0[3], 'agg_2to0.act_layer (head QuantReLU)'))
+        L.append(_pt_line('wh_gen_t', _wh[0], _wh[1], _wh[2], _wh[4], _wh[3], 'head weights'))
     L.append('')
     L.append('// ---- Raw-momentum / IO interface type (input_t): operand of the dot4')
     if bfp is not None:
@@ -931,6 +1166,27 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     else:
         L.append(f'typedef ap_fixed<{INPUT_W}, {INPUT_I}, AP_RND_CONV, AP_SAT> input_t;'
                  f'  // raw momenta; |p|max={pmax:.1f} (I={INPUT_I}), F={INPUT_F} (dot_F={dot_F})')
+    L.append('')
+    L.append('// ---- Jet-spurion quantizer split (--jet-quant-split). Without it these alias the')
+    L.append('//      single-grid types, so the firmware can always name them (byte-identical).')
+    L.append('#define NPELICAN_JET_TYPES_GENERATED 1')
+    if JET_QUANT_SPLIT:
+        L.append('#define NPELICAN_JET_QUANT_SPLIT 1  // args.jet_quant_split: d[2,j]/d[i,2] -> dotj_t, d[2,2] -> dotm_t')
+        L.append(_pt_line('dotj_t', dotj_W, dotj_I, dotj_s, act['input_quant_jet']['scale'], dotj_k, 'input_quant_jet'))
+        L.append(_pt_line('dotm_t', dotm_W, dotm_I, dotm_s, act['input_quant_mjet']['scale'], dotm_k, 'input_quant_mjet'))
+        L.append(f'typedef {_fixed(dotall_W, dotall_I, dot_s)} dotall_t;'
+                 f'  // dots array: I = max I, F = max F of dot_t/dotj_t/dotm_t (exact container)')
+        if _pj is not None:
+            L.append(f'typedef ap_fixed<{JET_W}, {JET_I}, AP_RND_CONV, AP_SAT> jet_t;'
+                     f'  // jet_input port: TRAINED pmu_quant_jet grid, scale=2^-{JET_k} '
+                     f'({_pj["scale"]:.9e}), bits={JET_W}')
+        else:
+            L.append('typedef input_t jet_t;  // no trained momentum grid: jet shares input_t')
+    else:
+        L.append('typedef dot_t dotj_t;')
+        L.append('typedef dot_t dotm_t;')
+        L.append('typedef dot_t dotall_t;')
+        L.append('typedef input_t jet_t;')
     L.append('')
 
     if bfp is not None:
@@ -988,8 +1244,15 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     L.append('// error must stay below half the LSB of the next real quantizer they feed.')
     # bias_t_gen: biases feed the dense MAC then the relu/out quantizers (2^-22 / 2^-23);
     # F=24 keeps |err|<=2^-25, and the integer width is derived from |bias|max (above).
-    L.append(f'typedef ap_fixed<{BIAS_W}, {BIAS_I}, AP_RND_CONV, AP_SAT> bias_t_gen;'
-             f'  // b1,b1_diag,b2 (float); |bias|max={bias_max:.6g} (I={BIAS_I}), F={BIAS_F}')
+    L.append(f'typedef ap_fixed<{BIAS1_W}, {BIAS1_I}, AP_RND_CONV, AP_SAT> bias1_t_gen;'
+             f'  // b1,b1_diag (float): F = mac2 grid w1_F+t2_F + G = {BIAS1_F} (G={BIAS_G} guard bits); |b|max I={BIAS1_I}')
+    L.append(f'typedef ap_fixed<{BIAS2_W}, {BIAS2_I}, AP_RND_CONV, AP_SAT> bias2_t_gen;'
+             f'  // b2 (float): F = mac0 grid w2_F+t0_F + G = {BIAS2_F} (G={BIAS_G} guard bits); |b|max I={BIAS2_I}')
+    L.append('typedef bias1_t_gen bias_t_gen;  // legacy alias (single bias type, pre-2026-10-06)')
+    if head is not None:
+        _bw, _bi, _bf = head['biash']
+        L.append(f'typedef ap_fixed<{_bw}, {_bi}, AP_RND_CONV, AP_SAT> biash_t_gen;'
+                 f'  // b_head (float): F = head grid wh_F+relu0_F + G = {_bf} (G={BIAS_G} guard bits); |b|max I={_bi}')
     # bn_t_gen: BN mean/scale/beta. The scale gamma/sigma multiplies (dots-mean), so F is sized
     # to keep scale-rounding under half the t2 LSB across the full dot_t range; I is derived
     # from |c|max (the running_mean grows with jet energy and is the usual driver).
@@ -1006,7 +1269,12 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     # widths so it tracks the QAT bit-width flags (was a hardcoded <40,1> sized for the old
     # grids, which was in fact 2 bits short at t0_F=23). NORM_I=1: 1/N̄,1/N̄^2 are in [0,1).
     NORM_I = 1
-    NORM_F = max(acc2_I + t2_F, agg0_I + t0_F) + 1
+    # Normalization guard bits (2026-10-07): 1/Nbar and 1/Nbar^2 are NOT powers of two, so the
+    # norm_t literal carries a relative error ~2^-(NORM_F) / value. That error moves every
+    # rescaled sum by up to |R|*err and flips any post-agg rounding tie closer than that
+    # (measured on a 6-bit 5-class ckpt: F=26 -> invnave2 rel err 1.4e-5 moved -9.500062 LSB to
+    # -9.499933 -> 1-LSB logit mismatch). G extra bits cost two constant multipliers per channel.
+    NORM_F = max(acc2_I + t2_F, agg0_I + t0_F) + 1 + int(args.norm_guard_bits)
     NORM_W = NORM_I + NORM_F
     L.append(f'typedef ap_fixed<{NORM_W}, {NORM_I}, AP_RND_CONV, AP_SAT> norm_t;'
              f'  // 1/N̄, 1/N̄^2 normalize-late multipliers (F={NORM_W-NORM_I})')
@@ -1029,7 +1297,14 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     L.append('')
     L.append('// ---- MAC temporaries: I = I(weight)+I(operand)+ceil(log2(#terms)), W = I+B ----')
     L.append(f'typedef ap_fixed<{mac2_W}, {mac2_I}> mac2_t;     // 2->2 dense: 6 w1*t2 products + b1 + b1_diag = {mac2_terms} terms')
-    L.append(f'typedef ap_fixed<{mac0_W}, {mac0_I}> mac0_t;     // 2->0 dense: 2*NHIDDEN w2*t0 products + b2 = {mac0_terms} terms')
+    L.append('// bias add for the 2->2 dense output: products accumulate in mac2_t (exact product grid);')
+    L.append('// the float-typed bias is added ONCE here at full bias precision, then the relu quantizer rounds')
+    L.append('#define NPELICAN_MAC2B_T_GENERATED 1')
+    L.append(f'typedef ap_fixed<{mac2b_W}, {mac2b_I}> mac2b_t;    // I = I(mac2_t), F = BIAS1_F = {BIAS1_F}')
+    L.append(f'typedef ap_fixed<{mac0_W}, {mac0_I}> mac0_t;     // 2->0 dense: 2*NHIDDEN w2*t0 products + b2 = {mac0_terms} terms; F = BIAS2_F = {BIAS2_F} (exact bias add)')
+    if head is not None:
+        _mw, _mi, _mt = head['mach']
+        L.append(f'typedef ap_fixed<{_mw}, {_mi}> mach_t;     // head: K={HEAD} wh*relu0 products + b_head = {_mt} terms; F = BIASH_F = {head["biash"][2]} (exact bias add)')
     L.append('')
     L.append('#endif  // NPELICAN_TYPES_GENERATED_H_')
     L.append('')
@@ -1065,11 +1340,13 @@ else:
 # element order and VALUES are frozen either way — only the element typedef name changes.
 if args.quant:
     w1_type, w2_type = 'w1_gen_t', 'w2_gen_t'
-    bn_type, bias_type, norm_type = 'bn_t_gen', 'bias_t_gen', 'norm_t'
+    bn_type, bias_type, norm_type = 'bn_t_gen', 'bias1_t_gen', 'norm_t'
+    bias2_type = 'bias2_t_gen'
 else:
     w1_type = 'w1_t' if args.split_types else 'weight_t'
     w2_type = 'w2_t' if args.split_types else 'weight_t'
     bn_type, bias_type, norm_type = 'weight_t', 'bias_t', 'internal_t'
+    bias2_type = 'bias_t'
 
 # Emit the generated typedef header (--quant only) and collect the scale comment
 # lines to append to weights.h for the record (plan D3).
@@ -1082,6 +1359,23 @@ if args.quant:
 os.makedirs(os.path.dirname(args.out) or '.', exist_ok=True)
 with open(args.out, 'w') as f:
     f.write('#include "../nPELICAN.h"\n')
+    _nobj_sa = _arg('nobj', None)
+    _sa_cond = f'NHIDDEN == {NHIDDEN} && NOUT == {NOUT} && NSPURIONS == {NSPURIONS}'
+    if HEAD > 0:
+        _sa_cond += f' && NPELICAN_HEAD == {HEAD} && N2TO0_OUT == {HEAD}'
+    if _nobj_sa is not None:
+        _sa_cond += f' && NPARTICLES == {int(_nobj_sa)}'
+    f.write(f'static_assert({_sa_cond}, "weights.h was exported for NHIDDEN={NHIDDEN} '
+            f'NOUT={NOUT} NPARTICLES={_nobj_sa if _nobj_sa is not None else "?"}; '
+            f'firmware/nPELICAN.h or types_generated.h disagree -- re-export or fix the defines");\n')
+    if NSPURIONS == 3:
+        # jet-quant-split presence must match the header (static_assert cannot test a macro)
+        if JET_QUANT_SPLIT:
+            f.write('#ifndef NPELICAN_JET_QUANT_SPLIT\n#error "weights.h was exported for a '
+                    '--jet-quant-split checkpoint but NPELICAN_JET_QUANT_SPLIT is not defined"\n#endif\n')
+        else:
+            f.write('#ifdef NPELICAN_JET_QUANT_SPLIT\n#error "weights.h was exported WITHOUT '
+                    '--jet-quant-split but NPELICAN_JET_QUANT_SPLIT is defined"\n#endif\n')
     f.write('//model: ' + str(_arg('prefix', '?')) + '\n')
     f.write('//nobj: ' + str(_arg('nobj', '?')) + '\n\n')
 
@@ -1103,11 +1397,19 @@ with open(args.out, 'w') as f:
     f.write(f'{bn_type} batch2_2to0[NHIDDEN][3] = ' + _c(batch2) + ';\n\n')
 
     f.write('//2to1 linear layer\n')
-    f.write(f'{w2_type} w2_2to0[NHIDDEN*2*NOUT] = ' + _c(w2_2to0) + ';\n')
-    f.write(f'{bias_type} b2_2to0[NOUT] = ' + _c(b2_2to0) + ';\n')
+    f.write(f'{w2_type} w2_2to0[N2TO0_OUT*NHIDDEN*2] = ' + _c(w2_2to0) + ';\n')
+    f.write(f'{bias2_type} b2_2to0[N2TO0_OUT] = ' + _c(b2_2to0) + ';\n')
+    if HEAD > 0:
+        f.write('\n//nonlinear head (K -> NOUT), row-major (NOUT, K): w_head[o*NPELICAN_HEAD + k]\n')
+        f.write('wh_gen_t w_head[NOUT*NPELICAN_HEAD] = ' + _c(_quant_info['head']['w']) + ';\n')
+        f.write('biash_t_gen b_head[NOUT] = ' + _c(_quant_info['head']['b']) + ';\n')
 
     # D3: measured QAT scales appended as comments for the record (quant path only).
     if _scale_comment_lines:
         f.write('\n'.join(_scale_comment_lines) + '\n')
 
-print(f'\nWrote {args.out}  (NHIDDEN={NHIDDEN}, NOUT={NOUT})')
+print(f'\nWrote {args.out}  (NHIDDEN={NHIDDEN}, NOUT={NOUT}, NSPURIONS={NSPURIONS}'
+      f'{" [jet spurion]" if NSPURIONS == 3 else ""}'
+      f'{" [jet quant split]" if JET_QUANT_SPLIT else ""}, head_hidden={HEAD}, '
+      f'NPARTICLES={_arg("nobj", None) if _arg("nobj", None) is not None else "default"}, '
+      f'agg guard bits = {args.agg_guard_bits}, norm guard bits = {args.norm_guard_bits}, bn guard bits = {args.bn_guard_bits}, bias guard bits = {args.bias_guard_bits})')

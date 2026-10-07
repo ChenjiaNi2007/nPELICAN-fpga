@@ -33,6 +33,14 @@ header edits. The loop:
    bn_t_gen, norm_t`) are formula-derived from those plus the term counts. `--bn-eps` (default
    1e-5) must match the training BatchNorm eps — the BN scale is `weight/sqrt(var+eps)`.
 
+   **Model dimensions** (`NPARTICLES`, `NHIDDEN`, `NOUT`) are also emitted at the top of
+   `types_generated.h` from the checkpoint; `nPELICAN.h` keeps `#ifndef`-guarded hand defaults
+   (20/2/1, `NPARTICLES2 = NPARTICLES + 2`) and `weights.h` `static_assert`s that they match.
+   A K-class checkpoint (`--n-out K` in PELICAN-nano) exports `NOUT=K` and the firmware emits K
+   raw logits via `model_out[NOUT]` (softmax/argmax off-chip); `golden_logits.dat` then carries
+   NOUT space-separated values per line. `w2_2to0` element order is row-major `(NOUT, NHIDDEN*2)`
+   = `np.ravel(agg_2to0.mixing.weight)`, i.e. `w2_2to0[o*(NHIDDEN*2) + h*2 + a]`.
+
 3. **Export golden vectors** (for the csim gate), in `../PELICAN-nano/`:
    ```bash
    python scripts/export_golden.py
@@ -65,3 +73,16 @@ full interpretation and the dot4 front-end caveat. Current result: dots-level 14
 - `model_loader.py` — reads a PELICAN-nano checkpoint, writes `weights.h` + `types_generated.h`.
 - `nPELICAN_tb.cpp` — testbench (golden + dots-level modes, stage-dump harness).
 - `docs/FIRMWARE_QAT_PLAN.md` — the restructure spec; `docs/resource_log.md` — phase results.
+
+## Numerical contracts added 2026-10-06 (5-class / NOUT generalization)
+
+- `nobj` port = particles present in the NPARTICLES slots; clamp raw multiplicities to NPARTICLES
+  (testbench `clamp_nobj`, `export_golden.py`). Port width `NOBJ_BITS` follows NPARTICLES2.
+- `model_loader.py --bias-guard-bits 8` / `--agg-guard-bits 8` (defaults): bias literals and the
+  stored BN1 output keep 8 fractional bits beyond the MAC / post-agg grids so exact half-LSB ties
+  cannot form (float PyTorch never ties). New generated type `mac2b_t` (2->2 bias end-add; falls
+  back to `mac2_t` for pre-change headers, byte-identical). Set both to 0 for the old rule.
+- Gate record for the first NOUT=5 export: `reports/hls4ml5_smoke_gate/GATE.md` (200/200 exact).
+- `--jet-quant-split` checkpoints: loader emits `NPELICAN_JET_QUANT_SPLIT` + `dotj_t`/`dotm_t` (jet row/col,
+  m_jet^2 dot grids), `jet_t` (jet_input port, pmu_quant_jet) and `dotall_t` (dots container); all alias
+  dot_t/input_t otherwise (byte-identical). Gate: `reports/hls4ml5_smoke_gate/GATE_JET_QUANT_SPLIT.md`.

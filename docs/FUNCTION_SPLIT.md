@@ -21,12 +21,13 @@ completely partitioned on both sides (wires, never BRAM).
 
 | function | contents | output (type) | expected dominant cost |
 |---|---|---|---|
-| `np_dots` | p1/beam prep + symmetric dot4 | `dots[484]` (`dot_t`) | DSP (≈253 upper-triangle dots) |
+| `np_dots` | p1/beam prep + symmetric dot4 (`NPELICAN_JET_QUANT_SPLIT`: jet row/col via `dot4j`→`dotj_t`, d[2,2] via `dot4m`→`dotm_t`, jet port `jet_t`) | `dots[484]` (`dotall_t`; == `dot_t` without the split) | DSP (≈253 upper-triangle dots) |
 | `np_bn1` | BN1 affine, mean-folded, masked | `batch1[484]` (`bn1out_t`) | DSP/LUT (253 wide mults) |
 | `np_agg2to2` | raw Σ + normalize-late (×invnave/invnave2) | `jmass`, `jdotp[22]` (`t2_t`) | LUT adder trees + 23 norm mults |
 | `np_eq2to2` | basis `T` (internal, pure wiring) + 2→2 MAC + ReLU quant | `Tp_q[22][22][2]` (`relu_t`) | MAC DSP/LUT |
 | `np_agg2to0` | 2→0 sum/trace + collapsed BN2 affine + normalize | `R[2][2]` (`t0_t`) | adder trees, 8 wide mults |
-| `np_out2to0` | 2→0 dense + bias | `Rp[1]` (`mac0_t`) | tiny |
+| `np_out2to0` | 2→0 dense + bias | `Rp[N2TO0_OUT]` (`mac0_t`; `N2TO0_OUT`=NOUT, or K with a head) | tiny |
+| `np_head` (only `NPELICAN_HEAD`, `--head-hidden K`) | ReLU→`relu0_t` quant + K→NOUT head MAC + bias (isolate with `-DNPELICAN_SPLIT_ONLY_HEAD`; not wired into build_prj.tcl) | `Rq[K]` (`relu0_t`), `Hp[NOUT]` (`mach_t`) | tiny |
 
 Kept in the **top**: the nobj remap + `nobjmask` build (comparators/wiring,
 shared by four stages), the csim-only dots-override/stage-dump hooks, and the
@@ -202,3 +203,6 @@ Any datapath change made to `nPELICAN.cpp` must be mirrored into the matching
 stage of `nPELICAN_split.cpp` (or the split file regenerated from it), then the
 local byte-identical gate re-run. The split file is a tool, not a fork: the
 monolith is always the reference implementation.
+
+The NOUT (K-class) generalization is mirrored: `np_out2to0` uses the same
+`w2_2to0[o*(NHIDDEN*2) + h*2 + a]` index and the top writes `model_out[NOUT]`.

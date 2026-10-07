@@ -31,9 +31,14 @@ typedef double w1_gen_t;    // 2->2 weights
 typedef double w2_gen_t;    // 2->0 weights
 typedef double input_t;     // raw momenta / dot4 operands
 typedef double result_t;    // final logit
+// jet-spurion quantizer split types (inert unless NPELICAN_JET_QUANT_SPLIT; aliases otherwise)
+#define NPELICAN_JET_TYPES_GENERATED 1
+typedef double dotj_t, dotm_t, dotall_t, jet_t;
 
 // ---- Float-trained constant types (biases / BN / normalization) ----
 typedef double bias_t_gen;
+typedef double bias1_t_gen;  // b1,b1_diag (per-stage bias types, 2026-10-06)
+typedef double bias2_t_gen;  // b2
 typedef double bn_t_gen;
 typedef double norm_t;
 
@@ -47,7 +52,15 @@ typedef double accrelurow_t;
 
 // ---- MAC temporaries ----
 typedef double mac2_t;
+#define NPELICAN_MAC2B_T_GENERATED 1
+typedef double mac2b_t;     // 2->2 bias add (bias guard bits, 2026-10-06)
 typedef double mac0_t;
+
+// ---- Optional nonlinear head (NPELICAN_HEAD; inert unless the generated header defines it) ----
+typedef double relu0_t;      // agg_2to0.act_layer (QuantReLU) output
+typedef double wh_gen_t;     // head weights
+typedef double biash_t_gen;  // head bias
+typedef double mach_t;       // head MAC
 
 // ---- Legacy weight-array element types (the no-quant weights.h declares its
 //      arrays with these: weight_t for w1/BN, bias_t for biases, internal_t for

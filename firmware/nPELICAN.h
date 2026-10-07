@@ -26,10 +26,39 @@
 #include "weights/types_generated.h"
 #endif
 
+// Model dimensions. types_generated.h (included above, written by model_loader.py
+// from the checkpoint) or a -D flag takes precedence; these are hand defaults.
+// weights.h static_asserts that they match the exported checkpoint.
+#ifndef NPARTICLES
 #define NPARTICLES  20
-#define NPARTICLES2 22  //Max number of particles plus number of spurions
+#endif
+// Spurions prepended before the constituents: 2 beams (slots 0,1), plus the full-jet
+// 4-momentum at slot 2 when the checkpoint was trained with --add-jet (NSPURIONS=3;
+// types_generated.h then also defines NPELICAN_JET_SPURION, which adds the jet_input port).
+#ifndef NSPURIONS
+#define NSPURIONS 2
+#endif
+#ifndef NPARTICLES2
+#define NPARTICLES2 (NPARTICLES + NSPURIONS)  // + beam (and optional jet) spurions
+#endif
+#ifndef NHIDDEN
 #define NHIDDEN 2       //Number of parallel channels
-#define NOUT 1          //Two classes means one out dimension is sufficient 
+#endif
+#ifndef NOUT
+#define NOUT 1          //Output logits: 1 = binary single score; K = K-class (softmax/argmax off-chip)
+#endif
+// Width of the 2->0 dense output. Without a head it IS the logit count (NOUT). With
+// --head-hidden K (types_generated.h: NPELICAN_HEAD K, N2TO0_OUT K) the 2->0 dense mixes
+// down to K hidden channels -> ReLU quant (relu0_t) -> K->NOUT head MAC -> logits.
+#ifndef N2TO0_OUT
+#define N2TO0_OUT NOUT
+#endif
+
+// 2->2 bias-add type (bias guard bits, 2026-10-06). Headers from the pre-guard-bit loader
+// do not define it; fall back to the product-grid accumulator (legacy arithmetic).
+#ifndef NPELICAN_MAC2B_T_GENERATED
+typedef mac2_t mac2b_t;   // pre-guard-bit headers: bias add at the product grid (legacy arithmetic)
+#endif
 #define N_TABLE_PSLOG 1024 //want to cover 10^6 max input 
 #define N_TABLE_COS 1024
 #define N_TABLE_SINH 1024
@@ -49,10 +78,28 @@ typedef ap_fixed<36,12,AP_RND_CONV,AP_SAT> input_t;
 #endif
 // Final logit carries the output_quant grid. Under --quant this is GENERATED in
 // types_generated.h as result_t == out_t (the per-checkpoint output_quant grid), so
-// model_out[0] = (result_t)Rp rounds exactly once (RND_CONV) and never clamps the
+// model_out[o] = (result_t)Rp[o] rounds exactly once (RND_CONV) and never clamps the
 // logit. The hand fallback below (range [-1,1)) is used ONLY by the float-export path
 // (no --quant); for a quant checkpoint whose output_quant range exceeds [-1,1) it would
 // saturate the logit and corrupt the score ranking, hence the generated override.
+// Jet-spurion quantizer split (--jet-quant-split; types_generated.h defines
+// NPELICAN_JET_QUANT_SPLIT): d[2,j]/d[i,2] round onto dotj_t (input_quant_jet), d[2,2] onto
+// dotm_t (input_quant_mjet), the jet momenta arrive on jet_t (pmu_quant_jet), and the dots
+// array is dotall_t (I = max I, F = max F of the three dot grids: holds each exactly).
+// Headers from the pre-split loader do not define them: alias to the single-grid types
+// (exactly what the new loader emits without the split -> byte-identical datapath).
+#ifndef NPELICAN_JET_TYPES_GENERATED
+typedef dot_t dotj_t;
+typedef dot_t dotm_t;
+typedef dot_t dotall_t;
+typedef input_t jet_t;
+#endif
+#if defined(NPELICAN_JET_QUANT_SPLIT) && !defined(NPELICAN_JET_SPURION)
+#error "NPELICAN_JET_QUANT_SPLIT requires NPELICAN_JET_SPURION (jet spurion at slot 2)"
+#endif
+#if defined(NPELICAN_JET_QUANT_SPLIT) && defined(NPELICAN_BLOCK_FP)
+#error "NPELICAN_JET_QUANT_SPLIT is not wired for the block-FP front end (PyTorch refuses it too)"
+#endif
 #ifndef NPELICAN_RESULT_T_GENERATED
 typedef ap_fixed<24, 1,AP_RND_CONV,AP_SAT> result_t;
 #endif
@@ -83,6 +130,12 @@ static void lut_pslog_init(data_T table_out[N_TABLE])
 
 // dots carry the input_quant grid → dot_t (was an internal_t/input_t mismatch before).
 void dot4(input_t p1[4], input_t p2[4], dot_t& dot);
+#ifdef NPELICAN_JET_QUANT_SPLIT
+// jet-involving dots keep the jet momenta on their own grid (jet_t): exact products, one
+// RND_CONV cast onto the population's learned grid (dotj_t: particle/beam x jet; dotm_t: m_jet^2).
+void dot4j(input_t p[4], jet_t q[4], dotj_t& dot);
+void dot4m(jet_t q[4], dotm_t& dot);
+#endif
 
 // Lever 7: per-particle block-FP encode + (m, e) dot4. Inert unless the exported
 // checkpoint was trained with --pmu-block-fp (types_generated.h defines
@@ -94,13 +147,20 @@ void dot4(input_t p1[4], input_t p2[4], dot_t& dot);
 // input_t. With input_t capped below 12 bits (negative F, momentum LSB > 1 GeV)
 // an input_t nobj would round odd counts to even, corrupting the mask and the
 // BN2 β'·count terms. ap_uint<5> covers 0..31 and is exact at every input width.
-typedef ap_uint<5> nobj_t;
+// Width follows NPARTICLES2 (nobj is remapped to 0..NPARTICLES2 inside the top):
+// 5 bits up to 31 (N<=29, incl. the default 20), 6 bits to 63 (N=32: NPARTICLES2=34),
+// 7 bits beyond. ncount2 = ncount*ncount needs 2*NOBJ_BITS-1 bits (484 < 2^9).
+#define NOBJ_BITS ((NPARTICLES2) <= 31 ? 5 : ((NPARTICLES2) <= 63 ? 6 : 7))
+typedef ap_uint<NOBJ_BITS> nobj_t;
 
 void nPELICAN(
     input_t model_input[(NPARTICLES)*4],
     input_t beam_input[2*4],            // 2 beam spurions as a top-level input
+#ifdef NPELICAN_JET_SPURION
+    jet_t jet_input[4],                 // full-jet 4-momentum (E,px,py,pz) -> spurion slot 2
+#endif
     nobj_t nobj,
-    result_t model_out[1]
+    result_t model_out[NOUT]
 );
 
 #endif
