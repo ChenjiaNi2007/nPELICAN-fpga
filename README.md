@@ -86,3 +86,17 @@ full interpretation and the dot4 front-end caveat. Current result: dots-level 14
 - `--jet-quant-split` checkpoints: loader emits `NPELICAN_JET_QUANT_SPLIT` + `dotj_t`/`dotm_t` (jet row/col,
   m_jet^2 dot grids), `jet_t` (jet_input port, pmu_quant_jet) and `dotall_t` (dots container); all alias
   dot_t/input_t otherwise (byte-identical). Gate: `reports/hls4ml5_smoke_gate/GATE_JET_QUANT_SPLIT.md`.
+
+## Synthesizing the 5-class jet+head model (2026-10-07)
+
+`firmware/weights/` holds the export of `PELICAN-nano/model/qat6wj16_h4_jh_e40_s2_best.pt`
+(N=16, h=4, w6a6i6 pmu12, jet spurion + 16-wide head, split jet quantizers at 10/16/20 bits;
+test accuracy 69.9%, see PELICAN-nano `docs/HLS4ML_5CLASS.md`), with the default DSP-tuned BN1
+literal. Matching golden vectors (incl. `tb_data/golden_jet.dat`) are in `tb_data/`.
+On the remote: `git pull`, then the usual `vitis_hls -f build_prj.tcl ...`. For a meaningful
+csim add `-DRUN_GOLDEN_GATE` to the testbench cflags in `build_prj.tcl` (the `add_files -tb
+nPELICAN_tb.cpp -cflags` line); expected `GOLDEN SUMMARY: events=200 exact=199` (the one residual
+is the documented BN1-literal tie; `--bn-guard-bits 8` on export gives 200/200 at DSP cost).
+The legacy 10k csim flow is not meaningful for this model (toptag inputs, 20 particles, no jet).
+To re-export: `python model_loader.py --model ../PELICAN-nano/model/qat6wj16_h4_jh_e40_s2_best.pt
+--quant --repo ../PELICAN-nano --out firmware/weights/weights.h`.
