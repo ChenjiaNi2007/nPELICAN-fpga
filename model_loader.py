@@ -86,6 +86,15 @@ parser.add_argument('--max-input-bits', type=int, default=None,
                          'momenta never saturate. Caps <= INPUT_I give NEGATIVE F (ap_fixed<W,I> '
                          'with I > W, momentum LSB 2^-F > 1 GeV) — legal, but expect heavy dot4 '
                          'precision loss. No effect if N >= the derived bit-exact width.')
+parser.add_argument('--pmu-extra-int-bits', type=int, default=0,
+                    help='INFERENCE-ONLY ablation for trained-pmu checkpoints: add K integer bits '
+                         'to input_t, doubling the momentum clip K times (e.g. 1: 512 -> 1024 GeV). '
+                         'By default W grows by K too (same momentum LSB, so un-clipped jets stay '
+                         'bit-identical to the trained grid); with --pmu-keep-width W is held and '
+                         'the LSB coarsens by 2^K. Either way the firmware no longer matches the '
+                         'PyTorch pmu_quant on clipped momenta — not a deployable export.')
+parser.add_argument('--pmu-keep-width', action='store_true', default=False,
+                    help='With --pmu-extra-int-bits: hold input_t width fixed (coarser LSB).')
 args = parser.parse_args()
 
 if args.out_types is None:
@@ -327,6 +336,34 @@ def _extract_quant_weights():
                      'PELICAN-nano checkout at --repo has no such QuantConfig field. '
                      'Update it, or the rebuilt model uses a uniform momentum grid.')
 
+    # --- SPS: static per-slot learned exponent (block-FP with a TRAINED constant
+    # exponent per particle slot instead of the runtime LZC). Unlike dynamic block-FP
+    # it DOES leave state (pmu_quant.log2_exp / pmu_quant.exp_initialized), but the
+    # rebuild still has to be told the mode and the slot count, or load_state_dict
+    # fails (or, worse, a dynamic rebuild of a static run describes the wrong grid).
+    # Slot layout = firmware P1Prep: slots 0,1 beams, 2.. constituents, so
+    # n_slots = nobj + 2 must equal NPARTICLES2.
+    bfp_static = bool(_arg('pmu_static_exp', False))
+    bfp_nslots = None
+    if 'pmu_quant.log2_exp' in sd and not bfp_static:
+        sys.exit('ERROR: checkpoint has pmu_quant.log2_exp (static per-slot exponent) but '
+                 'its args do not record pmu_static_exp=True. Refusing to guess the grid.')
+    if bfp_static:
+        if not bfp:
+            sys.exit('ERROR: checkpoint records pmu_static_exp=True without pmu_block_fp.')
+        for _f in ('pmu_static_exp', 'pmu_n_slots'):
+            if _f not in QuantConfig.__dataclass_fields__:
+                sys.exit(f'ERROR: checkpoint was trained with --pmu-static-exp but the '
+                         f'PELICAN-nano checkout at --repo has no QuantConfig field {_f!r}. '
+                         f'Update it, or the rebuilt model uses a dynamic exponent.')
+        if not bool(_arg('add_beams', True)):
+            sys.exit('ERROR: static per-slot exponent checkpoint trained without beams '
+                     '(add_beams=False); the firmware slot layout (P1Prep) always '
+                     'prepends the 2 beam spurions.')
+        _nobj = _arg('nobj', None)
+        _nobj = 20 if _nobj is None else int(_nobj)
+        bfp_nslots = _nobj + 2
+
     # Signedness of the d_ij grid. MUST match training: Brevitas derives scale() from the
     # same stored stat divided by a signedness-dependent int threshold (2^(b-1)-1 signed
     # vs 2^b-1 unsigned), so a wrong rebuild still load_state_dict's cleanly and then
@@ -357,6 +394,22 @@ def _extract_quant_weights():
         qkw['pmu_block_fp'] = True
         qkw['pmu_exp_min'] = bfp_emin
         qkw['pmu_exp_max'] = bfp_emax
+        if bfp_static:
+            qkw['pmu_static_exp'] = True
+            qkw['pmu_n_slots'] = bfp_nslots
+            # SPS exponent-floor / fixed-exponent training options. The static module
+            # always carries their buffers and exponent_table() already applies the
+            # floor, but replay them anyway (rebuild-trap rule) when the checkout knows
+            # the fields; a checkpoint that USED them against a checkout that lacks them
+            # is refused rather than silently rebuilt without.
+            for _f, _v in (('pmu_exp_floor_batches', int(_arg('pmu_exp_floor_batches', 0) or 0)),
+                           ('pmu_exp_fixed', bool(_arg('pmu_exp_fixed', False)))):
+                if _f in QuantConfig.__dataclass_fields__:
+                    qkw[_f] = _v
+                elif _v:
+                    sys.exit(f'ERROR: checkpoint was trained with {_f}={_v} but the '
+                             f'PELICAN-nano checkout at --repo has no such QuantConfig '
+                             f'field. Update it.')
     if iuns:
         if 'input_unsigned' not in QuantConfig.__dataclass_fields__:
             sys.exit('ERROR: checkpoint needs input_unsigned but the PELICAN-nano checkout '
@@ -403,6 +456,24 @@ def _extract_quant_weights():
         _quant_info['blockfp'] = dict(bits=int(pq.bit_width), exp_min=int(pq.exp_min),
                                       exp_max=int(pq.exp_max),
                                       from_energy=bool(pq.from_energy))
+        if bfp_static:
+            _FW_NPARTICLES2 = 22   # firmware/nPELICAN.h NPARTICLES2 (NPARTICLES + 2 beams)
+            if not bool(getattr(pq, 'static', False)):
+                sys.exit('ERROR: checkpoint records pmu_static_exp=True but the rebuilt '
+                         'BlockFPQuant is not static.')
+            if not bool(pq.exp_initialized):
+                sys.exit('ERROR: static BlockFPQuant exp_initialized=False after '
+                         'load_state_dict: the exponent table was never trained/initialized.')
+            etab = [int(v) for v in pq.exponent_table().reshape(-1).tolist()]
+            if len(etab) != _FW_NPARTICLES2:
+                sys.exit(f'ERROR: static exponent table has {len(etab)} slots but the '
+                         f'firmware has NPARTICLES2={_FW_NPARTICLES2} (beams + NPARTICLES). '
+                         f'Checkpoint nobj={bfp_nslots - 2}; the firmware needs nobj=20.')
+            bad = [v for v in etab if v < max(bfp_emin, 0) or v > bfp_emax]
+            if bad:
+                sys.exit(f'ERROR: static exponent table entries {bad} outside '
+                         f'[{bfp_emin},{bfp_emax}] (or negative; firmware right-shifts only).')
+            _quant_info['blockfp']['exp_table'] = etab
 
     # Guard the silent failure described above: the rebuilt input quantizer must have the
     # signedness we asked for. A mismatch here means every dot_t-derived type is wrong.
@@ -614,6 +685,10 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
               f'{EXP_BITS} bits)')
         print(f'   mant_t=ap_fixed<{MANT_W},{MANT_I}>  mdot_t=ap_fixed<{MDOT_W},{MDOT_I}> '
               f'(exact)  dotalign_t=ap_fixed<{ALIGN_W},{ALIGN_I}> (exact)')
+        if bfp.get('exp_table') is not None:
+            etab = bfp['exp_table']
+            print(f'   STATIC per-slot exponent (SPS): exp[slot] = {etab}')
+            print(f'   -> clip 2^(e+1) GeV per slot = {[2 ** (v + 1) for v in etab]}')
         print(f'   input_t=ap_fixed<{INPUT_W},{INPUT_I}> is the raw-momentum PORT + '
               f'encoder input only (|p|max={pmax:.1f}); dot multipliers are '
               f'{MANT_W}x{MANT_W}, not {INPUT_W}x{INPUT_W}')
@@ -634,6 +709,14 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
               f'momentum LSB = 2^{-INPUT_F:+d} GeV)')
         if args.max_input_bits is not None:
             print('  (--max-input-bits IGNORED: input_t comes from the trained pmu_quant grid)')
+        if args.pmu_extra_int_bits:
+            INPUT_I += args.pmu_extra_int_bits
+            if not args.pmu_keep_width:
+                INPUT_W += args.pmu_extra_int_bits
+            INPUT_F = INPUT_W - INPUT_I
+            print(f'  (input_t ABLATION --pmu-extra-int-bits {args.pmu_extra_int_bits}: '
+                  f'ap_fixed<{INPUT_W},{INPUT_I}>, clip ±2^{INPUT_I - 1}, LSB 2^{-INPUT_F:+d} GeV '
+                  f'— NOT the trained grid)')
     else:
         INPUT_I = _int_bits(pmax)
         # Floor at 0: a very coarse dot grid (dot_F <= -(Pbits+3)) genuinely needs no
@@ -841,7 +924,10 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     elif pmu is not None:
         L.append(f'typedef ap_fixed<{INPUT_W}, {INPUT_I}, AP_RND_CONV, AP_SAT> input_t;'
                  f'  // raw momenta; TRAINED pmu_quant grid (I={INPUT_I}, F={INPUT_F}); '
-                 f'|p|max={pmax:.1f}')
+                 f'|p|max={pmax:.1f}'
+                 + (f'; ABLATION --pmu-extra-int-bits {args.pmu_extra_int_bits}'
+                    f'{" --pmu-keep-width" if args.pmu_keep_width else ""} (NOT deployable)'
+                    if args.pmu_extra_int_bits else ''))
     else:
         L.append(f'typedef ap_fixed<{INPUT_W}, {INPUT_I}, AP_RND_CONV, AP_SAT> input_t;'
                  f'  // raw momenta; |p|max={pmax:.1f} (I={INPUT_I}), F={INPUT_F} (dot_F={dot_F})')
@@ -850,9 +936,15 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     if bfp is not None:
         L.append('// ---- Lever 7: per-particle BLOCK FLOATING POINT momentum grid ----------')
         L.append('// p_k = m_k * 2^e, ONE exponent per particle, shared by its 4 components:')
-        L.append('//   e   = clamp(floor(log2|E|), EXP_MIN, EXP_MAX)   (one LZC on the energy)')
+        if bfp.get('exp_table') is None:
+            L.append('//   e   = clamp(floor(log2|E|), EXP_MIN, EXP_MAX)   (one LZC on the energy)')
+        else:
+            L.append('//   e   = NPELICAN_BFP_EXP_TABLE[slot]   (SPS: trained constant per slot, below)')
         L.append(f'//   m_k = p_k * 2^-e on a signed {MANT_W}-bit I=2 grid (LSB 2^{-MANT_F:+d} of 2^e)')
-        L.append('// I=2 cannot overflow: E >= |p_k| and 2^e <= E < 2^(e+1) => |m_k| < 2.')
+        if bfp.get('exp_table') is None:
+            L.append('// I=2 cannot overflow: E >= |p_k| and 2^e <= E < 2^(e+1) => |m_k| < 2.')
+        else:
+            L.append('// SPS: |p_k| >= 2^(e+1) in a slot SATURATES m_k (AP_SAT), exactly as PyTorch clamps.')
         L.append('// Masking invariant holds: a zeroed particle gives e = EXP_MIN, m = 0, dot 0.')
         L.append('// The dot is d = 2^(e1+e2) * (m1 . g . m2): mantissa dot EXACT in mdot_t,')
         L.append('// realigned EXACTLY in dotalign_t, then rounded ONCE into dot_t (AP_RND_CONV)')
@@ -861,6 +953,19 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
         L.append(f'#define NPELICAN_BFP_MANT_W {MANT_W}')
         L.append(f'#define NPELICAN_BFP_EXP_MIN {EXP_MIN}')
         L.append(f'#define NPELICAN_BFP_EXP_MAX {EXP_MAX}')
+        if bfp.get('exp_table') is not None:
+            etab = bfp['exp_table']
+            L.append('// SPS: STATIC per-slot exponent. The exponent above is NOT computed at run')
+            L.append('// time: e[slot] is a TRAINED constant (PELICAN-nano BlockFPQuant static mode,')
+            L.append('// exponent_table()), so the encoder/realign shifts are wiring. Slot order =')
+            L.append('// firmware P1Prep: 0,1 = beam spurions, 2..21 = constituents in input order.')
+            L.append('// Per-slot momentum clip 2^(e+1) GeV (mantissa range [-2,2) x 2^e):')
+            L.append('//   ' + ', '.join(f'[{i}] {2 ** (v + 1)}' for i, v in enumerate(etab)))
+            L.append('// Sized with a literal because NPARTICLES2 is defined in nPELICAN.h AFTER')
+            L.append('// this header is included; np_blockfp.h static_asserts it equals NPARTICLES2.')
+            L.append('#define NPELICAN_BFP_STATIC 1')
+            L.append(f'static const int NPELICAN_BFP_EXP_TABLE[{len(etab)}] = '
+                     '{ ' + ', '.join(str(v) for v in etab) + ' };')
         L.append(f'typedef ap_fixed<{MANT_W}, {MANT_I}, AP_RND_CONV, AP_SAT> mant_t;'
                  f'  // mantissa; the dot multiplier operand ({MANT_W}x{MANT_W})')
         L.append(f'typedef ap_uint<{EXP_BITS}> bexp_t;'

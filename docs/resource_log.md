@@ -45,10 +45,11 @@ II pragma edit must be reverted for the II=1 build).
 | II=2 | 49,459 | 17,594 | **769** | 4,671 | 17 (85 ns) | 2 | 10 ns | met (4.367) |
 | II=3 | 48,012 | 15,686 | **313** | 4,268 | 19 (95 ns) | 3 | 15 ns | met (4.346) |
 | II=4 | 47,121 | 15,433 | **257** | 4,272 | 26 (130 ns) | 4 | 20 ns | met (4.367) |
+| II=2, `dot4` INLINE off (2026-09-08) | 48,529 | 16,958 | **429** | 4,319 | 16 (80 ns) | 2 | 10 ns | met (4.346) |
 
-**II=2 is a dead point: zero DSP saved** (769, identical to II=1) while FF rises +2,178 and
+**Stock II=2 is a dead point: zero DSP saved** (769, identical to II=1) while FF rises +2,178 and
 CARRY8 +225 — the scheduler keeps the dot stage fully inlined and only pays the pipelining
-overhead. Sharing kicks in at II=3: dots restructure into `dot4` function instances (4 DSP
+overhead (explained and fixed 2026-09-08, next paragraph). Sharing kicks in at II=3: dots restructure into `dot4` function instances (4 DSP
 each) time-multiplexed pair-per-cycle — 57 units at II=3 (⌈171/3⌉=57, perfect), **43 at II=4
 (⌈171/4⌉=43, perfect → 172 dot DSP)**. The non-dot floor stays ~85 DSP throughout, so
 II=4's 257 ≈ 172+85 and the curve is flattening: II=5 would predict ~35·4+85 ≈ 225, only
@@ -57,6 +58,32 @@ than the inlined dot fabric). BN1 stays in fabric at every II (`mul_6s_9ns_14` �
 Throughput: every point is inside the 25 ns LHC bunch spacing except II>5 territory; II=4's
 20 ns is the last comfortable one at this clock. Reports:
 `reports/particle_count/{c,v}synth_16p_pmu12_bnf12_ii{2,3,4}.rpt`.
+
+**2026-09-08 — why stock II=2 was dead, and the fix.** The prof asked whether Vitis had
+really set II=2. It had: the stock II=2 csynth report shows Interval 2/2, latency 17 and a
+3-state `ap_NS_fsm` (II=1 has no FSM at all). What it never did was re-bind: its DSP
+inventory is byte-identical to II=1 — 171 `mul_12s_12s_24_1_1` + 513 `mac_mulsub_12s_12s`
+(= 684 dot multipliers, 4 per pair) + the ~85 tail — and no `dot4` module exists in it.
+Vitis time-shares the dot stage **only as whole `dot4` function instances**: at II=3/4 the
+function survives as a pipelined module (latency 3, II 1, 4 DSP + 235 FF + 150 LUT each),
+instantiated ⌈171/II⌉ = 57/43 times behind 3–5-input operand muxes (~7.8k LUT). At II≤2 the
+auto-inliner dissolved `dot4` before binding, so nothing was left to share; the +8k csynth FF
+(mul_ln40 dot outputs +4k, 2→2 MAC products +6.3k registered) was the scheduler spreading
+ops over two modulo slots for nothing. **Rebuilding II=2 with `dot4` kept as a function
+gives 429 DSP = 4·⌈171/2⌉ + 85 exactly**, LUT 48,529 (−1.4k vs stock II=1, −0.9k vs stock
+II=2), FF 16,958, CARRY8 4,319. Pragma set (Run A of the debug plan, nothing else changed):
+`#pragma HLS INLINE off` + `#pragma HLS PIPELINE II=1` at the top of `dot4`, `PIPELINE II=2`
+on the top function. **No ALLOCATION pragma was needed** — once the function exists the binder
+shares it 2:1 on its own, so the auto-inliner was the only blocker. csynth confirms it: 86
+`grp_dot4_fu_*` instances (each latency 3, II 1, pipelined) behind 3-input operand muxes
+(6,712 mux LUT), 433 DSP / 43,050 FF / 161,357 LUT estimate, **latency 16 cycles (80 ns) —
+one fewer than stock II=2's 17 — timing met at 4.346 ns**. Reports:
+`reports/particle_count/{c,v}synth_16p_pmu12_bnf12_ii2_noinline.rpt` (csynth = the module
+report `nPELICAN_csynth.rpt`, not the Synthesis Summary `csynth.rpt`).
+The II=1 deliverable is untouched — `INLINE off` only changes anything when II>1. With the
+pragma, every II≥2 point sits on the sharing model and the 85-DSP floor is now confirmed by
+three points instead of fitted from two. Figures: `results/figures/ii_sweep_*.png`
+(`gen_ii_sweep.py`, `variant=noinline` row in `ii_sweep.csv`).
 
 **Where the report files are (reorganised 2026-08-23):** `../reports/README.md` is the index
 for every current, mutually comparable report (all xcu250 @ 5 ns), including the new

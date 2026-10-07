@@ -1,7 +1,9 @@
 # Synthesis report index
 
 Canonical home for nPELICAN synthesis reports. **All reports here are xcu250-figd2104-2L-e
-at 5 ns**, so the numbers are mutually comparable. Reports on other devices, or from before
+at 5 ns — with one exception: `csynth_monolith.rpt` (2026-07-07) targets
+`xcvu13p-flga2577-2-e`**, the DeepSet-comparison part. Both are VU13P-class silicon
+(1,728,000 LUT / 12,288 DSP / 3,456,000 FF), so counts compare; only timing closure differs. Reports on other devices, or from before
 Lever 2, live outside the repo in `../../synthesis-archive/` — see that folder's README
 before comparing anything against them.
 
@@ -36,7 +38,8 @@ The width levers all trade the same way: every DSP saved costs ~100+ LUT and CAR
 | Config | vsynth LUT | FF | DSP | CARRY8 | csynth lat | Date |
 |---|---|---|---|---|---|---|
 | 16p pmu-12, `--bn-frac-bits 12` (**best II=1**) | 49,894 | 15,416 | **769** | 4,446 | 15 cyc, timing met | 2026-08-25 |
-| 16p pmu-12 bnf12, **II=2** (dead point) | 49,459 | 17,594 | 769 | 4,671 | 17 cyc, timing met | 2026-08-25 |
+| 16p pmu-12 bnf12, **II=2** stock (dot4 auto-inlined, nothing shared) | 49,459 | 17,594 | 769 | 4,671 | 17 cyc, timing met | 2026-08-25 |
+| 16p pmu-12 bnf12, **II=2, dot4 `INLINE off`** | 48,529 | 16,958 | **429** | 4,319 | 16 cyc, timing met | 2026-09-08 |
 | 16p pmu-12 bnf12, **II=3** (experiment) | 48,012 | 15,686 | **313** | 4,268 | 19 cyc, timing met | 2026-08-25 |
 | 16p pmu-12 bnf12, **II=4** (experiment) | 47,121 | 15,433 | **257** | 4,272 | 26 cyc, timing met | 2026-08-25 |
 | 16p pmu-12 (BN1 on DSP) | **48,419** | 15,487 | 941 | 4,111 | 15 cyc, slack −0.00 ⚠ | 2026-08-22 |
@@ -48,9 +51,12 @@ CARRY8 down together, because it removes work instead of relocating it. Pair cou
 (CARRY8 to 0.1%).
 
 The II>1 rows trade throughput for DSP (one event per II×5 ns; the 25 ns LHC bunch spacing
-allows up to II=5 at this clock). Sharing only engages at II≥3 — **II=2 saves zero DSP** and
-just pays pipelining overhead; at II=3/4 the dots time-multiplex perfectly onto ⌈171/II⌉
-`dot4` units (4 DSP each) over a fixed ~85-DSP non-dot floor, so returns flatten fast
+allows up to II=5 at this clock). Sharing happens per `dot4` function instance, and stock
+Vitis auto-inlines `dot4` at II≤2 — so **stock II=2 saves zero DSP** and just pays pipelining
+overhead, while at II=3/4 the dots time-multiplex perfectly onto ⌈171/II⌉ `dot4` units (4 DSP
+each) over a fixed ~85-DSP non-dot floor. With `#pragma HLS INLINE off` (+ `PIPELINE II=1`) in
+`dot4` and no ALLOCATION pragma, II=2 lands on the same model (429 = 4·86 + 85, 86 `dot4`
+instances in the report, 16 cycles — one fewer than stock II=2). Returns flatten fast
 (II=5 ≈ 225 predicted). They break the II=1 invariant deliberately — operating points, not
 the deliverable.
 

@@ -37,6 +37,10 @@
 // e = EXP_MIN and m = 0 exactly, hence d = 0 exactly in dot_t. Preserved.
 // ============================================================================
 
+#if defined(NPELICAN_BFP_STATIC) && !defined(NPELICAN_BLOCK_FP)
+#error "NPELICAN_BFP_STATIC (static per-slot exponent) requires NPELICAN_BLOCK_FP"
+#endif
+
 #ifdef NPELICAN_BLOCK_FP
 
 // Per-particle encode: (E, px, py, pz) -> (mantissa[4], exponent).
@@ -49,6 +53,7 @@
 // The mantissa shift is taken in mraw_t, which carries EXP_MAX extra fractional
 // bits, so p >> e loses nothing off the bottom and the ONLY rounding on this path
 // is the final cast to mant_t (AP_RND_CONV, AP_SAT).
+#ifndef NPELICAN_BFP_STATIC
 static void np_bfp_encode(input_t p[4], mant_t m[4], bexp_t& e) {
 #pragma HLS INLINE
     input_t aE = (p[0] < (input_t)0) ? (input_t)(-p[0]) : p[0];
@@ -74,6 +79,36 @@ Mantissa:
         m[k] = (mant_t)mr;           // the single rounding on the encode path
     }
 }
+#else  // NPELICAN_BFP_STATIC
+// SPS (static per-slot exponent): the exponent is a TRAINED compile-time constant
+// per particle SLOT (firmware slot order: 0,1 = beam spurions, 2.. = constituents
+// in input order), emitted by model_loader.py as NPELICAN_BFP_EXP_TABLE from
+// PELICAN-nano BlockFPQuant.exponent_table(). There is no ExpCascade: `ex` is a
+// constant after unrolling, so the mantissa shift and the np_bfp_dot4 realignment
+// shift are wiring. The table entries are already clamp(round(log2_exp), EXP_MIN,
+// EXP_MAX) in PyTorch, so mraw_t (EXP_MAX spare fractional bits) and dotalign_t
+// (2*EXP_MAX extra integer bits) stay exact exactly as in the dynamic path.
+// Mantissa shift and the single mant_t rounding are identical to the dynamic
+// encoder. Masking: a padded (zeroed) particle gives m = 0 exactly for any e, so
+// d = 0 exactly.
+// The generated table is sized with a literal (NPARTICLES2 is defined after
+// types_generated.h is included); pin it to the firmware slot count here.
+static_assert(sizeof(NPELICAN_BFP_EXP_TABLE) / sizeof(NPELICAN_BFP_EXP_TABLE[0]) == NPARTICLES2,
+              "NPELICAN_BFP_EXP_TABLE must have one exponent per slot (NPARTICLES2)");
+static void np_bfp_encode(input_t p[4], mant_t m[4], bexp_t& e, unsigned int slot) {
+#pragma HLS INLINE
+    bexp_t ex = (bexp_t)NPELICAN_BFP_EXP_TABLE[slot];
+    e = ex;
+
+Mantissa:
+    for (int k = 0; k < 4; k++) {
+    #pragma HLS unroll
+        mraw_t mr = (mraw_t)p[k];   // exact widen
+        mr >>= ex;                   // exact: mraw_t has EXP_MAX spare fractional bits
+        m[k] = (mant_t)mr;           // the single rounding on the encode path
+    }
+}
+#endif  // NPELICAN_BFP_STATIC
 
 static void np_bfp_encode_all(input_t p[NPARTICLES2][4],
                               mant_t m[NPARTICLES2][4],
@@ -82,7 +117,11 @@ static void np_bfp_encode_all(input_t p[NPARTICLES2][4],
 BfpEncodeAll:
     for (unsigned int i = 0; i < NPARTICLES2; i++) {
     #pragma HLS unroll
+#ifndef NPELICAN_BFP_STATIC
         np_bfp_encode(p[i], m[i], e[i]);
+#else
+        np_bfp_encode(p[i], m[i], e[i], i);
+#endif
     }
 }
 

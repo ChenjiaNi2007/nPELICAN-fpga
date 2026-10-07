@@ -8,36 +8,69 @@
 // yet wired into the datapath (Phase 2 swaps usage and retires the old types).
 
 #include "ap_fixed.h"
+#include "ap_int.h"
 
 #define NPELICAN_GENERATED_TYPES 1
 
 // ---- Quantization-point types: ap_fixed<B, B-k, AP_RND_CONV, AP_SAT> ----
-typedef ap_fixed<6, 8, AP_RND_CONV, AP_SAT> dot_t;  // input_quant (signed): scale=2^--2 (4.000000000e+00), bits=6, k=-2
-typedef ap_fixed<6, 3, AP_RND_CONV, AP_SAT> t2_t;  // post_agg 2->2 (signed): scale=2^-3 (1.250000000e-01), bits=6, k=3
-typedef ap_fixed<6, 3, AP_RND_CONV, AP_SAT> relu_t;  // act_layer (QuantReLU) (signed): scale=2^-3 (1.250000000e-01), bits=6, k=3
+typedef ap_fixed<6, 10, AP_RND_CONV, AP_SAT> dot_t;  // input_quant (signed): scale=2^--4 (1.600000000e+01), bits=6, k=-4
+typedef ap_fixed<6, 1, AP_RND_CONV, AP_SAT> t2_t;  // post_agg 2->2 (signed): scale=2^-5 (3.125000000e-02), bits=6, k=5
+typedef ap_fixed<6, 2, AP_RND_CONV, AP_SAT> relu_t;  // act_layer (QuantReLU) (signed): scale=2^-4 (6.250000000e-02), bits=6, k=4
 typedef ap_fixed<6, 0, AP_RND_CONV, AP_SAT> t0_t;  // post_agg 2->0 (signed): scale=2^-6 (1.562500000e-02), bits=6, k=6
 typedef ap_fixed<6, 3, AP_RND_CONV, AP_SAT> out_t;  // output_quant (signed): scale=2^-3 (1.250000000e-01), bits=6, k=3
 #define NPELICAN_RESULT_T_GENERATED 1
 typedef ap_fixed<6, 3, AP_RND_CONV, AP_SAT> result_t;  // == out_t (output_quant grid)
-typedef ap_fixed<6, 2, AP_RND_CONV, AP_SAT> w1_gen_t;  // 2->2 weights (signed): scale=2^-4 (6.250000000e-02), bits=6, k=4
-typedef ap_fixed<6, 4, AP_RND_CONV, AP_SAT> w2_gen_t;  // 2->0 weights (signed): scale=2^-2 (2.500000000e-01), bits=6, k=2
+typedef ap_fixed<6, 1, AP_RND_CONV, AP_SAT> w1_gen_t;  // 2->2 weights (signed): scale=2^-5 (3.125000000e-02), bits=6, k=5
+typedef ap_fixed<6, 3, AP_RND_CONV, AP_SAT> w2_gen_t;  // 2->0 weights (signed): scale=2^-3 (1.250000000e-01), bits=6, k=3
 
 // ---- Raw-momentum / IO interface type (input_t): operand of the dot4
-//      multipliers (36x36 today) that dominate DSP. NOT a learned quantizer;
-//      input_quant grids the DOTS (dot_t). I = physics |p| range (flag-
-//      independent); F = ceil(log2|p|max) + dot_F + 3 so the dot4 product error
-//      stays < 1/2 dot_t LSB (bit-exact dots). F tracks the dot grid, so lower
-//      QAT bits -> smaller F -> narrower input_t -> cheaper dot multipliers.
+//      encoder, NOT of the dot multipliers. Lever 7 block-FP: the momentum
+//      grid is PER-PARTICLE relative (p_k = m_k * 2^e), so no single uniform
+//      type describes it. input_t carries the raw momenta to the on-chip
+//      encoder (firmware/np_blockfp.h); the multipliers are mant_t x mant_t.
+//      F is sized so the port rounding sits >=2 bits under the FINEST
+//      mantissa LSB (at e=EXP_MIN), i.e. the encode lands where PyTorch's
+//      single rounding of the float momenta lands.
 //      Guard macro lets nPELICAN.h keep a hand fallback for the float path.
 #define NPELICAN_INPUT_T_GENERATED 1
-typedef ap_fixed<18, 12, AP_RND_CONV, AP_SAT> input_t;  // raw momenta; |p|max=1946.9 (I=12), F=6 (dot_F=-2)
+typedef ap_fixed<30, 12, AP_RND_CONV, AP_SAT> input_t;  // raw momenta into the block-FP encoder; |p|max=1946.9 (I=12), F=18
+
+// ---- Lever 7: per-particle BLOCK FLOATING POINT momentum grid ----------
+// p_k = m_k * 2^e, ONE exponent per particle, shared by its 4 components:
+//   e   = NPELICAN_BFP_EXP_TABLE[slot]   (SPS: trained constant per slot, below)
+//   m_k = p_k * 2^-e on a signed 12-bit I=2 grid (LSB 2^-10 of 2^e)
+// SPS: |p_k| >= 2^(e+1) in a slot SATURATES m_k (AP_SAT), exactly as PyTorch clamps.
+// Masking invariant holds: a zeroed particle gives e = EXP_MIN, m = 0, dot 0.
+// The dot is d = 2^(e1+e2) * (m1 . g . m2): mantissa dot EXACT in mdot_t,
+// realigned EXACTLY in dotalign_t, then rounded ONCE into dot_t (AP_RND_CONV)
+// -- the same single rounding PyTorch applies with input_quant.
+#define NPELICAN_BLOCK_FP 1
+#define NPELICAN_BFP_MANT_W 12
+#define NPELICAN_BFP_EXP_MIN 0
+#define NPELICAN_BFP_EXP_MAX 10
+// SPS: STATIC per-slot exponent. The exponent above is NOT computed at run
+// time: e[slot] is a TRAINED constant (PELICAN-nano BlockFPQuant static mode,
+// exponent_table()), so the encoder/realign shifts are wiring. Slot order =
+// firmware P1Prep: 0,1 = beam spurions, 2..21 = constituents in input order.
+// Per-slot momentum clip 2^(e+1) GeV (mantissa range [-2,2) x 2^e):
+//   [0] 2, [1] 2, [2] 2048, [3] 1024, [4] 512, [5] 512, [6] 256, [7] 256, [8] 256, [9] 256, [10] 128, [11] 128, [12] 128, [13] 128, [14] 128, [15] 64, [16] 128, [17] 64, [18] 64, [19] 64, [20] 64, [21] 64
+// Sized with a literal because NPARTICLES2 is defined in nPELICAN.h AFTER
+// this header is included; np_blockfp.h static_asserts it equals NPARTICLES2.
+#define NPELICAN_BFP_STATIC 1
+static const int NPELICAN_BFP_EXP_TABLE[22] = { 0, 0, 10, 9, 8, 8, 7, 7, 7, 7, 6, 6, 6, 6, 6, 5, 6, 5, 5, 5, 5, 5 };
+typedef ap_fixed<12, 2, AP_RND_CONV, AP_SAT> mant_t;  // mantissa; the dot multiplier operand (12x12)
+typedef ap_uint<4> bexp_t;  // per-particle exponent, [0,10]
+typedef ap_uint<5> bshift_t;  // e1+e2 realign amount, [0,20]
+typedef ap_fixed<40, 12> mraw_t;  // p >> e held EXACTLY (F = input F + EXP_MAX), so the encode rounds only once, at the mant_t cast
+typedef ap_fixed<26, 6> mdot_t;  // EXACT mantissa Minkowski dot: <2W,4> products, +2 int bits for the 4-term sum; |md| < 16
+typedef ap_fixed<46, 26> dotalign_t;  // EXACT mdot << (e1+e2); I = 6 + 2*EXP_MAX so the realign never saturates
 
 // ---- Float-trained biases / BatchNorm constants / normalization constants ----
 // These are NOT PyTorch quantization points (PyTorch keeps them in float), so
 // per CLAUDE.md/plan they are WIDENED, not snapped: their fixed-point rounding
 // error must stay below half the LSB of the next real quantizer they feed.
-typedef ap_fixed<6, 2, AP_RND_CONV, AP_SAT> bias_t_gen;  // b1,b1_diag,b2 (float); |bias|max=0.639774 (I=2), F=4
-typedef ap_fixed<18, 6, AP_RND_CONV, AP_SAT> bn_t_gen;  // BN mean/scale/beta (float); |c|max=23.1777 (I=6), F=12
+typedef ap_fixed<7, 2, AP_RND_CONV, AP_SAT> bias_t_gen;  // b1,b1_diag,b2 (float); |bias|max=1.26996 (I=2), F=5
+typedef ap_fixed<22, 6, AP_RND_CONV, AP_SAT> bn_t_gen;  // BN mean/scale/beta (float); |c|max=31.6904 (I=6), F=16
 typedef ap_fixed<24, 1, AP_RND_CONV, AP_SAT> norm_t;  // 1/N̄, 1/N̄^2 normalize-late multipliers (F=23)
 
 // ---- Aggregation summands (unquantized BatchNorm outputs) + their accumulators.
@@ -46,15 +79,15 @@ typedef ap_fixed<24, 1, AP_RND_CONV, AP_SAT> norm_t;  // 1/N̄, 1/N̄^2 normaliz
 //      storing these on the coarse post-agg grid (e.g. t2_F) would tip the rounding.
 //      Each is range-typed by its OWN BN output bound; SAT guards it. Accumulators
 //      add ceil(log2(#terms)) integer headroom (H2=9 full sum, H1=5 row/trace).
-typedef ap_fixed<11, 4, AP_RND_CONV, AP_SAT> bn1out_t;  // batch1 = BN1(dots); |batch1|<=5.6 (I=4), F=7
-typedef ap_fixed<20, 13> acc2_t;     // jmass raw sum of bn1out_t (I(bn1out)+H2)
-typedef ap_fixed<16, 9> accrow_t;   // jdotp row sums of bn1out_t (I(bn1out)+H1)
-typedef ap_fixed<14, 7, AP_RND_CONV, AP_SAT> tr_t;  // Tr = BN2(relu); |Tr|<=48.2 (I=7); dump-only after #2 (BN2 folded past the 2->0 aggregation)
-typedef ap_fixed<15, 12> accrelu_t;     // R full sum of relu_t Tp_q (I(relu)+H2)
-typedef ap_fixed<11, 8> accrelurow_t;  // R trace, sum of relu_t Tp_q (I(relu)+H1)
+typedef ap_fixed<13, 6, AP_RND_CONV, AP_SAT> bn1out_t;  // batch1 = BN1(dots); |batch1|<=23.6 (I=6), F=7
+typedef ap_fixed<22, 15> acc2_t;     // jmass raw sum of bn1out_t (I(bn1out)+H2)
+typedef ap_fixed<18, 11> accrow_t;   // jdotp row sums of bn1out_t (I(bn1out)+H1)
+typedef ap_fixed<14, 7, AP_RND_CONV, AP_SAT> tr_t;  // Tr = BN2(relu); |Tr|<=44.2 (I=7); dump-only after #2 (BN2 folded past the 2->0 aggregation)
+typedef ap_fixed<15, 11> accrelu_t;     // R full sum of relu_t Tp_q (I(relu)+H2)
+typedef ap_fixed<11, 7> accrelurow_t;  // R trace, sum of relu_t Tp_q (I(relu)+H1)
 
 // ---- MAC temporaries: I = I(weight)+I(operand)+ceil(log2(#terms)), W = I+B ----
-typedef ap_fixed<15, 8> mac2_t;     // 2->2 dense: 6 w1*t2 products + b1 + b1_diag = 8 terms
-typedef ap_fixed<15, 7> mac0_t;     // 2->0 dense: 2*NHIDDEN w2*t0 products + b2 = 5 terms
+typedef ap_fixed<15, 5> mac2_t;     // 2->2 dense: 6 w1*t2 products + b1 + b1_diag = 8 terms
+typedef ap_fixed<15, 6> mac0_t;     // 2->0 dense: 2*NHIDDEN w2*t0 products + b2 = 5 terms
 
 #endif  // NPELICAN_TYPES_GENERATED_H_
