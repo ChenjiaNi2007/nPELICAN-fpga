@@ -15,6 +15,7 @@ array set opt {
     const_beams 0
     mac_dsp    0
     period     0
+    golden     0
 }
 
 set tcldir [file dirname [info script]]
@@ -237,7 +238,12 @@ if {$opt(reset)} {
 }
 set_top ${project_name}
 add_files ${src_file} -cflags ${fw_cflags}
-add_files -tb ${project_name}_tb.cpp -cflags "-std=c++0x"
+# golden=1 -> -DRUN_GOLDEN_GATE: csim replays tb_data/golden_*.dat (export_golden.py) and prints
+# "GOLDEN SUMMARY: events=M exact=K" instead of the legacy 10k toptag flow (meaningless for
+# non-toptag exports such as the 5-class models). Use reset=1 when toggling it.
+set tb_cflags "-std=c++0x"
+if {$opt(golden)} { append tb_cflags " -DRUN_GOLDEN_GATE" }
+add_files -tb ${project_name}_tb.cpp -cflags ${tb_cflags}
 add_files -tb firmware/weights
 add_files -tb tb_data
 if {$opt(reset)} {
