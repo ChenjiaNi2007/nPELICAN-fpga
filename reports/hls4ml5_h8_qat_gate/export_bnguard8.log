@@ -1,0 +1,25 @@
+/Users/chenjiani/Desktop/Rankin Research/nPELICAN-fpga/model_loader.py:326: UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.
+Consider using tensor.detach() first. (Triggered internally at /Users/runner/work/pytorch/pytorch/torch/csrc/autograd/generated/python_variable_methods.cpp:839.)
+  s = float(scale.reshape(-1)[0])
+Checkpoint format: post-refactor (mixing.weight)
+NHIDDEN=8, NOUT=5, head_hidden=0, NSPURIONS=2, jet_quant_split=False
+Extracting snapped dequantized weights (QAT path, via Brevitas)...
+
+Quant config: weight/act/input bits = 6/6/6, pmu=12, po2=True
+QuantLinear weight scales:
+  net2to2.eq_layers.0    scale = 3.125000e-02  ~ 2^-5.00  => 5 fractional bits
+  agg_2to0               scale = 1.250000e-01  ~ 2^-3.00  => 3 fractional bits
+Activation / identity quantizer scales:
+  input_quant                        scale = 4.000000e+00  ~ 2^2.00  => -2 frac bits  signed=True
+  output_quant                       scale = 1.250000e-01  ~ 2^-3.00  => 3 frac bits  signed=True
+  pmu_quant                          scale = 2.500000e-01  ~ 2^-2.00  => 2 frac bits  signed=True
+  net2to2.eq_layers.0.post_agg_quant scale = 6.250000e-02  ~ 2^-4.00  => 4 frac bits  signed=True
+  net2to2.eq_layers.0.act_layer      scale = 6.250000e-02  ~ 2^-4.00  => 4 frac bits  signed=True
+  agg_2to0.post_agg_quant            scale = 3.125000e-02  ~ 2^-5.00  => 5 frac bits  signed=True
+  input_t: |p|max = 2707.25 from /Users/chenjiani/Desktop/Rankin Research/PELICAN-nano/data/hls4ml5_n16/valid.h5
+  (input_t from TRAINED pmu_quant: W=12, I=10, clip ±2^9 vs |p|max=2707.2 in sample, momentum LSB = 2^-2 GeV)
+  BN1 scale gamma/sigma = 0.0703630464116 -> literal 147562 at F=21 (18 bits, snap err 1.67e-09)
+   BN1 multiplier binding: DSP48 + timing risk (10-bit measured on DSP) -- see --bn-frac-bits
+Wrote firmware/weights/types_generated.h
+
+Wrote firmware/weights/weights.h  (NHIDDEN=8, NOUT=5, NSPURIONS=2, head_hidden=0, NPARTICLES=16, agg guard bits = 8, norm guard bits = 8, bn guard bits = 8, bias guard bits = 8)

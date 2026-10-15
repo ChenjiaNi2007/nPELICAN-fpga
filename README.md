@@ -100,3 +100,23 @@ is the documented BN1-literal tie; `--bn-guard-bits 8` on export gives 200/200 a
 The legacy 10k csim flow is not meaningful for this model (toptag inputs, 20 particles, no jet).
 To re-export: `python model_loader.py --model ../PELICAN-nano/model/qat6wj16_h4_jh_e40_s2_best.pt
 --quant --repo ../PELICAN-nano --out firmware/weights/weights.h`.
+
+## Synthesizing the plain 5-class model, N=16 h8 (2026-10-15) — the (E,px,py,pz) Mixer's partner
+
+`firmware/weights/` now holds the export of `PELICAN-nano/model/h5n16_h8_qat_s1_best.pt` (N=16, h=8,
+no jet spurion, no head, w6 a6 i6 pmu12; test 52.22 % / macro AUC 81.54 vs float h8 55.5-55.9 %),
+exported with `--bn-guard-bits 8` — the default 10-bit BN1 literal gave 182/200 on the golden gate,
+the 18-bit one 200/200 (`reports/hls4ml5_h8_qat_gate/GATE.md`). Golden vectors in `tb_data/` are the
+first 200 jets of `data/hls4ml5_n16/test.h5` (`golden_jet.dat` removed: no jet port). The jet+head
+export above is restorable with `git checkout 64ddce8 -- firmware/weights tb_data`.
+
+Remote, like-for-like with the MLP-Mixer flow (5 ns, Vivado synth + opt on the U250):
+
+    export NPELICAN_PART=xcu250-figd2104-2L-e      # project.tcl honours it (csynth + vsynth)
+    vitis_hls -f build_prj.tcl "reset=1 csim=1 synth=1 cosim=0 validation=0 export=0 vsynth=1 golden=1"
+
+`golden=1` puts `-DRUN_GOLDEN_GATE` on the testbench, so csim prints `GOLDEN SUMMARY: events=200
+exact=200`. Reports: `nPELICAN_prj/solution/syn/report/nPELICAN_csynth.rpt` (latency, II, DSP),
+`vivado_synth.rpt` (post-synth, comparable with every earlier nanoPELICAN report) and
+`vivado_synth_opt.rpt` (+ `_hier`, post-`opt_design`: the number to put next to the Mixer's
+86.5k / 81.3k LUT, which are post-opt). Local gate: `./build_local.sh -DRUN_GOLDEN_GATE && ./tb_local`.
