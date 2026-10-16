@@ -120,3 +120,14 @@ exact=200`. Reports: `nPELICAN_prj/solution/syn/report/nPELICAN_csynth.rpt` (lat
 `vivado_synth.rpt` (post-synth, comparable with every earlier nanoPELICAN report) and
 `vivado_synth_opt.rpt` (+ `_hier`, post-`opt_design`: the number to put next to the Mixer's
 86.5k / 81.3k LUT, which are post-opt). Local gate: `./build_local.sh -DRUN_GOLDEN_GATE && ./tb_local`.
+
+If csynth sits at `[SCHED 204-61] Pipelining function 'nPELICAN'` for hours (h8 N=16 is the largest
+flattened nanoPELICAN so far: 2,592 2->2 lanes vs 1,936 for the N=20 h4 toptag builds), the
+per-stage split build gives the scheduler six small functions instead of one graph. It is gated
+200/200 (logits and dots) on this export with `./build_local.sh split -DRUN_GOLDEN_GATE && ./tb_local_split`:
+
+    vitis_hls -f build_prj.tcl "split=1 reset=1 csim=1 synth=1 golden=1"      # -> nPELICAN_split_prj/
+    vivado -mode batch -source vivado_synth_split.tcl                          # -> vivado_synth_split{,_opt}.rpt
+
+Split numbers carry stage-boundary registers (more FF, possibly more LUT/latency than the monolith);
+label them "split" in any comparison table.
