@@ -171,3 +171,22 @@ or 49,894 / 769). Owed: `split=1` csynth + `vivado_synth_split.tcl` for per-stag
 Owed (Lever 9, Winograd dot): `winograd=1` csynth + vsynth on the same weights (expect dot DSP 1,012 → 550; read the per-pair adder LUT), plus `winograd=1 const_beams=1`.
 Vivado needs `export NPELICAN_PART=xcu250-figd2104-2L-e` (license) and the full flag set
 `"reset=1 csim=0 synth=1 cosim=0 validation=0 export=0 vsynth=1"`.
+
+## hls4ml 5-class — plain N=16 h8 6-bit QAT (`h5n16_h8_qat_s1`, 2026-10-21)
+
+The (E,px,py,pz)-only MLP-Mixer's information-matched partner (no jet spurion, no head, NOUT=5;
+test 52.22 % / macro AUC 81.54). Export with `--bn-guard-bits 8` (200/200 golden gate). U250 @ 5 ns.
+
+| Config | vsynth LUT | FF | DSP | CARRY8 | csynth lat | Date | Files |
+|---|---|---|---|---|---|---|---|
+| 16p h8 NOUT=5, pmu-12 w6a6i6, bn-guard 8 (post-synth) | 160,690 | 49,280 | 1,029 | 19,444 | 16 cyc, II=1, timing met | 2026-10-21 | `csynth_hls4ml5_h8n16.rpt`, `vsynth_hls4ml5_h8n16_postsynth.rpt` |
+| same, **post-opt_design** (like-for-like with the Mixer) | **160,426** | **49,277** | **1,029** | 19,444 | — | 2026-10-21 | `vsynth_hls4ml5_h8n16_opt.rpt` |
+| same checkpoint, **deployment config** (branch `hls4ml5-deploy`: Lever 8 BN1 fold + T0 ROM, Lever 9 `winograd=1`, `const_beams=1`, sticky-bit biases), post-opt | **128,240** | **32,191** | **692** | 12,674 | 16 cyc, II=1, est. 4.455 ns | 2026-10-22 | `csynth_hls4ml5_h8n16_deploy.rpt`, `vsynth_hls4ml5_h8n16_deploy_opt.rpt` |
+
+DSP (lever7-blockfp row) = 684 dots + 171 BN1 (guard-bit literal on DSP) + 85 2->2 MACs + 95 rescales.
+Deployment row: 272 Winograd pair products (136 particle pairs x 2) + 32 xi/eta + 0 BN1 (168 T0 ROM muxes)
++ 219 2->2 MACs Vitis bound to DSPs (the sticky-bias accumulator init makes more mul+add patterns DSP
+candidates: 85 before) + ~150 Lever-8 / BN2 / 1/N̄ rescales (exact-float32 constants, 2-6 DSP each).
+vs the lever7-blockfp row: LUT -20 %, FF -35 %, CARRY8 -35 %, DSP -33 %, same 16 cycles. The post-opt row is the
+number next to the Mixer (81.3k LUT / 28.6k FF / 0 DSP / 21 cyc, post-opt): 1.97x LUT, 1.72x FF, +1,029 DSP,
+5 cycles faster, -2.4 pt accuracy; see `../README.md` and `mlpmixer/hls4ml5/README.md` Step 5.
