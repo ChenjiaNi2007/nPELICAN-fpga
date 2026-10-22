@@ -131,3 +131,30 @@ per-stage split build gives the scheduler six small functions instead of one gra
 
 Split numbers carry stage-boundary registers (more FF, possibly more LUT/latency than the monolith);
 label them "split" in any comparison table.
+
+### RESULT (2026-10-21) — plain 5-class N=16 h8, U250 @ 5 ns
+
+Reports: `reports/csynth_hls4ml5_h8n16.rpt`, `reports/vsynth_hls4ml5_h8n16_postsynth.rpt`
+(post-`synth_design`) and `reports/vsynth_hls4ml5_h8n16_opt.rpt` (post-`opt_design`, the like-for-like number
+against the Mixer; opt_design moved only -264 LUT / -3 FF).
+Interface check: `model_input` 768 bits (16 x 4 x 12), `nobj` 5 bits, five 6-bit `model_out_k` ports.
+(A first upload under this name was a stale N=32 h2 single-logit build — 1,536-bit input, 2,446 DSP —
+kept at the workspace root as `*_STALE_n32_h2_nout1.rpt`; always check the `== Interface` table.)
+
+| | csynth (Vitis 2023.2) | Vivado 2023.2 post-synth | **Vivado post-opt** |
+|---|---|---|---|
+| latency / II | **16 cyc (80 ns)**, II=1, est. 4.36 ns | — | — |
+| LUT | 555,314 est. | 160,690 (160,652 logic + 38 SRL) | **160,426** (160,388 logic + 38 SRL) |
+| FF | 76,400 est. | 49,280 | **49,277** |
+| CARRY8 | — | 19,444 | 19,444 |
+| DSP | 1,035 | 1,029 | **1,029** |
+| BRAM | 0 | 0 | 0 |
+
+DSP anatomy (csynth bind report): **684 dot products** (171 pairs x [`mul_12s_12s` + 3 `mac_mulsub`]),
+**171 BN1 multiplies** (`mul_6s_19ns`: the `--bn-guard-bits 8` literal is 19 bits and crosses the DSP
+threshold — the 10-bit default stays in LUTs, cf. the 16p `--bn-frac-bits 12` row at 769 DSP), 85 of the
+2->2 MACs that HLS bound to `mac_muladd_6s_{4,5,6}ns` DSPs, and 95 in the 1/N̄ / BN2 / ncount rescales.
+LUT (csynth estimate by source line, indicative only — Vivado lands at 0.29x): ReLU quantizer casts
+(`nPELICAN.cpp:392`) 120k, the 2->2 MAC adder trees ~280k, 2->0 sums 48k, dot4 adds/casts 22k, T0 cast
+17k, BN1 16k, aggregation adds 14k. Versus the 16p h2 toptag build (49.9k LUT / 769 DSP / 15 cyc), h8
+costs 3.2x the LUT: the 2->2 MAC + ReLU scale with NHIDDEN, the dot stage does not.
