@@ -3,7 +3,9 @@
 
 // Model dimensions read from the checkpoint. nPELICAN.h guards its hand
 // defaults with #ifndef, so these take precedence (NPARTICLES2 = NPARTICLES + NSPURIONS).
-#define NPARTICLES 16
+#ifndef NPARTICLES
+#define NPARTICLES 16  // checkpoint nobj; -DNPARTICLES on the compiler line wins
+#endif
 #define NHIDDEN 8
 #define NOUT 5
 #define NSPURIONS 2  // 2 beams
@@ -18,6 +20,7 @@
 #include "ap_int.h"
 
 #define NPELICAN_GENERATED_TYPES 1
+#define NPELICAN_NPARTICLES 16  // model_loader.py --nparticles; sizes H1=5/H2=9 below
 
 // ---- Quantization-point types: ap_fixed<B, B-k, AP_RND_CONV, AP_SAT> ----
 typedef ap_fixed<6, 8, AP_RND_CONV, AP_SAT> dot_t;  // input_quant (signed): scale=2^--2 (4.000000000e+00), bits=6, k=-2
@@ -39,6 +42,11 @@ typedef ap_fixed<6, 3, AP_RND_CONV, AP_SAT> w2_gen_t;  // 2->0 weights (signed):
 //      Guard macro lets nPELICAN.h keep a hand fallback for the float path.
 #define NPELICAN_INPUT_T_GENERATED 1
 typedef ap_fixed<12, 10, AP_RND_CONV, AP_SAT> input_t;  // raw momenta; TRAINED pmu_quant grid (I=10, F=2); |p|max=2707.2
+// ---- Lever 9 (-DNPELICAN_WINOGRAD_DOT): Winograd per-particle correction
+//      xi = E*px + py*pz, eta = -E*px + py*pz: sum of two input_t products,
+//      exact in ap_fixed<2W+1, 2I+1> of input_t<W,I>. Unused by the default dot4.
+#define NPELICAN_DOTXI_T_GENERATED 1
+typedef ap_fixed<25, 21> dotxi_t;  // exact xi/eta (input_t <12,10>)
 
 // ---- Jet-spurion quantizer split (--jet-quant-split). Without it these alias the
 //      single-grid types, so the firmware can always name them (byte-identical).
@@ -49,34 +57,65 @@ typedef dot_t dotall_t;
 typedef input_t jet_t;
 
 // ---- Float-trained biases / BatchNorm constants / normalization constants ----
-// These are NOT PyTorch quantization points (PyTorch keeps them in float), so
-// per CLAUDE.md/plan they are WIDENED, not snapped: their fixed-point rounding
-// error must stay below half the LSB of the next real quantizer they feed.
-typedef ap_fixed<19, 2, AP_RND_CONV, AP_SAT> bias1_t_gen;  // b1,b1_diag (float): F = mac2 grid w1_F+t2_F + G = 17 (G=8 guard bits); |b|max I=2
-typedef ap_fixed<18, 2, AP_RND_CONV, AP_SAT> bias2_t_gen;  // b2 (float): F = mac0 grid w2_F+t0_F + G = 16 (G=8 guard bits); |b|max I=2
-typedef bias1_t_gen bias_t_gen;  // legacy alias (single bias type, pre-2026-10-06)
-typedef ap_fixed<27, 6, AP_RND_CONV, AP_SAT> bn_t_gen;  // BN mean/scale/beta (float); |c|max=31.9444 (I=6), F=21
-typedef ap_fixed<32, 1, AP_RND_CONV, AP_SAT> norm_t;  // 1/N̄, 1/N̄^2 normalize-late multipliers (F=31)
+// These are NOT PyTorch quantization points: PyTorch applies them in float32.
+// bias_t_gen (b1, b1_diag, b1_diag_total, b2): STICKY-BIT rule. Every bias is
+// the INIT value of an exact MAC accumulator (mac2_t / mac0_t, which carry the sticky
+// bit: F = BIAS_F), followed by ONE AP_RND_CONV cast (relu_t / result_t).
+// Let G = 2^-Fh, Fh = max(mac2_F, mac0_F, relu_F+1, out_F+1) = max(9, 8, 5, 4) = 9,
+// so the MAC sum is on G and every rounding tie of the target grid is on G. With
+// b = b_hi + b_lo, b_hi = floor_G(b), 0 <= b_lo < 2^-Fh, the emitted literal is
+// b_hi + sticky*2^-(Fh+1), sticky = (b_lo != 0). v = mac + b_hi is on G; the true
+// t = v + b_lo and v' = v + sticky*2^-(Fh+1) are both in [v, v + 2^-Fh), with no tie
+// strictly inside, and both lie strictly above v iff b_lo > 0 (equal to v otherwise),
+// so RND_CONV(v') == RND_CONV(t) always (saturation is monotone). BIAS_F = Fh+1.
+// The diagonal uses b1_diag_total = sticky(float32(b1 + b1_diag)): two sticky terms
+// must never be added (their low parts can exceed one G step).
+// bn_t_gen / norm_t: EXACT float32 literals,
+//   F = max over nonzero entries of (23 - floor(log2|c|)), capped at 36;
+//   I derived from the magnitude.
+// With exact float32 constants, the firmware's exact fixed-point arithmetic
+// (products/sums exact in HLS promoted types, one AP_RND_CONV rounding at the
+// quantizer) is at least as accurate as PyTorch's float32 evaluation, so a
+// residual mismatch can only come from PyTorch's own float32 rounding landing
+// within ~1e-7 (relative) of a quantizer grid boundary.
+typedef ap_fixed<12, 2, AP_RND_CONV, AP_SAT> bias_t_gen;  // b1,b1_diag,b1_diag_total,b2 (sticky-bit, Fh=9); |bias|max=0.868808 (I=2), F=10
+typedef ap_fixed<37, 6, AP_RND_CONV, AP_SAT> bn_t_gen;  // BN mean/scale/beta (exact float32); |c|max=31.9444 (I=6), F=31
+typedef ap_fixed<36, 1, AP_RND_CONV, AP_SAT> norm_t;  // 1/N̄, 1/N̄^2 normalize-late multipliers (exact float32), F=35
 
 // ---- Aggregation summands (unquantized BatchNorm outputs) + their accumulators.
+//      bn1out_t / acc2_t / accrow_t: LEGACY, unused by the datapath after Lever 8
+//      (BN1 now applies to the raw dot sums); kept for the float-build aliases.
 //      AGG_F = 14 fractional bits (> the finest post-agg grid t0_F=5) so the
 //      raw-sum-then-renormalize lands bit-exactly on the post-agg quantizer grid;
 //      storing these on the coarse post-agg grid (e.g. t2_F) would tip the rounding.
 //      Each is range-typed by its OWN BN output bound; SAT guards it. Accumulators
 //      add ceil(log2(#terms)) integer headroom (H2=9 full sum, H1=5 row/trace).
-typedef ap_fixed<19, 5, AP_RND_CONV, AP_SAT> bn1out_t;  // batch1 = BN1(dots); |batch1|<=11.1 (I=5), F=14
-typedef ap_fixed<28, 14> acc2_t;     // jmass raw sum of bn1out_t (I(bn1out)+H2)
-typedef ap_fixed<24, 10> accrow_t;   // jdotp row sums of bn1out_t (I(bn1out)+H1)
+typedef ap_fixed<19, 5, AP_RND_CONV, AP_SAT> bn1out_t;  // LEGACY (pre-Lever-8) batch1 = BN1(dots); |batch1|<=11.1 (I=5), F=14
+typedef ap_fixed<28, 14> acc2_t;     // LEGACY jmass raw sum of bn1out_t (I(bn1out)+H2)
+typedef ap_fixed<24, 10> accrow_t;   // LEGACY jdotp row sums of bn1out_t (I(bn1out)+H1)
 typedef ap_fixed<22, 8, AP_RND_CONV, AP_SAT> tr_t;  // Tr = BN2(relu); |Tr|<=65.7 (I=8); dump-only after #2 (BN2 folded past the 2->0 aggregation)
 typedef ap_fixed<15, 11> accrelu_t;     // R full sum of relu_t Tp_q (I(relu)+H2)
 typedef ap_fixed<11, 7> accrelurow_t;  // R trace, sum of relu_t Tp_q (I(relu)+H1)
 
-// ---- MAC temporaries: I = I(weight)+I(operand)+ceil(log2(#terms)), W = I+B ----
-typedef ap_fixed<15, 6> mac2_t;     // 2->2 dense: 6 w1*t2 products + b1 + b1_diag = 8 terms
-// bias add for the 2->2 dense output: products accumulate in mac2_t (exact product grid);
-// the float-typed bias is added ONCE here at full bias precision, then the relu quantizer rounds
-#define NPELICAN_MAC2B_T_GENERATED 1
-typedef ap_fixed<23, 6> mac2b_t;    // I = I(mac2_t), F = BIAS1_F = 17
-typedef ap_fixed<25, 9> mac0_t;     // 2->0 dense: 2*NHIDDEN w2*t0 products + b2 = 17 terms; F = BIAS2_F = 16 (exact bias add)
+// ---- Lever 8: BN1 applied ONCE to the raw dot aggregates + T0 ROM ----
+//      jmass    = t2( Σ_ij d·m · bn1_s_all + ncount² · bn1_b_all )
+//      jdotp[j] = t2((Σ_i d_ij·m · bn1_s_row + ncount · bn1_b_row) · m_jj)
+//      T0       = m ? bn1_t0_rom[raw DOT_W-bit code of d] : 0   (weights.h)
+//      Raw dot sums are EXACT integers on the dot grid (+H2/H1 headroom); every
+//      product/sum is exact in HLS promoted types, so the ONLY rounding is the
+//      single t2_t cast (AP_RND_CONV, AP_SAT).
+//      bn1fold_t F: the folded constant's rounding error 2^-(F+1), times the
+//      largest raw sum 2^(dot_mag+H2), must stay under 2^-4 of half a t2 LSB
+//      (2^-(t2_F+1)) so it cannot tip the single t2 rounding:
+//        F >= t2_F + H2 + dot_mag + 4 = 4 + 9 + 7 + 4 = 24
+#define NPELICAN_DOT_W 6  // ROM index width = the dots array (dotall_t) code
+typedef ap_fixed<15, 17> accdot2_t;     // Σ_ij masked dots (I(dot)+H2), exact
+typedef ap_fixed<11, 13> accdotrow_t;   // Σ_i masked dots per column (I(dot)+H1), exact
+typedef ap_fixed<25, 1, AP_RND_CONV, AP_SAT> bn1fold_t;  // s/N̄, β'/N̄, s/N̄², β'/N̄²; |c|max=0.0126967 (I=1), F=24
+
+// ---- MAC temporaries: I = I(weight)+I(operand)+ceil(log2(#terms)),
+//      F = max(product_F, BIAS_F): initialised with the sticky-bit bias, carry the sticky bit ----
+typedef ap_fixed<16, 6> mac2_t;     // 2->2 dense: init = sticky-encoded b1 / b1_diag_total, + 6 w1*t2 products (product F=9, F=10)
+typedef ap_fixed<18, 8> mac0_t;     // 2->0 dense: init = sticky-encoded b2, + 16 w2*t0 products (product F=8, F=10)
 
 #endif  // NPELICAN_TYPES_GENERATED_H_

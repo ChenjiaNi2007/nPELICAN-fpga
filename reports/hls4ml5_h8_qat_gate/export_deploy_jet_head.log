@@ -1,0 +1,36 @@
+/private/tmp/claude-501/-Users-chenjiani/6f08580e-e205-41a5-98e0-3c6f078df3d3/scratchpad/merge-wt/model_loader.py:373: UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.
+Consider using tensor.detach() first. (Triggered internally at /Users/runner/work/pytorch/pytorch/torch/csrc/autograd/generated/python_variable_methods.cpp:839.)
+  s = float(scale.reshape(-1)[0])
+Checkpoint format: post-refactor (mixing.weight)
+NHIDDEN=4, NOUT=5, head_hidden=16, NSPURIONS=3, jet_quant_split=True
+Extracting snapped dequantized weights (QAT path, via Brevitas)...
+
+Quant config: weight/act/input bits = 6/6/6, pmu=12, po2=True
+QuantLinear weight scales:
+  net2to2.eq_layers.0    scale = 6.250000e-02  ~ 2^-4.00  => 4 fractional bits
+  agg_2to0               scale = 1.250000e-01  ~ 2^-3.00  => 3 fractional bits
+  head                   scale = 2.500000e-01  ~ 2^-2.00  => 2 fractional bits
+Activation / identity quantizer scales:
+  input_quant                        scale = 4.000000e+00  ~ 2^2.00  => -2 frac bits  signed=True
+  output_quant                       scale = 6.250000e-02  ~ 2^-4.00  => 4 frac bits  signed=True
+  pmu_quant                          scale = 1.250000e-01  ~ 2^-3.00  => 3 frac bits  signed=True
+  input_quant_jet                    scale = 1.000000e+00  ~ 2^0.00  => -0 frac bits  signed=True
+  input_quant_mjet                   scale = 5.000000e-01  ~ 2^-1.00  => 1 frac bits  signed=True
+  pmu_quant_jet                      scale = 7.812500e-03  ~ 2^-7.00  => 7 frac bits  signed=True
+  net2to2.eq_layers.0.post_agg_quant scale = 6.250000e-02  ~ 2^-4.00  => 4 frac bits  signed=True
+  net2to2.eq_layers.0.act_layer      scale = 3.125000e-02  ~ 2^-5.00  => 5 frac bits  signed=True
+  agg_2to0.post_agg_quant            scale = 1.562500e-02  ~ 2^-6.00  => 6 frac bits  signed=True
+  agg_2to0.act_layer                 scale = 1.562500e-02  ~ 2^-6.00  => 6 frac bits  signed=True
+  jet quant split: dot_t k=-2 (I=8), dotj_t k=0 (I=10), dotm_t k=1 (I=15) -> dotall_t <16,15>
+  input_t: |Pjet|max = 5336.15 (jet spurion) from /Users/chenjiani/Desktop/Rankin Research/PELICAN-nano/data/hls4ml5j_n16/valid.h5
+  input_t: |p|max = 5336.15 from /Users/chenjiani/Desktop/Rankin Research/PELICAN-nano/data/hls4ml5j_n16/valid.h5
+  (jet_t from TRAINED pmu_quant_jet: W=20, I=13, momentum LSB = 2^-7 GeV)
+  (input_t from TRAINED pmu_quant: W=12, I=9, clip ±2^8 vs |p|max=5336.2 in sample, momentum LSB = 2^-3 GeV)
+  BN1 scale gamma/sigma = 0.00470130491093 -> literal 323071213 at F=36 (29 bits, snap err 6.63e-12)
+   arithmetic-T0 fallback (dotall_t W=16 > 10): per-element BN1 multiplies bind as: DSP48 + timing risk (10-bit measured on DSP) -- see --bn-frac-bits
+  particle count: NPARTICLES=16 (NPARTICLES2=19, 361 pairs) -> accumulator headroom H1=5 (row/trace), H2=9 (full sum)
+  Lever 8: dotall_t W=16 > 10: no T0 ROM (firmware falls back to arithmetic T0); bn1fold_t=ap_fixed<32,1>
+Wrote firmware/weights/types_generated.h
+  bias_t_gen sticky-bit: Fh=9, BIAS_F=10; b1={0.7998046875, -0.0732421875, -0.1943359375, -0.1552734375} b1_diag_total={0.6044921875, -0.3017578125, -2.3525390625, -0.5146484375} b2={-0.0888671875, -0.3779296875, -0.0576171875, 0.7001953125, 0.0361328125, -0.0087890625, -0.0771484375, 0.7587890625, -0.0185546875, -0.0439453125, 0.0830078125, 0.2119140625, 0.1435546875, -0.2216796875, -0.0205078125, -0.2177734375}
+
+Wrote firmware/weights/weights.h  (NHIDDEN=4, NOUT=5, NSPURIONS=3 [jet spurion] [jet quant split], head_hidden=16, NPARTICLES=16, agg guard bits = 8, norm guard bits = 8, bn guard bits = 0, bias guard bits = 8)

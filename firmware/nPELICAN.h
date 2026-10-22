@@ -29,8 +29,40 @@
 // Model dimensions. types_generated.h (included above, written by model_loader.py
 // from the checkpoint) or a -D flag takes precedence; these are hand defaults.
 // weights.h static_asserts that they match the exported checkpoint.
+
+// Lever 9 does NOT apply under Lever 7 block-FP: there the dot operands are per-particle
+// (mantissa, exponent) pairs, not uniform input_t momenta, so the Winograd identity would
+// need per-pair exponent alignment of every sum (E_i - px_j etc.), losing the exactness
+// and the saving. Refuse the combination rather than silently ignoring the flag.
+#if defined(NPELICAN_WINOGRAD_DOT) && defined(NPELICAN_BLOCK_FP)
+#error "NPELICAN_WINOGRAD_DOT (Lever 9) is incompatible with NPELICAN_BLOCK_FP (Lever 7 block-FP momenta); build without winograd=1"
+#endif
+// Lever 9 is not wired for the --jet-quant-split dot populations (dot4j/dot4m keep the jet
+// momenta on their own jet_t grid): refuse rather than silently take the plain-dot path.
+#if defined(NPELICAN_WINOGRAD_DOT) && defined(NPELICAN_JET_QUANT_SPLIT)
+#error "NPELICAN_WINOGRAD_DOT (Lever 9) is not implemented for NPELICAN_JET_QUANT_SPLIT; build without winograd=1"
+#endif
+
+// ---- Particle count --------------------------------------------------------------
+// NPARTICLES (real constituents) is set, in priority order, by
+//   1. -DNPARTICLES=N on the compiler line (build_prj.tcl nparticles=N; build_local.sh
+//      passes extra flags through), else
+//   2. types_generated.h (model_loader.py: the checkpoint's nobj, or --nparticles N; a
+//      guarded "#define NPARTICLES N" plus NPELICAN_NPARTICLES = the count the accumulator
+//      headroom H1/H2 was sized for), else
+//   3. 20 (float-export path / float-reference build: types_float.h defines no N).
+// The accumulators in types_generated.h hold N_exported + NSPURIONS rows exactly; a build
+// with MORE particles than the header was exported for could overflow them silently (they
+// wrap), so that combination is a hard error. Fewer particles is safe (over-sized headroom).
+#if defined(NPARTICLES) && defined(NPELICAN_NPARTICLES) && (NPARTICLES > NPELICAN_NPARTICLES)
+#error "NPARTICLES exceeds the particle count types_generated.h was exported for; re-run model_loader.py --nparticles N"
+#endif
 #ifndef NPARTICLES
+#ifdef NPELICAN_NPARTICLES
+#define NPARTICLES NPELICAN_NPARTICLES
+#else
 #define NPARTICLES  20
+#endif
 #endif
 // Spurions prepended before the constituents: 2 beams (slots 0,1), plus the full-jet
 // 4-momentum at slot 2 when the checkpoint was trained with --add-jet (NSPURIONS=3;
@@ -41,6 +73,15 @@
 #ifndef NPARTICLES2
 #define NPARTICLES2 (NPARTICLES + NSPURIONS)  // + beam (and optional jet) spurions
 #endif
+
+// np_bits<N>::value = number of bits needed to hold every value 0..N (N >= 1):
+// np_bits<22> = 5 (0..31), np_bits<34> = 6, np_bits<484> = 9, np_bits<1156> = 11.
+// C++11 recursive template (Vitis builds with -std=c++0x); compile-time constant only.
+template<unsigned long N> struct np_bits {
+    enum { value = 1 + np_bits<(N >> 1)>::value };
+};
+template<> struct np_bits<0> { enum { value = 0 }; };
+static_assert(NPARTICLES >= 1, "NPARTICLES must be >= 1");
 #ifndef NHIDDEN
 #define NHIDDEN 2       //Number of parallel channels
 #endif
@@ -137,6 +178,24 @@ void dot4j(input_t p[4], jet_t q[4], dotj_t& dot);
 void dot4m(jet_t q[4], dotm_t& dot);
 #endif
 
+// Lever 9 (-DNPELICAN_WINOGRAD_DOT; build_prj.tcl winograd=1): Winograd inner-product
+// form of the Minkowski dot, 2 multiplies per pair + 2 per particle instead of 4 per
+// pair (docs/RESOURCE_REDUCTION_LEVERS.md, Lever 9). With a_i=(E,px,py,pz)_i and
+// b_j=(E,-px,-py,-pz)_j:
+//   xi[i]  =  E_i*px_i + py_i*pz_i          (per particle, exact in dotxi_t)
+//   eta[j] = -E_j*px_j + py_j*pz_j          (per particle, exact in dotxi_t)
+//   d_ij   = (E_i-px_j)*(px_i+E_j) + (py_i-pz_j)*(pz_i-py_j) - xi[i] - eta[j]
+// Every intermediate is exact (HLS promoted types; nothing narrowed), so the single
+// (dot_t) cast sees the same value as dot4 -> bit-identical dots.
+// dotxi_t = ap_fixed<2W+1, 2I+1> of input_t<W,I>: holds a two-product sum exactly.
+// Under --quant it is GENERATED (types_generated.h, NPELICAN_DOTXI_T_GENERATED); this
+// fallback derives it from whatever input_t is in scope (the float-export hand
+// input_t <36,12> gives <73,25>). types_float.h aliases it to double.
+#ifndef NPELICAN_DOTXI_T_GENERATED
+typedef ap_fixed<2*input_t::width+1, 2*input_t::iwidth+1> dotxi_t;
+#endif
+void dot4_winograd(input_t p1[4], input_t p2[4], dotxi_t xi_i, dotxi_t eta_j, dot_t& dot);
+
 // Lever 7: per-particle block-FP encode + (m, e) dot4. Inert unless the exported
 // checkpoint was trained with --pmu-block-fp (types_generated.h defines
 // NPELICAN_BLOCK_FP and the mant_t/bexp_t/mdot_t/dotalign_t pair). Needs input_t,
@@ -146,12 +205,14 @@ void dot4m(jet_t q[4], dotm_t& dot);
 // nobj is a PARTICLE COUNT (0..NPARTICLES2), not a momentum: it must not share
 // input_t. With input_t capped below 12 bits (negative F, momentum LSB > 1 GeV)
 // an input_t nobj would round odd counts to even, corrupting the mask and the
-// BN2 β'·count terms. ap_uint<5> covers 0..31 and is exact at every input width.
-// Width follows NPARTICLES2 (nobj is remapped to 0..NPARTICLES2 inside the top):
-// 5 bits up to 31 (N<=29, incl. the default 20), 6 bits to 63 (N=32: NPARTICLES2=34),
-// 7 bits beyond. ncount2 = ncount*ncount needs 2*NOBJ_BITS-1 bits (484 < 2^9).
-#define NOBJ_BITS ((NPARTICLES2) <= 31 ? 5 : ((NPARTICLES2) <= 63 ? 6 : 7))
+// BN2 β'·count terms. Width is DERIVED from NPARTICLES2 so the remapped count
+// (nobj += NSPURIONS, up to NPARTICLES2) never wraps: ap_uint<5> (0..31) at 20 particles,
+// ap_uint<6> at 32. (A fixed ap_uint<5> at 32 particles wrapped nobj=34 to 2 and made
+// rows >= 32 unreachable -- HLS deleted their arithmetic.) ncount2 (unmasked pairs,
+// 0..NPARTICLES2^2) is npairs_t: 9 bits at 20p.
+#define NOBJ_BITS (np_bits<NPARTICLES2>::value)
 typedef ap_uint<NOBJ_BITS> nobj_t;
+typedef ap_uint<np_bits<(NPARTICLES2)*(NPARTICLES2)>::value> npairs_t;
 
 void nPELICAN(
     input_t model_input[(NPARTICLES)*4],

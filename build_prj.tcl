@@ -14,8 +14,11 @@ array set opt {
     split_only 0
     const_beams 0
     mac_dsp    0
+    bn1_rom    1
+    winograd   0
     period     0
     golden     0
+    nparticles 0
 }
 
 set tcldir [file dirname [info script]]
@@ -226,9 +229,33 @@ if {$opt(period) != 0} {
 set fw_cflags "-std=c++0x"
 if {$opt(const_beams)} { append fw_cflags " -DNPELICAN_CONST_BEAMS" }
 if {$opt(mac_dsp)}     { append fw_cflags " -DNPELICAN_MAC_DSP" }
+# bn1_rom=0 -> -DNPELICAN_NO_BN1_ROM (Lever 8 A/B): T0 from the arithmetic form
+#   (t2_t)((dots*s + beta')*mask) instead of the loader-generated ROM; the raw-dot
+#   aggregation path is unchanged. Bit-exact either way (both gate 200/200).
+if {!$opt(bn1_rom)}    { append fw_cflags " -DNPELICAN_NO_BN1_ROM" }
+# winograd=1 -> -DNPELICAN_WINOGRAD_DOT (Lever 9): Winograd inner-product dot,
+#   2 multiplies per pair + 2 per particle (550) instead of 4 per pair (1012).
+#   Exact -> bit-identical dots. Stacks with const_beams (beam pairs keep the
+#   folded dot4, particle pairs go Winograd: 420 + 40 = 460 vs 840 mults);
+#   #error under block-FP.
+if {$opt(winograd)}    { append fw_cflags " -DNPELICAN_WINOGRAD_DOT" }
 if {$opt(split) == 2 && $split_only_stage eq ""} { append fw_cflags " -DNPELICAN_SPLIT_TRI" }
 if {$split_only_stage ne ""} {
     append fw_cflags " -DNPELICAN_SPLIT_ONLY_[string toupper $split_only_stage]"
+}
+# nparticles=N -> -DNPARTICLES=N on BOTH the firmware and the testbench (they must agree).
+#   Optional cross-check for particle-count resource builds: the particle count normally
+#   comes from the export itself (model_loader.py --nparticles N writes NPELICAN_NPARTICLES
+#   into types_generated.h, which sets NPARTICLES). Passing nparticles=N as well makes
+#   nPELICAN.h #error if N exceeds the exported count (accumulator headroom too small;
+#   they wrap silently). N below the exported count is allowed (over-sized headroom).
+#   Default 0 = take NPARTICLES from the header. Use reset=1 when changing it, and csim=0
+#   for N > 20: the golden vectors hold 20 particles (the TB would read past each line).
+#   Recipe: docs/RESOURCE_REDUCTION_LEVERS.md, "Particle-count scaling".
+set tb_cflags "-std=c++0x"
+if {$opt(nparticles) != 0} {
+    append fw_cflags " -DNPARTICLES=$opt(nparticles)"
+    append tb_cflags " -DNPARTICLES=$opt(nparticles)"
 }
 
 if {$opt(reset)} {
@@ -241,7 +268,6 @@ add_files ${src_file} -cflags ${fw_cflags}
 # golden=1 -> -DRUN_GOLDEN_GATE: csim replays tb_data/golden_*.dat (export_golden.py) and prints
 # "GOLDEN SUMMARY: events=M exact=K" instead of the legacy 10k toptag flow (meaningless for
 # non-toptag exports such as the 5-class models). Use reset=1 when toggling it.
-set tb_cflags "-std=c++0x"
 if {$opt(golden)} { append tb_cflags " -DRUN_GOLDEN_GATE" }
 add_files -tb ${project_name}_tb.cpp -cflags ${tb_cflags}
 add_files -tb firmware/weights

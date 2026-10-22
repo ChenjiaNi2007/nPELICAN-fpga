@@ -131,7 +131,7 @@ the 2026-07-07 `csynth_monolith.rpt` / `csynth_split.rpt` pair.
 cd nPELICAN-fpga
 python model_loader.py --model ../PELICAN-nano/model/<prefix>_best.pt --quant \
     --repo ../PELICAN-nano --out firmware/weights/weights.h      # --out is REQUIRED
-vitis_hls -f build_prj.tcl "reset=1 csim=0 synth=1 vsynth=1"     # reset=1 is REQUIRED
+vitis_hls -f build_prj.tcl "reset=1 csim=0 synth=1 cosim=0 validation=0 export=0 vsynth=1"   # reset=1 REQUIRED; cosim/validation/export default ON and validation exits before vsynth when csim=0
 ```
 
 Both flags are load-bearing:
@@ -145,3 +145,29 @@ Both flags are load-bearing:
 
 Sanity check before believing any report: confirm the loader's printed BN1 binding line, and
 confirm the report's internal `Date` is newer than the header you just generated.
+
+## Lever 8 (BN1 past the aggregation + T0 ROM), 2026-09-24 — branch `bn1-fold`
+
+`cap_h2_qatf12_lr0p0025_e20_s1` weights (6/6/6, pmu-12, h=2, 20 particles, 5 ns).
+
+| file | build | part | DSP | FF | LUT | lat | notes |
+|---|---|---|---|---|---|---|---|
+| `csynth_monolith_lever8_widebias.rpt` | `f8e3f5d` (exact-float32 biases, ~41-bit adds) | xcvu13p-2 | 1069 | 57,724 | 375,654 | 16 | pre-fix estimate; 135k LUT on the relu-cast lines |
+| `csynth_monolith_lever8.rpt` + `_detail.rpt` | `01772ab`+ (sticky-bit biases) | xcvu13p-2 | 1069 | 53,475 | 324,453 | 16 | `_detail` has the per-line Expression table |
+| `csynth_monolith_lever8_baseline.rpt` + `_detail.rpt` | `bn1-fold-baseline` 7c31bb8 (old firmware + old loader, same ckpt) | xcvu13p-2 | 1052 | 50,694 | 263,753 | 14 | the like-for-like BEFORE (csynth); its vsynth is owed |
+| `vsynth_monolith_lever8_baseline.rpt` | `bn1-fold-baseline` 7c31bb8 | xcu250-2L | 1,047 | 20,941 | 74,034 | – | the like-for-like BEFORE in Vivado; Lever 8 = LUT −2.1%, FF −12.4%, DSP +1.9% |
+| `csynth_monolith_lever8_final.rpt` + `_detail.rpt`, `vsynth_monolith_lever8_final.rpt` | `bn1-fold` c159355 (FINAL: bias in the MAC init) | xcu250-2L | 1,066 | 17,843 | **60,747** | 16 | vs baseline vsynth: LUT −17.9%, FF −14.8%, DSP +1.8% |
+| `csynth_monolith_lever9.rpt` + `_detail.rpt`, `vsynth_monolith_lever9.rpt` | `bn1-fold` bce5b20 `winograd=1` (Lever 9 on Lever 8) | xcu250-2L | **626** | 17,485 | 72,729 | 15 | vs Lever 8 final: DSP −41%, LUT +20% (27 LUT/DSP); vs pre-Lever-8 baseline: DSP −40%, LUT −2%, FF −17% |
+| `{csynth,vsynth}_monolith_lever9_constbeams*.rpt` | `bn1-fold` bce5b20 `winograd=1 const_beams=1` (deployment config) | xcu250-2L | **534** | 17,636 | 69,742 | 15 | vs pre-Lever-8 baseline: DSP −49%, LUT −6%, FF −16% |
+| `particle_count/{csynth,vsynth}_16p_lever9_constbeams*.rpt` | same at 16 particles | xcu250-2L | **370** | 12,662 | 47,346 | 15 | vs best archived 16p: DSP −52% (vs 769) / −61% (vs 941), LUT −2%/−5% |
+| `particle_count/{csynth,vsynth}_{8,12,24}p_lever9_constbeams*.rpt` | deployment config at N=8/12/24 (2026-09-28) | xcu250-2L | 138 / 238 / 730 | 5,218 / 10,246 / 23,660 | 15,143 / 28,813 / 96,442 | 13/14/15 | DSP = (N+2)²+(N+2)+28 exactly; LUT ≈ 133.6(N+2)²; see resource_log sweep section |
+| `particle_count/{csynth,vsynth}_32p_lever9_constbeams*.rpt` | deployment config at N=32, post-fix (2026-09-29) | xcu250-2L | 1,218 | 43,122 | 159,446 | 15 | VALID; DSP exactly (N+2)²+(N+2)+28, LUT 2% under the 8–24p extrapolation |
+| `particle_count/*_32p_lever9_constbeams_INVALID_nobj5bit*.rpt` | 32p on pre-5a4b9f9 firmware | xcu250-2L | 1,020 | 31,994 | 135,201 | 15 | INVALID: 5-bit nobj wrapped, effectively 29 particles; re-run with `--nparticles 32` |
+| `vsynth_monolith_lever8.rpt` | `01772ab`+ | xcu250-2L | 1,067 | 18,338 | 72,467 | – | ground truth; vs pmu-12 monolith (July): LUT +4.9%, FF −26%, DSP −8.7% (different checkpoint) |
+
+16-particle Lever 8 (c159355, U250): `particle_count/{csynth,vsynth}_16p_lever8*.rpt` = 734 DSP /
+12,792 FF / **41,763 LUT** / 16 cyc — best 16p point on record on every axis (was 48,419 LUT / 941 DSP
+or 49,894 / 769). Owed: `split=1` csynth + `vivado_synth_split.tcl` for per-stage attribution; `bn1_rom=0` A/B.
+Owed (Lever 9, Winograd dot): `winograd=1` csynth + vsynth on the same weights (expect dot DSP 1,012 → 550; read the per-pair adder LUT), plus `winograd=1 const_beams=1`.
+Vivado needs `export NPELICAN_PART=xcu250-figd2104-2L-e` (license) and the full flag set
+`"reset=1 csim=0 synth=1 cosim=0 validation=0 export=0 vsynth=1"`.

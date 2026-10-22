@@ -131,3 +131,23 @@ per-stage split build gives the scheduler six small functions instead of one gra
 
 Split numbers carry stage-boundary registers (more FF, possibly more LUT/latency than the monolith);
 label them "split" in any comparison table.
+
+## Deployment config for the 5-class model: Levers 8 + 9 + const beams (branch `hls4ml5-deploy`, 2026-10-22)
+
+`hls4ml5-deploy` merges `bn1-fold` (Lever 8 BN1 fold + T0 ROM, Lever 9 Winograd dot, const beams,
+sticky-bit biases, exact-float32 BN/norm literals) into `lever7-blockfp` (NOUT, jet spurion, head,
+jet-quant-split). Same h8 checkpoint, re-exported with the merged loader (no guard-bit flags needed:
+`--bias/--norm/--bn-guard-bits` are no-ops now); local gate 200/200 in every configuration, see
+`reports/hls4ml5_h8_qat_gate/GATE_DEPLOY.md`. This is the toptag "best operating point" setup
+(16p: 370 DSP / 47.3k LUT for h2) applied to the 5-class N=16 h8 export.
+
+    git fetch && git checkout hls4ml5-deploy          # remote box
+    export NPELICAN_PART=xcu250-figd2104-2L-e
+    vitis_hls -f build_prj.tcl "reset=1 csim=1 synth=1 cosim=0 validation=0 export=0 vsynth=1 golden=1 winograd=1 const_beams=1"
+
+(`bn1_rom=1` is the default.) Expect `GOLDEN SUMMARY: events=200 exact=200`, then
+`nPELICAN_prj/solution/syn/report/nPELICAN_csynth.rpt` + `vivado_synth_opt.rpt` as before. Versus the
+lever7-blockfp build (1,029 DSP / 160.4k LUT post-opt / 16 cyc): the 684 dot DSPs become 2 per particle
+pair + 2 per particle (beam pairs fold to adders), the 171 BN1 multiplies disappear (T0 is a 64-entry
+ROM, jmass/jdotp use 4 folded constants), the batch1 array is gone (FF down); the 2->2 MAC + ReLU LUTs
+(the bulk) are untouched. Per-stage attribution: `split=1` works with the same flags.

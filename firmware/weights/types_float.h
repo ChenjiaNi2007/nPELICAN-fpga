@@ -20,6 +20,7 @@
 #define NPELICAN_INPUT_T_GENERATED 1
 #define NPELICAN_RESULT_T_GENERATED 1
 #define NPELICAN_LEGACY_WEIGHT_TYPES 1
+#define NPELICAN_DOTXI_T_GENERATED 1
 
 // ---- Quantization-point + IO interface types ----
 typedef double dot_t;       // input_quant (d_ij)
@@ -30,6 +31,7 @@ typedef double out_t;       // output_quant
 typedef double w1_gen_t;    // 2->2 weights
 typedef double w2_gen_t;    // 2->0 weights
 typedef double input_t;     // raw momenta / dot4 operands
+typedef double dotxi_t;     // Lever 9 Winograd per-particle correction (xi/eta)
 typedef double result_t;    // final logit
 // jet-spurion quantizer split types (inert unless NPELICAN_JET_QUANT_SPLIT; aliases otherwise)
 #define NPELICAN_JET_TYPES_GENERATED 1
@@ -49,6 +51,14 @@ typedef double accrow_t;
 typedef double tr_t;
 typedef double accrelu_t;
 typedef double accrelurow_t;
+
+// ---- Lever 8: raw dot accumulators + folded BN1 constants ----
+// (weights.h's `#define NPELICAN_BN1_ROM` is ignored in this build: the firmware
+//  takes the arithmetic-T0 path under NPELICAN_FLOAT_BUILD; bn1_t0_rom is then an
+//  unused array of doubles.)
+typedef double accdot2_t;
+typedef double accdotrow_t;
+typedef double bn1fold_t;
 
 // ---- MAC temporaries ----
 typedef double mac2_t;

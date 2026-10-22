@@ -68,21 +68,30 @@ parser.add_argument('--split-types', action='store_true', default=False,
                     help='Emit w1_t / w2_t array types instead of weight_t (typedefs must exist in nPELICAN.h)')
 parser.add_argument('--out', type=str, default='weights/weights.h')
 parser.add_argument('--bn-frac-bits', type=int, default=None,
-                    help='Cap the fractional width of bn_t_gen (default: derived as '
-                         't2_F + dot_mag + 2). The BN1 scale is a scalar constant '
-                         'multiplying every dot, so its literal width binds every BN1 '
-                         'multiplier at once. Measured on xcu250 @5ns: an 8-bit literal '
-                         'lands in fabric (~49 LUT each), a 10-bit literal takes a DSP48 '
-                         'per multiply AND violates timing; 9 bits is untested. In Bind Op '
-                         'reports the module operand is the literal width PLUS one '
-                         'zero-extension bit (8->mul_6s_9ns, 10->mul_6s_11ns). Check the '
-                         'printed literal width before trusting a resource number.')
+                    help='Optional cap on the fractional width of bn_t_gen (default: the '
+                         'exact-float32 rule, see types_generated.h). NO LONGER A DSP LEVER: '
+                         'after Lever 8 (BN1 T0 ROM + BN1 folded past the aggregation, '
+                         'constants from the unrounded values) bn_t_gen feeds only the BN2 '
+                         'constants (4 multiplies) and the legacy batch1_2to2 array '
+                         '(arithmetic-T0 fallback when dot_t > 10 bits, csim dump). Capping '
+                         'it only costs BN2 exactness. History: before Lever 8 the BN1 scale '
+                         'literal bound 253 multipliers (8-bit literal -> fabric, 10-bit -> '
+                         'DSP48 + timing violation, measured xcu250 @5ns).')
 parser.add_argument('--bn-eps', type=float, default=1e-5,
                     help='BatchNorm eps used in the scale weight/sqrt(var+eps); must match '
                          'the training MaskedBatchNorm eps (default 1e-5).')
 parser.add_argument('--out-types', type=str, default=None,
                     help='Path for generated typedef header (default: dirname(--out)/types_generated.h). '
                          'The firmware build expects both weights.h and types_generated.h under firmware/weights/.')
+parser.add_argument('--nparticles', type=int, default=None,
+                    help='Firmware particle count NPARTICLES (default: the checkpoint\'s nobj, else 20; real constituents; NPARTICLES2 = N + NSPURIONS '
+                         'with the beam spurions). Sizes the raw-sum accumulator headroom '
+                         'H1 = ceil(log2(N+2)) (row sums/trace) and H2 = ceil(log2((N+2)^2)) (full '
+                         'sums) and is emitted as "#define NPELICAN_NPARTICLES N" in '
+                         'types_generated.h, which sets NPARTICLES in firmware/nPELICAN.h. Default 20. '
+                         'The accumulators wrap (no AP_SAT), so exporting for FEWER particles than '
+                         'the build uses overflows silently on busy events -- nPELICAN.h refuses '
+                         'NPARTICLES > NPELICAN_NPARTICLES at compile time.')
 parser.add_argument('--max-input-bits', type=int, default=None,
                     help='Cap input_t total width to N bits (Lever 2): trades dot4 front-end '
                          'precision for DSP. The dots are only dot_t-bit; the un-capped width '
@@ -103,7 +112,7 @@ parser.add_argument('--pmu-extra-int-bits', type=int, default=0,
 parser.add_argument('--pmu-keep-width', action='store_true', default=False,
                     help='With --pmu-extra-int-bits: hold input_t width fixed (coarser LSB).')
 parser.add_argument('--bias-guard-bits', type=int, default=8,
-                    help='Extra fractional bits kept in the bias literals beyond the MAC product '
+                    help='NO-OP since the sticky-bit bias merge (kept for CLI compatibility). Was: extra fractional bits kept in the bias literals beyond the MAC product '
                          'grid, so the float bias is not snapped onto that grid and cannot create '
                          'exact rounding ties at the following quantizer; 0 reproduces the '
                          'pre-2026-10-06 single-grid behaviour.')
@@ -113,15 +122,17 @@ parser.add_argument('--agg-guard-bits', type=int, default=8,
                          'cannot tip a post-aggregation rounding tie after the 1/Nbar rescale. 0 = the '
                          'pre-2026-10-06 rule (default: 8).')
 parser.add_argument('--norm-guard-bits', type=int, default=8,
-                    help='Extra fractional bits for the 1/Nbar, 1/Nbar^2 normalize-late literals (norm_t) beyond '
+                    help='NO-OP since the exact-float32 norm_t merge (kept for CLI compatibility). Was: extra fractional bits for the 1/Nbar, 1/Nbar^2 literals beyond '
                          'the exact-product rule, so their non-po2 rounding error cannot flip a post-aggregation '
                          'rounding tie (default: 8; 0 = pre-2026-10-07 rule).')
 parser.add_argument('--bn-guard-bits', type=int, default=0,
-                    help='Extra fractional bits for the BatchNorm literals (bn_t_gen) beyond the derived '
+                    help='NO-OP since Lever 8 (BN1 never multiplies per element; bn_t_gen is exact float32). Was: extra fractional bits for the BatchNorm literals beyond the derived '
                          't2_F + dot_mag + 2. Default 0 keeps the DSP-tuned literal width; 8 removes the '
                          'last post-agg tie flips on jet-spurion checkpoints at DSP/timing cost. --bn-frac-bits '
                          'still caps the result.')
 args = parser.parse_args()
+if args.nparticles is not None and args.nparticles < 1:
+    parser.error('--nparticles must be >= 1')
 
 if args.out_types is None:
     args.out_types = os.path.join(os.path.dirname(args.out) or '.', 'types_generated.h')
@@ -246,17 +257,53 @@ def _c(arr):
 # ---------------------------------------------------------------------------
 BN_EPS = args.bn_eps   # MaskedBatchNorm default is 1e-5 (src/layers/masked_batchnorm.py)
 
-mean1   = sd['net2to2.message_layers.0.normlayer.running_mean'].item()
-weight1 = sd['net2to2.message_layers.0.normlayer.weight'].item()
-var1    = sd['net2to2.message_layers.0.normlayer.running_var'].item()
-bias1   = sd['net2to2.message_layers.0.normlayer.bias'].item()
-batch1  = np.array((mean1, weight1 / np.sqrt(var1 + BN_EPS), bias1))
+# Tolerant of checkpoints trained WITHOUT BatchNorm or with the offset-only norm:
+#   full BN ('b')          -> running_mean/var + weight/bias present: scale = w/sqrt(var+eps)
+#   offset-only ('a')      -> only normlayer.bias present: mean=0, scale=1, beta=bias
+#   no norm (--batchnorm None) -> no normlayer keys at all: mean=0, scale=1, beta=0
+# Everything downstream (batch1_2to2 / batch2_2to0 arrays, the Lever-8 folded BN1
+# constants, the T0 ROM) then works unchanged: an identity/offset norm is just the
+# affine with s=1 (and beta=0).
+def _bn_consts(prefix, nch, f64):
+    """[nch, 3] array of (mean, scale, beta) for the norm layer under `prefix`.
+    f64 reproduces the historical arithmetic exactly (BN1 was read via .item() ->
+    float64 math; BN2 via .numpy() -> float32 math), so re-exports are unchanged."""
+    def _t(k):
+        t = sd[k].reshape(-1)
+        return t.double().numpy() if f64 else t.numpy()
+    km, kv = prefix + '.running_mean', prefix + '.running_var'
+    kw, kb = prefix + '.weight', prefix + '.bias'
+    if km in sd:
+        mean, var = _t(km), _t(kv)
+        w = _t(kw) if kw in sd else np.ones_like(mean)
+        b = _t(kb) if kb in sd else np.zeros_like(mean)
+        return np.column_stack((mean, w / np.sqrt(var + BN_EPS), b)), 'batchnorm'
+    if kb in sd:
+        b = _t(kb)
+        return np.column_stack((np.zeros_like(b), np.ones_like(b), b)), 'offset-only'
+    return np.column_stack((np.zeros(nch), np.ones(nch), np.zeros(nch))), 'none'
 
-mean2   = sd['msg_2to0.normlayer.running_mean'].numpy()
-weight2 = sd['msg_2to0.normlayer.weight'].numpy()
-var2    = sd['msg_2to0.normlayer.running_var'].numpy()
-bias2   = sd['msg_2to0.normlayer.bias'].numpy()
-batch2  = np.column_stack((mean2, weight2 / np.sqrt(var2 + BN_EPS), bias2))
+
+_bn1_arr, _bn1_kind = _bn_consts('net2to2.message_layers.0.normlayer', 1, True)
+batch1 = _bn1_arr.reshape(-1)          # [mean, scale, beta]
+batch2, _bn2_kind = _bn_consts('msg_2to0.normlayer', NHIDDEN, False)   # [NHIDDEN][mean, scale, beta]
+if _bn1_kind != 'batchnorm' or _bn2_kind != 'batchnorm':
+    print(f'Norm layers: BN1={_bn1_kind}, BN2={_bn2_kind} (missing constants -> mean=0, scale=1, beta=0/offset)')
+
+# Lever 8: BN1 applied ONCE to the raw dot aggregates, with the 1/N̄ normalization
+# pre-folded (double precision, from the unrounded BN constants — NOT the capped
+# bn_t_gen literal):  jmass    = Q_t2(Σ_ij d·m · s/N̄²  + ncount² · β'/N̄²)
+#                     jdotp[j] = Q_t2((Σ_i d_ij·m · s/N̄ + ncount · β'/N̄) · m_jj)
+# with s = γ/σ and β' = β − μ·s (mean folded into the bias).
+_nobj_avg = _arg('nobj_avg', 49)
+_bn1_s = float(batch1[1])
+_bn1_bp = float(batch1[2]) - float(batch1[0]) * _bn1_s
+bn1_fold = {
+    'bn1_s_row': _bn1_s / _nobj_avg,
+    'bn1_b_row': _bn1_bp / _nobj_avg,
+    'bn1_s_all': _bn1_s / _nobj_avg ** 2,
+    'bn1_b_all': _bn1_bp / _nobj_avg ** 2,
+}
 
 # ---------------------------------------------------------------------------
 # Float path — raw state-dict tensors
@@ -625,6 +672,7 @@ def _extract_quant_weights():
 
     _quant_info['act'] = act_info
     _quant_info['weight'] = weight_info
+    _quant_info['model'] = model   # Lever 8: the T0 ROM is generated by running its modules
 
     w1  = np.ravel(qw1.value.detach().numpy())
     w2  = np.ravel(qw2.value.detach().numpy())
@@ -644,6 +692,75 @@ def _extract_quant_weights():
 # 24 bits — bit widths come from the quantizers, so retraining at 16/16/16
 # regenerates correctly with zero manual header edits.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Lever 8: BN1 T0 ROM. T0 = Q_t2(BN1(d)) depends only on the DOT_W-bit code of d,
+# so it is tabulated here by pushing EVERY dot_t code through the rebuilt model's
+# OWN modules (MessageNet holding BN1, then the 2->2 post_agg quantizer) — faithful
+# to PyTorch by construction, including its float32 BN arithmetic and eps.
+# ---------------------------------------------------------------------------
+BN1_ROM_MAX_DOT_W = 10    # above this the firmware falls back to arithmetic T0
+
+
+def _dot_code_values(W, I, signed):
+    """Value of every raw DOT_W-bit code, in raw-code order (two's complement if signed)."""
+    lsb = 2.0 ** (I - W)
+    codes = np.arange(1 << W, dtype=np.int64)
+    if signed:
+        codes = np.where(codes < (1 << (W - 1)), codes, codes - (1 << W))
+    return codes.astype(np.float64) * lsb
+
+
+def _build_bn1_rom(model, dot_W, dot_I, dot_s, t2_W, t2_I, t2_s, t2_scale):
+    vals = _dot_code_values(dot_W, dot_I, dot_s)
+    n = int(math.ceil(math.sqrt(len(vals))))
+    x = torch.zeros(n * n, dtype=torch.float32)
+    x[:len(vals)] = torch.tensor(vals, dtype=torch.float32)
+    if not np.array_equal(x[:len(vals)].double().numpy(), vals):
+        sys.exit('ERROR: BN1 ROM: dot grid values are not exact in float32.')
+    x = x.reshape(1, n, n, 1)
+    mask = torch.ones(1, n, n, 1, dtype=torch.bool)   # all-true: every entry is "active"
+    msg = model.net2to2.message_layers[0]
+    paq = model.net2to2.eq_layers[0].post_agg_quant
+    msg.eval(); paq.eval()
+    with torch.no_grad():
+        y = msg(x, mask)            # exactly how Net2to2.forward calls it
+        q = paq(y)
+    if hasattr(q, 'value'):
+        q = q.value
+    rom = q.reshape(-1)[:len(vals)].double().numpy()
+    # Every entry must sit on the t2 grid and inside the t2 range, else the
+    # emitted t2_t literal would re-round / saturate and the ROM would lie.
+    k = rom / t2_scale
+    if not np.all(np.abs(k - np.round(k)) < 1e-9):
+        bad = np.nonzero(np.abs(k - np.round(k)) >= 1e-9)[0][:5]
+        sys.exit(f'ERROR: BN1 ROM entries off the t2 grid (codes {bad.tolist()}, '
+                 f'values {rom[bad].tolist()}, scale {t2_scale}).')
+    k = np.round(k).astype(np.int64)
+    kmin, kmax = (-(1 << (t2_W - 1)), (1 << (t2_W - 1)) - 1) if t2_s else (0, (1 << t2_W) - 1)
+    if k.min() < kmin or k.max() > kmax:
+        sys.exit(f'ERROR: BN1 ROM entries outside the t2 range [{kmin},{kmax}] LSB '
+                 f'(got [{k.min()},{k.max()}]).')
+    return rom
+
+
+FLOAT_CONST_F_CAP = 36   # cap for the exact-float32 constant rule below
+
+
+def _f32_exact_frac(values, cap=FLOAT_CONST_F_CAP):
+    """Fractional bits that represent every nonzero constant EXACTLY as a float32:
+    a float32 c = m * 2^(e-23) with a 24-bit mantissa, e = floor(log2|c|), so its LSB
+    is 2^(e-23) and F = 23 - e holds it exactly. Max over the array's nonzero entries,
+    capped at `cap` (tiny entries below 2^(23-cap) then round, harmlessly). The values
+    are first rounded to float32 (checkpoint tensors already are; derived doubles such
+    as the BN scale w/sqrt(var+eps) or 1/N̄ get the float32 precision PyTorch would use)."""
+    v = np.abs(np.asarray(values, dtype=np.float64).reshape(-1).astype(np.float32))
+    v = v[v > 0]
+    if v.size == 0:
+        return 1
+    e = np.floor(np.log2(v.astype(np.float64))).astype(int)
+    return int(min(cap, max(1, int((23 - e).max()))))
+
+
 def _momentum_absmax(repo, default=2048.0):
     """|p|max over the sample 4-momenta, used to size input_t's INTEGER width.
     This is a physics quantity (the momentum dynamic range) and is independent of
@@ -681,6 +798,48 @@ def _momentum_absmax(repo, default=2048.0):
     print(f'  (input_t: 4-momenta unavailable [{"; ".join(errs)}]); '
           f'using |p|max default {default}')
     return float(default)
+
+
+def _f32_sum(a, b):
+    """float32(a + b) elementwise — the diagonal bias PyTorch sees (Eq2to2.forward adds
+    self.bias and diag_bias to the float32 output; the loader uses their float32 sum)."""
+    return (np.asarray(a, dtype=np.float32) + np.asarray(b, dtype=np.float32)).astype(np.float32)
+
+
+def _sticky_encode(values, Fh, I):
+    """Sticky-bit encoding of float32 biases onto a (Fh+1)-fractional-bit grid.
+
+    Claim: for any v0 on G = 2^-Fh (Fh >= MAC F, so the MAC sum is on G) and any target
+    grid 2^-qF with Fh >= qF+1 (so every rounding-tie point lies on G),
+    RND_CONV_q(v0 + b) == RND_CONV_q(v0 + enc(b)), enc(b) = b_hi + sticky*2^-(Fh+1),
+    b_hi = floor(b*2^Fh)/2^Fh, sticky = (b != b_hi).
+    Proof: v = v0 + b_hi is on G; t = v + b_lo with 0 <= b_lo < 2^-Fh. If v is not a tie,
+    the nearest tie is >= one G step away, so t and v' = v + sticky*2^-(Fh+1) (both in
+    [v, v+2^-Fh)) share v's rounding interval. If v is a tie: b_lo > 0 puts both t and v'
+    strictly above it (both round up); b_lo = 0 gives v' == t. Saturation is monotone.
+
+    Values are exact (Fraction) from the float32 checkpoint numbers; returns Python floats
+    (dyadic, <= Fh+1 fractional bits, hence exact doubles and exact ap_fixed literals)."""
+    from fractions import Fraction
+    out = []
+    for x in np.ravel(np.asarray(values, dtype=np.float32)):
+        b = Fraction(float(np.float32(x)))
+        hi = Fraction(math.floor(b * (1 << Fh)), 1 << Fh)
+        enc = hi + (Fraction(1, 1 << (Fh + 1)) if b != hi else 0)
+        # range check: ap_fixed<W,I> spans [-2^(I-1), 2^(I-1) - lsb]
+        assert -Fraction(2) ** (I - 1) <= enc <= Fraction(2) ** (I - 1) - Fraction(1, 1 << (Fh + 1)), \
+            f'sticky bias {float(enc)} outside bias_t_gen range (I={I})'
+        f = float(enc)
+        assert Fraction(f) == enc
+        # literal round trip: the %.17g text parsed back must be the encoded value exactly
+        assert Fraction(float(f'{f:.17g}')) == enc, f'literal {f:.17g} not exact'
+        out.append(f)
+    return np.array(out, dtype=np.float64).reshape(np.shape(values))
+
+
+def _c_exact(arr):
+    """C initializer with 17 significant digits (exact for dyadic doubles)."""
+    return '{' + ', '.join(f'{float(v):.17g}' for v in np.ravel(np.asarray(arr))) + '}'
 
 
 def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
@@ -906,42 +1065,24 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
             INPUT_F = capped_F
             INPUT_W = args.max_input_bits
 
-    bias_max = float(max(abs(np.asarray(b1)).max(), abs(np.asarray(b1d)).max(), abs(np.asarray(b2)).max()))
-    # b1,b1_diag are added in the 2->2 MAC then quantized to the relu grid; b2 in the 2->0
-    # MAC then quantized to the out grid. Size F to the FINER of those two learned grids so
-    # the bias-rounding error (2^-(BIAS_F+1)) stays <= 1/4 LSB of whichever grid it feeds;
-    # +1 = guard bit. Derived from the learned scales so it tracks the QAT bit-width flags
-    # (was a hardcoded 24, sized for the old 24-bit grids).
-    BIAS_F = max(relu_F, out_F) + 1          # legacy single-grid rule (kept for the log only)
+    # Bias magnitudes (incl. the diagonal total b1+b1_diag the firmware adds as ONE constant,
+    # and the head bias when the checkpoint has a head). BIAS_F itself is derived below, after
+    # the MAC grids are known (sticky-bit rule).
+    _b1d_tot = _f32_sum(b1, b1d)
+    _bias_vals = [np.asarray(b1), np.asarray(b1d), np.asarray(b2), np.asarray(_b1d_tot)]
+    if HEAD > 0:
+        _bias_vals.append(np.asarray(_quant_info['head']['b']))
+    bias_max = float(max(float(np.abs(v).max()) for v in _bias_vals))
     BIAS_I = _int_bits(bias_max)
-    BIAS_W = BIAS_I + BIAS_F
-    # Per-stage bias types (2026-10-06): a bias is added to a MAC sum whose grid is the exact
-    # product grid (w_F + t_F). The old max(relu_F,out_F)+1 rule left up to 1/4 LSB of bias
-    # error (6-bit 5-class ckpt: b2=-0.0053 -> 0, 146/200 golden mismatches, all in Rp).
-    # Snapping the bias onto the product grid itself is still not enough: the products are
-    # exact on that grid, so a grid-rounded bias can land the pre-quantizer sum EXACTLY on a
-    # half-LSB tie of the next quantizer (ev 34: Rp=0.21875=3.5 LSB -> RNE 0.25, while torch's
-    # float 0.218444 -> 0.1875). G = --bias-guard-bits extra fractional bits keep the bias off
-    # that grid (error <= 2^-(w_F+t_F+G+1)), so ties are as unlikely as in float32.
-    BIAS_G = args.bias_guard_bits
-    BIAS1_F = (w1_W - w1_I) + (t2_W - t2_I) + BIAS_G
-    BIAS2_F = (w2_W - w2_I) + (t0_W - t0_I) + BIAS_G
-    BIAS1_I = _int_bits(float(max(abs(np.asarray(b1)).max(), abs(np.asarray(b1d)).max())))
-    BIAS2_I = _int_bits(float(abs(np.asarray(b2)).max()))
-    BIAS1_W, BIAS2_W = BIAS1_I + BIAS1_F, BIAS2_I + BIAS2_F
 
     bn_max = float(np.abs(np.asarray(batch1)).max())
     bn_max = max(bn_max, float(np.abs(np.asarray(batch2)).max()))
-    # The BN scale multiplies (dots - mean); size its fractional part so the scale-rounding
-    # error stays under half the t2 LSB even for dots spanning the full dot_t range
-    # (data-independent / robust to the learned mean). +2 is margin.
+    # Exact-float32 rule over all BN constants (mean, scale, beta of BN1 and BN2).
+    # (Was t2_F + dot_mag + 2; the BN2 collapse tipped R on near-tie events at the old width.)
     BN_I = _int_bits(bn_max)
-    # BN guard bits (2026-10-07, default 0 = unchanged resource behaviour): the BN1 scale literal is
-    # DSP-bound and deliberately short (see --bn-frac-bits); its relative error (6.6e-5 at 13 bits)
-    # times a large dot sum can flip a post-agg rounding tie (measured: a jdotp 1.7e-5 LSB from the
-    # tie on a 6-bit 5-class jet checkpoint -> 199/200). G extra bits buy exactness at DSP cost.
-    BN_F = t2_F + dotall_mag + 2 + int(args.bn_guard_bits)      # dotall_mag == dot_mag without --jet-quant-split
-    # --- BN1 DSP threshold cap (--bn-frac-bits) ---
+    BN_F = _f32_exact_frac(np.concatenate([np.ravel(batch1), np.ravel(batch2)]))
+    # --- optional cap (--bn-frac-bits): no longer a DSP lever after Lever 8 ---
+    # History (pre-Lever-8, when the BN1 scale multiplied every dot):
     # The BN1 scale gamma/sigma is a SCALAR constant multiplying every dot, so its snapped
     # literal width decides the binding of NPARTICLES2*(NPARTICLES2+1)/2 multipliers at once.
     # Measured on xcu250 @5ns (2026-08-25): a 10-bit literal (653, 5 CSD terms) binds a
@@ -966,24 +1107,40 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     _bn1_err = abs(_bn1_lit / (2 ** BN_F) - _bn1_scale)
     print(f'  BN1 scale gamma/sigma = {_bn1_scale:.12g} -> literal {_bn1_lit} at F={BN_F} '
           f'({_bn1_bits} bits, snap err {_bn1_err:.3g})')
-    _verdict = ('fabric (8-bit measured in fabric)' if _bn1_bits <= 8 else
-                'UNTESTED (9 bits: fabric measured at 8, DSP48 at 10)' if _bn1_bits == 9 else
-                'DSP48 + timing risk (10-bit measured on DSP) -- see --bn-frac-bits')
-    print(f'   BN1 multiplier binding: {_verdict}')
+    if dotall_W <= BN1_ROM_MAX_DOT_W:
+        print('   bn_t_gen now feeds only the BN2 constants (4 multiplies) + the legacy '
+              'batch1_2to2 array (Lever 8 T0 ROM: no per-element BN1 multiplies) -- '
+              '--bn-frac-bits is not a DSP lever any more')
+    else:
+        _verdict = ('fabric (8-bit measured in fabric)' if _bn1_bits <= 8 else
+                    'UNTESTED (9 bits: fabric measured at 8, DSP48 at 10)' if _bn1_bits == 9 else
+                    'DSP48 + timing risk (10-bit measured on DSP) -- see --bn-frac-bits')
+        print(f'   arithmetic-T0 fallback (dotall_t W={dotall_W} > {BN1_ROM_MAX_DOT_W}): per-element BN1 '
+              f'multiplies bind as: {_verdict}')
 
     # --- accumulator headroom from NPARTICLES2 (NPARTICLES + 2 spurions).
-    # NPARTICLES2 is a firmware constant the loader already mirrors (NPELICAN.h:
-    # NPARTICLES2 = NPARTICLES + 2 = 22); accumulators are NOT covered by any
-    # learned scale, so they get explicit integer headroom over the summand type.
-    # (legacy rule: sized for NPARTICLES=20 regardless of the checkpoint's nobj; the jet
-    # spurion adds one row/col -> 20 + NSPURIONS.)
-    # Accumulator headroom follows the CHECKPOINT's particle count (fallback 20): sums run over
-    # NPARTICLES2^2 (full) / NPARTICLES2 (row) terms, and the acc types have no AP_SAT, so an
-    # under-sized accumulator (e.g. a 20-slot rule applied to an N=32 export) would wrap silently.
-    NPARTICLES = int(_arg('nobj')) if _arg('nobj', None) is not None else 20
+    # NPARTICLES: the checkpoint's nobj (fallback 20) unless --nparticles overrides it (resource
+    # builds at other particle counts); NPARTICLES2 = NPARTICLES + NSPURIONS (2 beams [+ jet]).
+    # Emitted into types_generated.h as a guarded "#define NPARTICLES N" plus NPELICAN_NPARTICLES
+    # (the count the accumulator headroom was sized for); nPELICAN.h refuses a -DNPARTICLES above
+    # it. Accumulators are NOT covered by any learned scale and do not saturate, so they get
+    # explicit integer headroom over the summand type: H2 = 9 (324/484 pairs), H1 = 5 at 16/20p.
+    _ckpt_nobj = _arg('nobj', None)
+    if args.nparticles is not None:
+        NPARTICLES = int(args.nparticles)
+    else:
+        NPARTICLES = int(_ckpt_nobj) if _ckpt_nobj is not None else 20
     NPARTICLES2 = NPARTICLES + NSPURIONS
-    H2 = math.ceil(math.log2(NPARTICLES2 ** 2))   # full-sum headroom = 9
-    H1 = math.ceil(math.log2(NPARTICLES2))        # row-sum headroom  = 5
+    H2 = math.ceil(math.log2(NPARTICLES2 ** 2))   # full-sum headroom (9 at 16p/20p)
+    H1 = math.ceil(math.log2(NPARTICLES2))        # row-sum headroom  (5 at 16p/20p)
+    _quant_info['nparticles'] = NPARTICLES
+    print(f'  particle count: NPARTICLES={NPARTICLES} (NPARTICLES2={NPARTICLES2}, '
+          f'{NPARTICLES2 ** 2} pairs) -> accumulator headroom H1={H1} (row/trace), '
+          f'H2={H2} (full sum)')
+    if _ckpt_nobj is not None and int(_ckpt_nobj) != NPARTICLES:
+        print(f'   note: checkpoint was trained with nobj={_ckpt_nobj}; firmware built for '
+              f'{NPARTICLES} particles (the model is size-agnostic; the golden vectors are '
+              f'{_ckpt_nobj}-particle)')
 
     # --- Aggregation summands (batch1 for 2->2, Tr for 2->0) are the UNQUANTIZED BatchNorm
     # outputs that PyTorch sums in float; only the NORMALIZED result hits a learned quantizer.
@@ -1035,37 +1192,65 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     # I = I(weight)+I(operand)+ceil(log2(#terms)) gives integer headroom for the sum.
     w1_F, t2_F = w1_W - w1_I, t2_W - t2_I
     w2_F, t0_F = w2_W - w2_I, t0_W - t0_I
-    mac2_terms = 6 + 1 + 1            # 6 products w1*t2 + bias + diag_bias = 8 summands
-    mac0_terms = 2 * NHIDDEN + 1      # 2*NHIDDEN products w2*t0 + bias
+    # The accumulators are INITIALISED with the sticky-bit-encoded bias (below), so their
+    # fractional width is max(product_F, BIAS_F): the products are exact on the w*operand
+    # grid and the bias carries one sticky bit below it (BIAS_F = Fh+1 > product_F), so the
+    # running sum is exact and the final relu_t / result_t cast sees exactly
+    # v' = sum + b_hi + sticky*2^-BIAS_F -- no separate post-MAC bias add.
+    mac2_terms = 6                    # 6 products w1*t2
+    mac0_terms = 2 * NHIDDEN          # 2*NHIDDEN products w2*t0
     mac2_I = w1_I + t2_I + math.ceil(math.log2(mac2_terms))
-    mac2_W = mac2_I + (w1_F + t2_F)
     mac0_I = w2_I + t0_I + math.ceil(math.log2(mac0_terms))
-    # mac0_t also receives b2 (F = w2_F+t0_F+G): widen F to BIAS2_F so that add is exact.
-    mac0_W = mac0_I + BIAS2_F
-    # mac2_t is NOT widened (NPARTICLES2^2*NHIDDEN accumulators x 8 terms); the bias is added
-    # once per element in mac2b_t (same I, F = BIAS1_F) just before the relu quantizer.
-    mac2b_I = mac2_I
-    mac2b_W = mac2b_I + BIAS1_F
 
+    # --- bias_t_gen: STICKY-BIT encoding (Lever 8 follow-up) ---
+    # Q(Tp + b) onto the relu grid (and Q(Rp + b2) onto the out grid, or onto the head's relu0
+    # grid, and Q(Hp + b_head) onto the out grid with a head) depends on b only through b
+    # truncated to a grid G = 2^-Fh that is at least as fine as every MAC grid and every
+    # rounding-tie grid, plus ONE sticky bit (any nonzero remainder). See _sticky_encode for
+    # the proof. Every emitted bias is b_hi + sticky*2^-(Fh+1), so the per-element adds are
+    # ~Fh+1+I bits wide instead of the exact-float32 F (35 here).
+    mac2_F = w1_F + t2_F
+    mac0_F = w2_F + t0_F
+    _mac_grids = [mac2_F, mac0_F]
+    _tie_grids = [relu_F + 1, out_F + 1]
     # --- Nonlinear head (--head-hidden K): agg_2to0.act_layer quantizer -> relu0_t, head
-    # weight quantizer -> wh_gen_t; float head bias with guard bits on the head product grid
-    # (biash_t_gen, same G as bias2_t_gen); head MAC mach_t with exact products + exact
-    # bias add (like mac0_t): I = wh_I + relu0_I + ceil(log2(K+1)), F = BIASH_F.
+    # weight quantizer -> wh_gen_t; the head bias is sticky-encoded on the SAME grid (it is
+    # the mach_t accumulator init); head MAC mach_t: I = wh_I + relu0_I + ceil(log2(K+1)).
     head = None
     if HEAD > 0:
         _ra = act['agg_2to0.act_layer']
         r0_W, r0_I, r0_s, r0_k = _pt(_ra['scale'], _ra['signed'], _ra['bits'], 'agg_2to0.act_layer (head ReLU)')
         _wh = wgt['head']
         wh_W, wh_I, wh_s, wh_k = _pt(_wh['scale'], _wh['signed'], _wh['bits'], 'head weights')
-        b_head = _quant_info['head']['b']
-        BIASH_F = (wh_W - wh_I) + (r0_W - r0_I) + BIAS_G
-        BIASH_I = _int_bits(float(np.abs(np.asarray(b_head)).max()))
-        BIASH_W = BIASH_I + BIASH_F
+        r0_F, wh_F = r0_W - r0_I, wh_W - wh_I
+        mach_F = wh_F + r0_F
         mach_terms = HEAD + 1             # K products wh*relu0 + bias
         mach_I = wh_I + r0_I + math.ceil(math.log2(mach_terms))
-        mach_W = mach_I + BIASH_F
+        _mac_grids.append(mach_F)         # b_head is the mach_t init
+        _tie_grids.append(r0_F + 1)       # Rp (b2 init) rounds onto relu0_t, not out_t
+    BIAS_FH = max(_mac_grids + _tie_grids)
+    assert all(BIAS_FH >= g for g in _mac_grids), 'sticky grid must hold the MAC grids'
+    assert all(BIAS_FH >= g for g in _tie_grids), 'sticky grid must hold every tie point'
+    BIAS_F = BIAS_FH + 1
+    BIAS_W = BIAS_I + BIAS_F
+    # MAC accumulators carry the sticky bit (bias lives in the accumulator init).
+    mac2_acc_F = max(mac2_F, BIAS_F)
+    mac0_acc_F = max(mac0_F, BIAS_F)
+    mac2_W = mac2_I + mac2_acc_F
+    mac0_W = mac0_I + mac0_acc_F
+    # Headroom: |sum of products| <= #terms * 2^(I_w+I_x-2) <= 2^(mac_I-2), so an init
+    # bias with |b| <= 2^(BIAS_I-1) keeps the (wrapping) accumulator in range iff
+    # BIAS_I <= mac_I - 1.
+    assert BIAS_I <= mac2_I - 1 and BIAS_I <= mac0_I - 1, \
+        f'bias init could overflow the MAC accumulator (BIAS_I={BIAS_I}, mac2_I={mac2_I}, mac0_I={mac0_I})'
+    if HEAD > 0:
+        mach_acc_F = max(mach_F, BIAS_F)
+        mach_W = mach_I + mach_acc_F
+        assert BIAS_I <= mach_I - 1, f'head bias init could overflow mach_t (BIAS_I={BIAS_I}, mach_I={mach_I})'
         head = dict(r0=(r0_W, r0_I, r0_s, r0_k, _ra['scale']), wh=(wh_W, wh_I, wh_s, wh_k, _wh['scale']),
-                    biash=(BIASH_W, BIASH_I, BIASH_F), mach=(mach_W, mach_I, mach_terms))
+                    mach=(mach_W, mach_I, mach_terms, mach_F, mach_acc_F))
+    _quant_info['bias_Fh'] = BIAS_FH
+    _quant_info['bias_I'] = BIAS_I
 
     def _fixed(W, I, signed, rnd='AP_RND_CONV', sat='AP_SAT'):
         base = 'ap_fixed' if signed else 'ap_ufixed'
@@ -1077,11 +1262,11 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     L.append('')
     L.append('// Model dimensions read from the checkpoint. nPELICAN.h guards its hand')
     L.append('// defaults with #ifndef, so these take precedence (NPARTICLES2 = NPARTICLES + NSPURIONS).')
-    _nobj = _arg('nobj', None)
-    if _nobj is not None:
-        L.append(f'#define NPARTICLES {int(_nobj)}')
-    else:
-        L.append('// checkpoint args.nobj was None: NPARTICLES keeps the nPELICAN.h hand default')
+    L.append('#ifndef NPARTICLES')
+    L.append(f'#define NPARTICLES {NPARTICLES}  // checkpoint nobj'
+             + (' (overridden by --nparticles)' if args.nparticles is not None else '')
+             + '; -DNPARTICLES on the compiler line wins')
+    L.append('#endif')
     L.append(f'#define NHIDDEN {NHIDDEN}')
     L.append(f'#define NOUT {NOUT}')
     L.append(f'#define NSPURIONS {NSPURIONS}  // 2 beams' + (' + full-jet spurion (args.add_jet)' if NSPURIONS == 3 else ''))
@@ -1101,6 +1286,7 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     L.append('#include "ap_int.h"')
     L.append('')
     L.append('#define NPELICAN_GENERATED_TYPES 1')
+    L.append(f'#define NPELICAN_NPARTICLES {NPARTICLES}  // model_loader.py --nparticles; sizes H1={H1}/H2={H2} below')
     L.append('')
     L.append('// ---- Quantization-point types: ap_fixed<B, B-k, AP_RND_CONV, AP_SAT> ----')
 
@@ -1166,6 +1352,17 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
     else:
         L.append(f'typedef ap_fixed<{INPUT_W}, {INPUT_I}, AP_RND_CONV, AP_SAT> input_t;'
                  f'  // raw momenta; |p|max={pmax:.1f} (I={INPUT_I}), F={INPUT_F} (dot_F={dot_F})')
+    if bfp is None:
+        # Lever 9 (-DNPELICAN_WINOGRAD_DOT): exact per-particle Winograd correction.
+        # xi = E*px + py*pz (eta = -E*px + py*pz) is a sum of two input_t products:
+        # <2W,2I> each, +1 bit for the sum -> <2W+1,2I+1> holds it EXACTLY (F = 2*INPUT_F,
+        # the product grid). Not emitted under block-FP (Lever 9 is a compile error there).
+        L.append('// ---- Lever 9 (-DNPELICAN_WINOGRAD_DOT): Winograd per-particle correction')
+        L.append('//      xi = E*px + py*pz, eta = -E*px + py*pz: sum of two input_t products,')
+        L.append('//      exact in ap_fixed<2W+1, 2I+1> of input_t<W,I>. Unused by the default dot4.')
+        L.append('#define NPELICAN_DOTXI_T_GENERATED 1')
+        L.append(f'typedef ap_fixed<{2*INPUT_W + 1}, {2*INPUT_I + 1}> dotxi_t;'
+                 f'  // exact xi/eta (input_t <{INPUT_W},{INPUT_I}>)')
     L.append('')
     L.append('// ---- Jet-spurion quantizer split (--jet-quant-split). Without it these alias the')
     L.append('//      single-grid types, so the firmware can always name them (byte-identical).')
@@ -1239,75 +1436,113 @@ def _emit_types_header(path, act_info, weight_info, b1, b1d, b2):
                  f' saturates')
         L.append('')
     L.append('// ---- Float-trained biases / BatchNorm constants / normalization constants ----')
-    L.append('// These are NOT PyTorch quantization points (PyTorch keeps them in float), so')
-    L.append('// per CLAUDE.md/plan they are WIDENED, not snapped: their fixed-point rounding')
-    L.append('// error must stay below half the LSB of the next real quantizer they feed.')
-    # bias_t_gen: biases feed the dense MAC then the relu/out quantizers (2^-22 / 2^-23);
-    # F=24 keeps |err|<=2^-25, and the integer width is derived from |bias|max (above).
-    L.append(f'typedef ap_fixed<{BIAS1_W}, {BIAS1_I}, AP_RND_CONV, AP_SAT> bias1_t_gen;'
-             f'  // b1,b1_diag (float): F = mac2 grid w1_F+t2_F + G = {BIAS1_F} (G={BIAS_G} guard bits); |b|max I={BIAS1_I}')
-    L.append(f'typedef ap_fixed<{BIAS2_W}, {BIAS2_I}, AP_RND_CONV, AP_SAT> bias2_t_gen;'
-             f'  // b2 (float): F = mac0 grid w2_F+t0_F + G = {BIAS2_F} (G={BIAS_G} guard bits); |b|max I={BIAS2_I}')
-    L.append('typedef bias1_t_gen bias_t_gen;  // legacy alias (single bias type, pre-2026-10-06)')
-    if head is not None:
-        _bw, _bi, _bf = head['biash']
-        L.append(f'typedef ap_fixed<{_bw}, {_bi}, AP_RND_CONV, AP_SAT> biash_t_gen;'
-                 f'  // b_head (float): F = head grid wh_F+relu0_F + G = {_bf} (G={BIAS_G} guard bits); |b|max I={_bi}')
-    # bn_t_gen: BN mean/scale/beta. The scale gamma/sigma multiplies (dots-mean), so F is sized
-    # to keep scale-rounding under half the t2 LSB across the full dot_t range; I is derived
-    # from |c|max (the running_mean grows with jet energy and is the usual driver).
+    L.append('// These are NOT PyTorch quantization points: PyTorch applies them in float32.')
+    L.append('// bias_t_gen (b1, b1_diag, b1_diag_total, b2): STICKY-BIT rule. Every bias is')
+    L.append('// the INIT value of an exact MAC accumulator (mac2_t / mac0_t, which carry the sticky')
+    L.append('// bit: F = BIAS_F), followed by ONE AP_RND_CONV cast (relu_t / result_t).')
+    L.append(f'// Let G = 2^-Fh, Fh = max(mac2_F, mac0_F, relu_F+1, out_F+1) = max({mac2_F}, {mac0_F}, {relu_F + 1}, {out_F + 1}) = {BIAS_FH},')
+    L.append('// so the MAC sum is on G and every rounding tie of the target grid is on G. With')
+    L.append('// b = b_hi + b_lo, b_hi = floor_G(b), 0 <= b_lo < 2^-Fh, the emitted literal is')
+    L.append('// b_hi + sticky*2^-(Fh+1), sticky = (b_lo != 0). v = mac + b_hi is on G; the true')
+    L.append('// t = v + b_lo and v\' = v + sticky*2^-(Fh+1) are both in [v, v + 2^-Fh), with no tie')
+    L.append('// strictly inside, and both lie strictly above v iff b_lo > 0 (equal to v otherwise),')
+    L.append('// so RND_CONV(v\') == RND_CONV(t) always (saturation is monotone). BIAS_F = Fh+1.')
+    L.append('// The diagonal uses b1_diag_total = sticky(float32(b1 + b1_diag)): two sticky terms')
+    L.append('// must never be added (their low parts can exceed one G step).')
+    L.append('// bn_t_gen / norm_t: EXACT float32 literals,')
+    L.append(f'//   F = max over nonzero entries of (23 - floor(log2|c|)), capped at {FLOAT_CONST_F_CAP};')
+    L.append('//   I derived from the magnitude.')
+    L.append('// With exact float32 constants, the firmware\'s exact fixed-point arithmetic')
+    L.append('// (products/sums exact in HLS promoted types, one AP_RND_CONV rounding at the')
+    L.append('// quantizer) is at least as accurate as PyTorch\'s float32 evaluation, so a')
+    L.append('// residual mismatch can only come from PyTorch\'s own float32 rounding landing')
+    L.append('// within ~1e-7 (relative) of a quantizer grid boundary.')
+    L.append(f'typedef ap_fixed<{BIAS_W}, {BIAS_I}, AP_RND_CONV, AP_SAT> bias_t_gen;'
+             f'  // b1,b1_diag,b1_diag_total,b2 (sticky-bit, Fh={BIAS_FH}); |bias|max={bias_max:.6g} (I={BIAS_I}), F={BIAS_F}')
     L.append(f'typedef ap_fixed<{BN_W}, {BN_I}, AP_RND_CONV, AP_SAT> bn_t_gen;'
-             f'  // BN mean/scale/beta (float); |c|max={bn_max:.6g} (I={BN_I}), F={BN_F}')
-    # norm_t: invnave=1/N̄, invnave2=1/N̄^2 (not po2). A 12-frac internal_t mis-rounds invnave2
-    # by ~40%. They multiply the raw aggregation sums (mag ~ 2^acc_I) and the normalized result
-    # lands on the post-agg grids: the 2->2 accumulator (acc2_I) renormalizes onto the t2 grid,
-    # the 2->0 full sum (agg0_I = tr_I+H2) onto the t0 grid. For each path the norm-rounding error
-    # 2^-(NORM_F+1) scaled by the accumulator must stay <= 1/4 LSB of that path's grid:
-    #   2^acc_I * 2^-(NORM_F+1) <= 2^-(postF+2)  =>  NORM_F >= acc_I + postF + 1.
-    # One shared norm_t covers both, so take the max over the two paths (full-sum accumulators
-    # dominate their row-sum counterparts, H2>H1). Derived from the learned scales + accumulator
-    # widths so it tracks the QAT bit-width flags (was a hardcoded <40,1> sized for the old
-    # grids, which was in fact 2 bits short at t0_F=23). NORM_I=1: 1/N̄,1/N̄^2 are in [0,1).
+             f'  // BN mean/scale/beta (exact float32{", capped by --bn-frac-bits" if args.bn_frac_bits is not None else ""}); |c|max={bn_max:.6g} (I={BN_I}), F={BN_F}')
+    # norm_t: invnave=1/N̄, invnave2=1/N̄^2 (not po2), exact-float32 rule like the others.
+    # NORM_I=1: both are in [0,1). (Was max(acc2_I+t2_F, agg0_I+t0_F)+1 = 21 at 6-bit.)
     NORM_I = 1
-    # Normalization guard bits (2026-10-07): 1/Nbar and 1/Nbar^2 are NOT powers of two, so the
-    # norm_t literal carries a relative error ~2^-(NORM_F) / value. That error moves every
-    # rescaled sum by up to |R|*err and flips any post-agg rounding tie closer than that
-    # (measured on a 6-bit 5-class ckpt: F=26 -> invnave2 rel err 1.4e-5 moved -9.500062 LSB to
-    # -9.499933 -> 1-LSB logit mismatch). G extra bits cost two constant multipliers per channel.
-    NORM_F = max(acc2_I + t2_F, agg0_I + t0_F) + 1 + int(args.norm_guard_bits)
+    NORM_F = _f32_exact_frac([1.0 / _nobj_avg, 1.0 / _nobj_avg ** 2])
     NORM_W = NORM_I + NORM_F
     L.append(f'typedef ap_fixed<{NORM_W}, {NORM_I}, AP_RND_CONV, AP_SAT> norm_t;'
-             f'  // 1/N̄, 1/N̄^2 normalize-late multipliers (F={NORM_W-NORM_I})')
+             f'  // 1/N̄, 1/N̄^2 normalize-late multipliers (exact float32), F={NORM_F}')
     L.append('')
     L.append('// ---- Aggregation summands (unquantized BatchNorm outputs) + their accumulators.')
+    L.append('//      bn1out_t / acc2_t / accrow_t: LEGACY, unused by the datapath after Lever 8')
+    L.append('//      (BN1 now applies to the raw dot sums); kept for the float-build aliases.')
     L.append(f'//      AGG_F = {AGG_F} fractional bits (> the finest post-agg grid t0_F={t0_W-t0_I}) so the')
     L.append('//      raw-sum-then-renormalize lands bit-exactly on the post-agg quantizer grid;')
     L.append('//      storing these on the coarse post-agg grid (e.g. t2_F) would tip the rounding.')
     L.append('//      Each is range-typed by its OWN BN output bound; SAT guards it. Accumulators')
     L.append(f'//      add ceil(log2(#terms)) integer headroom (H2={H2} full sum, H1={H1} row/trace).')
     L.append(f'typedef ap_fixed<{bn1_W}, {bn1_I}, AP_RND_CONV, AP_SAT> bn1out_t;'
-             f'  // batch1 = BN1(dots); |batch1|<={bn1_bound:.1f} (I={bn1_I}), F={AGG_F}')
-    L.append(f'typedef ap_fixed<{acc2_W}, {acc2_I}> acc2_t;     // jmass raw sum of bn1out_t (I(bn1out)+H2)')
-    L.append(f'typedef ap_fixed<{accrow_W}, {accrow_I}> accrow_t;   // jdotp row sums of bn1out_t (I(bn1out)+H1)')
+             f'  // LEGACY (pre-Lever-8) batch1 = BN1(dots); |batch1|<={bn1_bound:.1f} (I={bn1_I}), F={AGG_F}')
+    L.append(f'typedef ap_fixed<{acc2_W}, {acc2_I}> acc2_t;     // LEGACY jmass raw sum of bn1out_t (I(bn1out)+H2)')
+    L.append(f'typedef ap_fixed<{accrow_W}, {accrow_I}> accrow_t;   // LEGACY jdotp row sums of bn1out_t (I(bn1out)+H1)')
     L.append(f'typedef ap_fixed<{tr_W}, {tr_I}, AP_RND_CONV, AP_SAT> tr_t;'
              f'  // Tr = BN2(relu); |Tr|<={tr_bound:.1f} (I={tr_I}); dump-only after #2 (BN2 folded past the 2->0 aggregation)')
     relu_sg = 'ap_fixed' if relu_s else 'ap_ufixed'
     L.append(f'typedef {relu_sg}<{accrelu_W}, {accrelu_I}> accrelu_t;     // R full sum of relu_t Tp_q (I(relu)+H2)')
     L.append(f'typedef {relu_sg}<{accrelurow_W}, {accrelurow_I}> accrelurow_t;  // R trace, sum of relu_t Tp_q (I(relu)+H1)')
     L.append('')
-    L.append('// ---- MAC temporaries: I = I(weight)+I(operand)+ceil(log2(#terms)), W = I+B ----')
-    L.append(f'typedef ap_fixed<{mac2_W}, {mac2_I}> mac2_t;     // 2->2 dense: 6 w1*t2 products + b1 + b1_diag = {mac2_terms} terms')
-    L.append('// bias add for the 2->2 dense output: products accumulate in mac2_t (exact product grid);')
-    L.append('// the float-typed bias is added ONCE here at full bias precision, then the relu quantizer rounds')
-    L.append('#define NPELICAN_MAC2B_T_GENERATED 1')
-    L.append(f'typedef ap_fixed<{mac2b_W}, {mac2b_I}> mac2b_t;    // I = I(mac2_t), F = BIAS1_F = {BIAS1_F}')
-    L.append(f'typedef ap_fixed<{mac0_W}, {mac0_I}> mac0_t;     // 2->0 dense: 2*NHIDDEN w2*t0 products + b2 = {mac0_terms} terms; F = BIAS2_F = {BIAS2_F} (exact bias add)')
+    # --- Lever 8: BN1 past the aggregation + T0 ROM ---------------------------------
+    # Raw dot accumulators: sums of masked dot_t values are EXACT integers on the dot
+    # grid, so they only need H2/H1 extra integer bits (no rounding/sat modes needed).
+    dsg = 'ap_fixed' if dot_s else 'ap_ufixed'
+    accdot2_W, accdot2_I = dotall_W + H2, dotall_I + H2   # dotall_t == dot_t without the jet split
+    accdotrow_W, accdotrow_I = dotall_W + H1, dotall_I + H1
+    # Folded BN1 constants (s/N̄, β'/N̄, s/N̄², β'/N̄²). Each multiplies a raw sum of
+    # magnitude < 2^(dot_mag+H2) (full sum; row sums are smaller), and the product then
+    # rounds ONCE onto the t2 grid. For the constant's own rounding error 2^-(F+1) not to
+    # tip that single rounding we want it, times the largest raw sum, under 2^-4 of half
+    # a t2 LSB:   2^-(F+1) * 2^(dot_mag+H2) <= 2^-4 * 2^-(t2_F+1)
+    #   =>  F >= t2_F + H2 + dot_mag + 4.   (The ncount/ncount2 terms, <= 2^H2, are covered.)
+    fold_max = max(abs(v) for v in bn1_fold.values())
+    FOLD_I = _int_bits(fold_max, floor_bits=1)
+    FOLD_F = t2_F + H2 + dotall_mag + 4
+    FOLD_W = FOLD_I + FOLD_F
+    L.append('// ---- Lever 8: BN1 applied ONCE to the raw dot aggregates + T0 ROM ----')
+    L.append('//      jmass    = t2( Σ_ij d·m · bn1_s_all + ncount² · bn1_b_all )')
+    L.append('//      jdotp[j] = t2((Σ_i d_ij·m · bn1_s_row + ncount · bn1_b_row) · m_jj)')
+    L.append('//      T0       = m ? bn1_t0_rom[raw DOT_W-bit code of d] : 0   (weights.h)')
+    L.append('//      Raw dot sums are EXACT integers on the dot grid (+H2/H1 headroom); every')
+    L.append('//      product/sum is exact in HLS promoted types, so the ONLY rounding is the')
+    L.append('//      single t2_t cast (AP_RND_CONV, AP_SAT).')
+    L.append('//      bn1fold_t F: the folded constant\'s rounding error 2^-(F+1), times the')
+    L.append('//      largest raw sum 2^(dot_mag+H2), must stay under 2^-4 of half a t2 LSB')
+    L.append('//      (2^-(t2_F+1)) so it cannot tip the single t2 rounding:')
+    L.append(f'//        F >= t2_F + H2 + dot_mag + 4 = {t2_F} + {H2} + {dotall_mag} + 4 = {FOLD_F}')
+    L.append(f'#define NPELICAN_DOT_W {dotall_W}  // ROM index width = the dots array (dotall_t) code')
+    L.append(f'typedef {dsg}<{accdot2_W}, {accdot2_I}> accdot2_t;     // Σ_ij masked dots (I(dot)+H2), exact')
+    L.append(f'typedef {dsg}<{accdotrow_W}, {accdotrow_I}> accdotrow_t;   // Σ_i masked dots per column (I(dot)+H1), exact')
+    L.append(f'typedef ap_fixed<{FOLD_W}, {FOLD_I}, AP_RND_CONV, AP_SAT> bn1fold_t;'
+             f'  // s/N̄, β\'/N̄, s/N̄², β\'/N̄²; |c|max={fold_max:.6g} (I={FOLD_I}), F={FOLD_F}')
+    L.append('')
+    L.append('// ---- MAC temporaries: I = I(weight)+I(operand)+ceil(log2(#terms)),')
+    L.append('//      F = max(product_F, BIAS_F): initialised with the sticky-bit bias, carry the sticky bit ----')
+    L.append(f'typedef ap_fixed<{mac2_W}, {mac2_I}> mac2_t;     // 2->2 dense: init = sticky-encoded b1 / b1_diag_total, + {mac2_terms} w1*t2 products (product F={mac2_F}, F={mac2_acc_F})')
+    L.append(f'typedef ap_fixed<{mac0_W}, {mac0_I}> mac0_t;     // 2->0 dense: init = sticky-encoded b2, + {mac0_terms} w2*t0 products (product F={mac0_F}, F={mac0_acc_F})')
     if head is not None:
-        _mw, _mi, _mt = head['mach']
-        L.append(f'typedef ap_fixed<{_mw}, {_mi}> mach_t;     // head: K={HEAD} wh*relu0 products + b_head = {_mt} terms; F = BIASH_F = {head["biash"][2]} (exact bias add)')
+        _mw, _mi, _mt, _mf, _maf = head['mach']
+        L.append(f'typedef ap_fixed<{_mw}, {_mi}> mach_t;     // head: init = sticky-encoded b_head, + K={HEAD} wh*relu0 products (product F={_mf}, F={_maf})')
     L.append('')
     L.append('#endif  // NPELICAN_TYPES_GENERATED_H_')
     L.append('')
+
+    # Lever 8 ROM (quant path only; small dot grids only).
+    _quant_info['fold_type'] = 'bn1fold_t'
+    if dotall_W <= BN1_ROM_MAX_DOT_W:
+        t2_scale = act['net2to2.eq_layers.0.post_agg_quant']['scale']
+        _quant_info['bn1_rom'] = _build_bn1_rom(_quant_info['model'], dotall_W, dotall_I, dot_s,
+                                                t2_W, t2_I, t2_s, t2_scale)
+        _quant_info['dot_W'] = dotall_W
+        print(f'  Lever 8: BN1 T0 ROM {1 << dotall_W} x t2_t entries (dotall_t W={dotall_W}); '
+              f'bn1fold_t=ap_fixed<{FOLD_W},{FOLD_I}>')
+    else:
+        print(f'  Lever 8: dotall_t W={dotall_W} > {BN1_ROM_MAX_DOT_W}: no T0 ROM '
+              f'(firmware falls back to arithmetic T0); bn1fold_t=ap_fixed<{FOLD_W},{FOLD_I}>')
 
     os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
     with open(path, 'w') as fh:
@@ -1340,8 +1575,8 @@ else:
 # element order and VALUES are frozen either way — only the element typedef name changes.
 if args.quant:
     w1_type, w2_type = 'w1_gen_t', 'w2_gen_t'
-    bn_type, bias_type, norm_type = 'bn_t_gen', 'bias1_t_gen', 'norm_t'
-    bias2_type = 'bias2_t_gen'
+    bn_type, bias_type, norm_type = 'bn_t_gen', 'bias_t_gen', 'norm_t'
+    bias2_type = 'bias_t_gen'
 else:
     w1_type = 'w1_t' if args.split_types else 'weight_t'
     w2_type = 'w2_t' if args.split_types else 'weight_t'
@@ -1356,17 +1591,46 @@ if args.quant:
         args.out_types, _quant_info['act'], _quant_info['weight'],
         b1_2to2, b1d_2to2, b2_2to0)
 
+# Diagonal bias total (b1 + b1_diag), added as ONE constant on the diagonal.
+b1dt_2to2 = _f32_sum(b1_2to2, b1d_2to2)
+if args.quant:
+    # Sticky-bit bias encoding (see _sticky_encode / types_generated.h). Encode AFTER the
+    # types header so Fh (from the MAC / quantizer grids) is known.
+    _Fh, _BI = _quant_info['bias_Fh'], _quant_info['bias_I']
+    # Exact sum vs float32 sum: identical sticky encodings unless float32 rounding of
+    # b1+b1_diag crosses the G grid or zeroes the remainder (then warn; float32 is used).
+    from fractions import Fraction as _Fr
+    for _h in range(len(b1dt_2to2)):
+        _ex = _Fr(float(b1_2to2[_h])) + _Fr(float(b1d_2to2[_h]))
+        _ex_hi = _Fr(math.floor(_ex * (1 << _Fh)), 1 << _Fh)
+        _ex_enc = _ex_hi + (_Fr(1, 1 << (_Fh + 1)) if _ex != _ex_hi else 0)
+        _f_enc = _Fr(float(_sticky_encode([b1dt_2to2[_h]], _Fh, _BI)[0]))
+        if _ex_enc != _f_enc:
+            print(f'  WARNING: b1_diag_total[{_h}]: sticky(float32(b1+b1_diag)) != sticky(exact b1+b1_diag)')
+    b1_2to2_out = _sticky_encode(b1_2to2, _Fh, _BI)
+    b1d_2to2_out = _sticky_encode(b1d_2to2, _Fh, _BI)
+    b1dt_2to2_out = _sticky_encode(b1dt_2to2, _Fh, _BI)
+    b2_2to0_out = _sticky_encode(b2_2to0, _Fh, _BI)
+    b_head_out = _sticky_encode(_quant_info['head']['b'], _Fh, _BI) if HEAD > 0 else None
+    _cb = _c_exact
+    print(f'  bias_t_gen sticky-bit: Fh={_Fh}, BIAS_F={_Fh + 1}; '
+          f'b1={_cb(b1_2to2_out)} b1_diag_total={_cb(b1dt_2to2_out)} b2={_cb(b2_2to0_out)}')
+else:
+    b1_2to2_out, b1d_2to2_out, b1dt_2to2_out, b2_2to0_out = b1_2to2, b1d_2to2, b1dt_2to2, b2_2to0
+    b_head_out = None
+    _cb = _c
+
 os.makedirs(os.path.dirname(args.out) or '.', exist_ok=True)
 with open(args.out, 'w') as f:
     f.write('#include "../nPELICAN.h"\n')
-    _nobj_sa = _arg('nobj', None)
+    _nobj_sa = _quant_info.get('nparticles', _arg('nobj', None))
     _sa_cond = f'NHIDDEN == {NHIDDEN} && NOUT == {NOUT} && NSPURIONS == {NSPURIONS}'
     if HEAD > 0:
         _sa_cond += f' && NPELICAN_HEAD == {HEAD} && N2TO0_OUT == {HEAD}'
     if _nobj_sa is not None:
-        _sa_cond += f' && NPARTICLES == {int(_nobj_sa)}'
+        _sa_cond += f' && NPARTICLES <= {int(_nobj_sa)}'
     f.write(f'static_assert({_sa_cond}, "weights.h was exported for NHIDDEN={NHIDDEN} '
-            f'NOUT={NOUT} NPARTICLES={_nobj_sa if _nobj_sa is not None else "?"}; '
+            f'NOUT={NOUT} NPARTICLES<={_nobj_sa if _nobj_sa is not None else "?"}; '
             f'firmware/nPELICAN.h or types_generated.h disagree -- re-export or fix the defines");\n')
     if NSPURIONS == 3:
         # jet-quant-split presence must match the header (static_assert cannot test a macro)
@@ -1390,19 +1654,39 @@ with open(args.out, 'w') as f:
 
     f.write('//2to2 linear layer\n')
     f.write(f'{w1_type} w1_2to2[NHIDDEN*6] = ' + _c(w1_2to2) + ';\n')
-    f.write(f'{bias_type} b1_2to2[NHIDDEN] = ' + _c(b1_2to2) + ';\n')
-    f.write(f'{bias_type} b1_diag_2to2[NHIDDEN] = ' + _c(b1d_2to2) + ';\n\n')
+    f.write(f'{bias_type} b1_2to2[NHIDDEN] = ' + _cb(b1_2to2_out) + ';\n')
+    f.write(f'{bias_type} b1_diag_2to2[NHIDDEN] = ' + _cb(b1d_2to2_out) + ';'
+            + ('  // legacy/dump-only: quant firmware adds b1_diag_total_2to2' if args.quant else '') + '\n\n')
 
     f.write('//second batchnorm [channel][mean, weight/sqrt(var), bias]\n')
     f.write(f'{bn_type} batch2_2to0[NHIDDEN][3] = ' + _c(batch2) + ';\n\n')
 
     f.write('//2to1 linear layer\n')
     f.write(f'{w2_type} w2_2to0[N2TO0_OUT*NHIDDEN*2] = ' + _c(w2_2to0) + ';\n')
-    f.write(f'{bias2_type} b2_2to0[N2TO0_OUT] = ' + _c(b2_2to0) + ';\n')
+    f.write(f'{bias_type} b2_2to0[N2TO0_OUT] = ' + _cb(b2_2to0_out) + ';\n')
     if HEAD > 0:
         f.write('\n//nonlinear head (K -> NOUT), row-major (NOUT, K): w_head[o*NPELICAN_HEAD + k]\n')
         f.write('wh_gen_t w_head[NOUT*NPELICAN_HEAD] = ' + _c(_quant_info['head']['w']) + ';\n')
-        f.write('biash_t_gen b_head[NOUT] = ' + _c(_quant_info['head']['b']) + ';\n')
+        f.write(f'{bias_type} b_head[NOUT] = ' + _cb(b_head_out) + ';'
+                + ('  // sticky-bit encoded (mach_t accumulator init)' if args.quant else '') + '\n')
+
+    # Lever 8 (appended AFTER the frozen arrays; nothing above is renamed/reordered).
+    fold_type = 'bn1fold_t' if args.quant else 'internal_t'
+    f.write('\n//Lever 8: BN1 folded past the aggregation, 1/N̄ pre-folded (double precision)\n')
+    f.write(f'//  s = gamma/sigma = {_bn1_s:.17g}, beta\' = beta - mean*s = {_bn1_bp:.17g}, N̄ = {_nobj_avg}\n')
+    for nm in ('bn1_s_row', 'bn1_b_row', 'bn1_s_all', 'bn1_b_all'):
+        f.write(f'{fold_type} {nm} = {bn1_fold[nm]:.17g};\n')
+    if args.quant and 'bn1_rom' in _quant_info:
+        rom = _quant_info['bn1_rom']
+        f.write(f'\n//Lever 8: T0 = Q_t2(BN1(d)) for every raw dot code (index = ap_uint<{_quant_info["dot_W"]}> bits of the dotall_t entry),\n')
+        f.write('//generated by running the rebuilt Brevitas MessageNet(BN1) + post_agg_quant.\n')
+        f.write('#define NPELICAN_BN1_ROM 1\n')
+        f.write(f't2_t bn1_t0_rom[{len(rom)}] = {{' + ', '.join(f'{v:.17g}' for v in rom) + '};\n')
+
+    # Lever 8 follow-up (appended AFTER every other array): diagonal bias total, added on
+    # the diagonal as ONE constant instead of b1 + b1_diag.
+    f.write('\n//diagonal 2to2 bias total float32(b1 + b1_diag)' + (' (sticky-bit encoded)' if args.quant else '') + '\n')
+    f.write(f'{bias_type} b1_diag_total_2to2[NHIDDEN] = ' + _cb(b1dt_2to2_out) + ';\n')
 
     # D3: measured QAT scales appended as comments for the record (quant path only).
     if _scale_comment_lines:
@@ -1411,5 +1695,6 @@ with open(args.out, 'w') as f:
 print(f'\nWrote {args.out}  (NHIDDEN={NHIDDEN}, NOUT={NOUT}, NSPURIONS={NSPURIONS}'
       f'{" [jet spurion]" if NSPURIONS == 3 else ""}'
       f'{" [jet quant split]" if JET_QUANT_SPLIT else ""}, head_hidden={HEAD}, '
-      f'NPARTICLES={_arg("nobj", None) if _arg("nobj", None) is not None else "default"}, '
-      f'agg guard bits = {args.agg_guard_bits}, norm guard bits = {args.norm_guard_bits}, bn guard bits = {args.bn_guard_bits}, bias guard bits = {args.bias_guard_bits})')
+      f'NPARTICLES={_quant_info.get("nparticles", _arg("nobj", "default"))}'
+      + (f', sticky-bit biases Fh={_quant_info["bias_Fh"]}, Lever 8 T0 ROM={"yes" if "bn1_rom" in _quant_info else "no (arithmetic T0)"}' if args.quant else '')
+      + ')')
