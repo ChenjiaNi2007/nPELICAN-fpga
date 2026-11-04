@@ -19,6 +19,7 @@ array set opt {
     period     0
     golden     0
     nparticles 0
+    tag        0
 }
 
 set tcldir [file dirname [info script]]
@@ -216,6 +217,13 @@ if {$opt(split)} {
 if {$opt(period) != 0} {
     set clock_period $opt(period)
     set prj_dir ${prj_dir}_${opt(period)}ns
+}
+
+# tag=<name>: per-variant project dir (nPELICAN_prj_<name>) so several exports of the same
+# firmware (variants/<name>/, e.g. the momentum-grid ladder) keep their reports side by side.
+# vivado_synth.tcl reaches it with -tclargs _<name> and writes vivado_synth{,_opt}_<name>.rpt.
+if {$opt(tag) ne "0"} {
+    set prj_dir ${prj_dir}_$opt(tag)
 }
 
 # Resource-lever build flags (docs/RESOURCE_REDUCTION_LEVERS.md). Both are

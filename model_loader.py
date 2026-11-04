@@ -533,6 +533,14 @@ def _extract_quant_weights():
                      'PELICAN-nano checkout at --repo has no such QuantConfig field. '
                      'Update it, or the emitted dot_t will use an unclamped scale.')
         qkw['input_clip_min'] = float(icm)
+    # pmu_clip_min: the same rule for the momentum quantizer's clip floor (uniform grid).
+    pcm = _arg('pmu_clip_min', None)
+    if pcm is not None:
+        if 'pmu_clip_min' not in QuantConfig.__dataclass_fields__:
+            sys.exit('ERROR: checkpoint was trained with --pmu-clip-min but the '
+                     'PELICAN-nano checkout at --repo has no such QuantConfig field. '
+                     'Update it, or the emitted input_t will use an unclamped scale.')
+        qkw['pmu_clip_min'] = float(pcm)
     if JET_QUANT_SPLIT:
         # Replayed (model-shaping: adds input_quant_jet / input_quant_mjet / pmu_quant_jet).
         if 'jet_quant_split' not in QuantConfig.__dataclass_fields__:

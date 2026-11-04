@@ -204,3 +204,14 @@ ReLU quantizer casts 137k, 2->2 MAC ~150k, 2->0 sums 48k, Winograd dot adds/cast
 (81,285 LUT / 28,595 FF / 13,396 CARRY8 / 0 DSP / 21 cyc): 1.58x LUT, 1.13x FF, 0.95x CARRY8, +692 DSP,
 5 cycles faster, -2.4 pt accuracy. Untested follow-up lever: `BIND_OP variable=Tp op=mul impl=fabric`
 (-219 DSP for a few k LUT).
+
+## Momentum-grid (input bit-width) variants (2026-11-04)
+
+Is the 12-bit momentum grid (`input_t <12,10>`: LSB 0.25 GeV, clip 512 GeV) what caps the 6-bit model under
+boost? `variants/` holds one export per input grid of this same firmware — the committed 12-bit baseline,
+two inference-only proxies (`<14,12>`, `<16,14>`; resource builds only, `csim=0 golden=0`) and, once the
+retrains land, the real 14/16-bit checkpoints with golden vectors — plus `variants/use.sh <name>` to
+install one and `build_prj.tcl tag=<name>` for a per-variant project dir (`nPELICAN_prj_<name>`,
+`vivado -mode batch -source vivado_synth.tcl -tclargs _<name>` -> `vivado_synth_opt_<name>.rpt`). Full
+recipe and table: `variants/README.md`. The loader now replays `pmu_clip_min` (PELICAN-nano
+`--pmu-clip-min`, a floor on the momentum clip point) like `input_clip_min`.
