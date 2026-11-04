@@ -541,6 +541,14 @@ def _extract_quant_weights():
                      'PELICAN-nano checkout at --repo has no such QuantConfig field. '
                      'Update it, or the emitted input_t will use an unclamped scale.')
         qkw['pmu_clip_min'] = float(pcm)
+    # pmu_fixed_clip: a CONSTANT momentum grid (no scale parameter in the state dict, so a
+    # rebuild without it fails load_state_dict loudly; replay it anyway for the width/scale).
+    pfc = _arg('pmu_fixed_clip', None)
+    if pfc is not None:
+        if 'pmu_fixed_clip' not in QuantConfig.__dataclass_fields__:
+            sys.exit('ERROR: checkpoint was trained with --pmu-fixed-clip but the '
+                     'PELICAN-nano checkout at --repo has no such QuantConfig field. Update it.')
+        qkw['pmu_fixed_clip'] = float(pfc)
     if JET_QUANT_SPLIT:
         # Replayed (model-shaping: adds input_quant_jet / input_quant_mjet / pmu_quant_jet).
         if 'jet_quant_split' not in QuantConfig.__dataclass_fields__:

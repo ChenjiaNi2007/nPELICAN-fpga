@@ -1,0 +1,4 @@
+GOLDEN SUMMARY: events=200 exact=197 mismatch=3 max_abs_delta=0.375 first_mismatch=28
+GOLDEN GATE: FAIL (max_abs_delta=0.375 vs tol=0.001; 197/200 zero-tolerance exact)
+DOTS-LEVEL SUMMARY: events=200 exact=198 mismatch=2 max_abs_delta=0.375 first_mismatch=79
+DOTS-LEVEL GATE: FAIL (max_abs_delta=0.375 vs tol=0.0001; 198/200 zero-tolerance exact)

@@ -17,7 +17,18 @@ firmware `input_t ap_fixed<12,10>`) the constraint? PyTorch side: `mlpmixer/hls4
 | `pmu12` | `<12,10>` (LSB 0.25 GeV, clip 512) | `h5n16_h8_qat_s1` (= committed `firmware/weights`) | yes, 200/200 | baseline = deployment-config result (128,240 LUT / 692 DSP) |
 | `proxy_in14` | `<14,12>` (LSB 0.25, clip 2048) | same checkpoint, `--pmu-extra-int-bits 2` | no (ablation) | resource cost of a 14-bit input grid, available before the retrains finish |
 | `proxy_in16` | `<16,14>` (LSB 0.25, clip 8192) | same checkpoint, `--pmu-extra-int-bits 4` | no (ablation) | resource cost of a 16-bit input grid |
-| `pmu14`, `pmu16`, `pmu14c2048`, `pmu16c2048` | from the retrained checkpoints | `h5n16_h8_qat_<name>_s1` | yes | the real models (added when training finishes) |
+| `pmu14` | `<14,10>` (LSB 1/16 GeV, clip 512) | retrained `h5n16_h8_qat_pmu14_s1` (clip left to the learned scale) | 197/200, see note | real 14-bit model: training keeps the 512 GeV clip and spends the bits on the LSB |
+| `pmu16` | `<16,10>` (LSB 1/64 GeV, clip 512) | retrained `h5n16_h8_qat_pmu16_s1` | see GATE.txt | real 16-bit model, same pattern |
+| `pmu14f2048`, `pmu16f2048` | `<14,12>` / `<16,12>` (LSB 0.25 / 1/16 GeV, clip 2048) | retrained with `--pmu-fixed-clip 2048` (constant grid) | see GATE.txt | the boost-robust grids, trained |
+| `pmufloat` | wide fallback input_t | retrained without a momentum quantizer | approximate | float-momenta upper bound (firmware can only approximate it) |
+
+Gate note for the wider grids: a mismatch of 1-3 output LSBs on a few events is the PyTorch reference, not the
+firmware. With LSB <= 1/16 GeV the squared momenta (E² ≈ 1.6e5 GeV² for a 400 GeV constituent) need more than
+float32's 24 mantissa bits, so PyTorch's float32 dot differs from the exact fixed-point dot by ~1e-2 GeV² and
+can land on the other side of a dot-quantizer rounding boundary (pmu14 event 28: m² exact 13.984 -> 12, PyTorch
+-> 16). The firmware arithmetic is exact; a float64 reference would gate 200/200. `pmu14c2048` (learned scale
+with a `--pmu-clip-min` floor) was dropped: Brevitas applies that floor in eval mode only, so the model trained
+on a different grid than it evaluates on.
 
 Resource-wise a proxy is the retrained model of the same input WIDTH: the dot front-end's multipliers and
 adders are sized by `input_t`'s width, not by where its binary point sits, and every later stage is
