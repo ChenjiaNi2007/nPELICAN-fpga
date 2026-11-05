@@ -184,6 +184,8 @@ test 52.22 % / macro AUC 81.54). Export with `--bn-guard-bits 8` (200/200 golden
 | same checkpoint, **deployment config** (branch `hls4ml5-deploy`: Lever 8 BN1 fold + T0 ROM, Lever 9 `winograd=1`, `const_beams=1`, sticky-bit biases), post-opt | **128,240** | **32,191** | **692** | 12,674 | 16 cyc, II=1, est. 4.455 ns | 2026-10-22 | `csynth_hls4ml5_h8n16_deploy.rpt`, `vsynth_hls4ml5_h8n16_deploy_opt.rpt` |
 | deployment config, **14-bit momentum input** (`variants/proxy_in14`: `input_t <14,12>`, `model_input` 896 bits; same checkpoint, `--pmu-extra-int-bits 2`), post-opt | **129,592** (+1.05 %) | **32,649** (+1.4 %) | **692** | 12,676 | 16 cyc, II=1, est. 4.370 ns | 2026-11-04 | `csynth_hls4ml5_proxy_in14.rpt`, `vsynth_hls4ml5_proxy_in14_{postsynth,opt,opt_hier}.rpt` |
 | deployment config, **16-bit momentum input** (`variants/proxy_in16`: `input_t <16,14>`, `model_input` 1024 bits; `--pmu-extra-int-bits 4`), post-opt | **130,346** (+1.64 %) | **32,913** (+2.2 %) | **692** | 13,116 | 16 cyc, II=1, est. 4.455 ns | 2026-11-04 | `csynth_hls4ml5_proxy_in16_TRUNCATED.rpt` (cut at 6 MiB, summary intact), `vsynth_hls4ml5_proxy_in16_{postsynth,opt,opt_hier}.rpt` |
+| deployment config, **17-bit momentum input** (`variants/proxy_in17`: `input_t <17,15>`, `model_input` 1088 bits; `--pmu-extra-int-bits 5`), post-opt | **131,707** (+2.70 %) | **33,149** (+3.0 %) | **692** | 13,116 | 16 cyc, II=1, est. 4.455 ns | 2026-11-05 | `csynth_hls4ml5_proxy_in17.rpt`, `vsynth_hls4ml5_proxy_in17_{postsynth,opt,opt_hier}.rpt` |
+| deployment config, **18-bit momentum input** (`variants/proxy_in18`: `input_t <18,16>`, `model_input` 1152 bits; `--pmu-extra-int-bits 6`), post-opt | **143,863** (+12.2 %) | **37,879** (+17.7 %) | **692** | 14,608 (+15.3 %) | **15 cyc**, II=1, est. 4.455 ns | 2026-11-05 | `csynth_hls4ml5_proxy_in18.rpt`, `vsynth_hls4ml5_proxy_in18_{postsynth,opt,opt_hier}.rpt` |
 
 DSP (lever7-blockfp row) = 684 dots + 171 BN1 (guard-bit literal on DSP) + 85 2->2 MACs + 95 rescales.
 Deployment row: 272 Winograd pair products (136 particle pairs x 2) + 32 xi/eta + 0 BN1 (168 T0 ROM muxes)
@@ -203,9 +205,24 @@ the growth in the dot front-end's post-product arithmetic (expression LUT deltas
 +1.8k = the saturation compares of the dot cast, `sub` +1.7k = the Winograd correction / Minkowski-sign
 subtractions, `add` +0.1k; `select`/`or`/`xor` unchanged); the pre-adder sums sit inside the DSP48E2
 (`ama_addmuladd_14s_14s_15s_30s` / `16s_16s_17s_34s`, one DSP per pair product), and the 32 xi/eta products
-go 12x12 -> 14x14 -> 16x16 at one DSP each. The one-DSP-per-pair-product form holds while the pre-adder sums
-fit the 18-bit DSP port, i.e. up to 17-bit momentum inputs; an 18-bit or wider grid (the ~20 bits a boost-flat
-fixed-point curve would need, or the 24-bit `pmufloat` type) needs a second DSP for each of the 272 pair
-products (expected, not measured). Against the 4-feature Mixer the 16-bit build is 1.60x LUT (was 1.58x),
+go 12x12 -> 14x14 -> 16x16 at one DSP each. Against the 4-feature Mixer the 16-bit build is 1.60x LUT (was 1.58x),
 1.15x FF, 0.98x CARRY8, +692 DSP, 5 cycles faster, and with the `pmu16f2048` checkpoint (54.81 %) it is 0.2 pt
 MORE accurate than the synthesized Mixer point (54.59 %) instead of 2.4 pt less.
+
+17- and 18-bit rows (2026-11-05, same proxies). **17 bits** continues the 12 -> 16 trend exactly: +1,361 LUT
+(+1.04 %) and +236 FF over the 16-bit build, CARRY8 unchanged at 13,116, 692 DSP, 16 cycles, csynth 4.455 ns;
+the csynth DSP table still lists the 272 pair products as single-DSP `ama_addmuladd_17s_17s_18s_36s` (136) and
+`am_submul_17s_17s_18s` (136) blocks, so 17 is confirmed as the last width whose (W+1)-bit pre-adder sums fit
+the DSP48E2's 18-bit port. Over 12 -> 17 the input costs ~690 LUT and ~190 FF per bit; the 17-bit build is 1.62x
+the Mixer's LUTs and 1.16x its FFs. **18 bits** does NOT add DSPs — the "+272 DSP" expectation was wrong in
+mechanism: Vitis keeps one DSP48E2 per pair product but can no longer use the DSP pre-adder, so the 272 products
+become `mul_19s_19s_38_1_1` instances (csynth DSP-expression modules 509 -> 237, instance DSPs 167 -> 439, total
+676 as before) with the 19-bit pre-adds and a ~38-bit correction add for the bit that overflows the 18-bit port in
+fabric (csynth expression deltas 17 -> 18: `add` +9.7k LUT with +272 new 19x19 / 38x38 adders, `sub` +4.4k with
++136 19x19, `icmp` +0.9k). Vivado post-opt: **143,863 LUT / 37,879 FF / 14,608 CARRY8 / 692 DSP**, i.e. +12,156
+LUT (+9.2 %), +4,730 FF (+14.3 %) and +1,492 CARRY8 (+11.4 %) over the 17-bit build — about 45 LUT, 17 FF and
+5.5 CARRY8 per pair product, nine times the per-bit slope of 12 -> 17 — and one cycle LESS latency (15; the DSP
+pre-adder stage is gone). Against the Mixer the 18-bit build is 1.77x LUT, 1.32x FF, 1.09x CARRY8. So the
+near-boost-flat 18-bit models (`pmu18f4096` / `pmu18f2048`, 52.7 / 53.0 % at |β| = 0.95) cost 12 % more LUTs than
+the deployed 12-bit build and no DSPs, while the 17-bit models (48.7 / 50.1 %) cost 2.7 % more. Width proxies vs
+retrained constants: same caveat as for 14/16 (constant-dependent noise only).

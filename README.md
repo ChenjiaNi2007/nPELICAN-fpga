@@ -226,14 +226,16 @@ csynth clock estimates 4.37 / 4.46 ns. The wider grid is paid in the dot front-e
 With the `pmu16f2048` checkpoint this is the boost-robust deployment: 54.8 % rest / 45.8 % at |β| = 0.95 for
 1.6 % more LUTs than the 12-bit model. Reports `reports/{csynth,vsynth}_hls4ml5_proxy_in{14,16}*.rpt`;
 analysis in `reports/README.md` and `variants/README.md`.
-`variants/proxy_in17` (`<17,15>`, 2026-11-05) is the next resource build: 17 bits is the last width at which the
-Winograd pre-adder sums (18 bits) fit the DSP48E2's 18-bit port, so it should keep the 692 DSPs; the two 17-bit
-retrains are exported and gated 200/200 (`variants/pmu17f4096`: LSB 1/16 @ 4096, `<17,13>`, 55.2 % rest / 48.7 % at
-|β| = 0.95; `variants/pmu17f2048`: LSB 1/32 @ 2048, `<17,12>`, 54.5 % / 50.1 %) — build them with `csim=1 golden=1`
-like `pmu16f2048`; the csynth instance list must show single-DSP `ama_addmuladd_17s_17s_18s_36s` pair products.
-`variants/proxy_in18` (`<18,16>`, 2026-11-05) is the companion build one bit past the port: its 19-bit pre-adder sums
-need a second DSP per pair product (expected +272 DSP, ~964 in Vivado), which is the price of the two 18-bit retrains,
-exported and gated 200/200 the same day: `variants/pmu18f4096` (LSB 1/32 @ 4096 = both 17-bit bits at once, `<18,13>`,
+**17 and 18 bits (synthesized 2026-11-05, same proxies):** `variants/proxy_in17` (`<17,15>`, 1088-bit input) =
+**131,707 LUT / 33,149 FF / 13,116 CARRY8 / 692 DSP / 16 cyc** (+1.04 % LUT on 16 bits, +2.70 % on 12; the pair
+products are still single-DSP `ama_addmuladd_17s_17s_18s_36s`, so 17 is confirmed as the last one-DSP width). The two
+17-bit retrains are exported and gated 200/200 (`variants/pmu17f4096`: LSB 1/16 @ 4096, `<17,13>`, 55.2 % rest / 48.7 %
+at |β| = 0.95; `variants/pmu17f2048`: LSB 1/32 @ 2048, `<17,12>`, 54.5 % / 50.1 %) — build them with `csim=1 golden=1`
+like `pmu16f2048`. `variants/proxy_in18` (`<18,16>`, 1152-bit input) = **143,863 LUT / 37,879 FF / 14,608 CARRY8 /
+692 DSP / 15 cyc**: one bit past the port Vitis does NOT add DSPs — each pair product stays one DSP48E2
+(`mul_19s_19s_38_1_1`) with its pre-adds and a correction add moved into fabric — so the step costs +9.2 % LUT, +14.3 %
+FF and +11.4 % CARRY8 over 17 bits (12.2 % / 17.7 % over the deployed 12-bit build) and saves a cycle. That is the
+price of the two 18-bit retrains, exported and gated 200/200 the same day: `variants/pmu18f4096` (LSB 1/32 @ 4096 = both 17-bit bits at once, `<18,13>`,
 54.9 % rest / 52.7 % at |β| = 0.95) and `variants/pmu18f2048` (LSB 1/64 @ 2048, `<18,12>`, 55.1 % / **53.0 %**) — the first
 quantized nanoPELICANs within 2 pt of the float-momenta model under boost (54.8 %), vs 34.9 % for the deployed 12-bit
 grid. Both moved the dot quantizer to a 16 GeV² LSB (`dot_t <6,10>`, T0 ROM still 64 entries). Build with `csim=1 golden=1`.

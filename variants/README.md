@@ -17,11 +17,11 @@ firmware `input_t ap_fixed<12,10>`) the constraint? PyTorch side: `mlpmixer/hls4
 | `pmu12` | `<12,10>` (LSB 0.25 GeV, clip 512) | `h5n16_h8_qat_s1` (= committed `firmware/weights`) | yes, 200/200 | baseline = deployment-config result (128,240 LUT / 692 DSP) |
 | `proxy_in14` | `<14,12>` (LSB 0.25, clip 2048) | same checkpoint, `--pmu-extra-int-bits 2` | no (ablation) | resource cost of a 14-bit input grid, available before the retrains finish |
 | `proxy_in16` | `<16,14>` (LSB 0.25, clip 8192) | same checkpoint, `--pmu-extra-int-bits 4` | no (ablation) | resource cost of a 16-bit input grid |
-| `proxy_in17` | `<17,15>` (LSB 0.25, clip 16384) | same checkpoint, `--pmu-extra-int-bits 5` (2026-11-05) | no (ablation) | resource cost of a 17-bit input grid = the last width with one DSP per Winograd pair product (18-bit pre-adder sums fill the DSP48E2's 18-bit port; 18-bit inputs need a second DSP on each of the 272 pair products). Expected ~130.9k LUT / 692 DSP / 16 cyc |
-| `proxy_in18` | `<18,16>` (LSB 0.25, clip 32768) | same checkpoint, `--pmu-extra-int-bits 6` (2026-11-05) | no (ablation) | resource cost of an 18-bit input grid = the first width PAST the DSP port: the 19-bit Winograd pre-adder sums no longer fit the DSP48E2's 18-bit B port, so each of the 272 pair products needs a second DSP (expected ~964 DSP in Vivado / ~948 csynth, +272 on 692/676) plus ~0.5k more LUT; measures what the two 18-bit retrains (`pmu18f4096`, `pmu18f2048`) would cost |
+| `proxy_in17` | `<17,15>` (LSB 0.25, clip 16384) | same checkpoint, `--pmu-extra-int-bits 5` (2026-11-05) | no (ablation) | resource cost of a 17-bit input grid = the last width with one DSP per Winograd pair product (18-bit pre-adder sums fill the DSP48E2's 18-bit port). **Synthesized 2026-11-05: 131,707 LUT / 33,149 FF / 13,116 CARRY8 / 692 DSP / 16 cyc** (+1.04 % LUT on 16 bits; single-DSP `ama_addmuladd_17s_17s_18s_36s` confirmed) |
+| `proxy_in18` | `<18,16>` (LSB 0.25, clip 32768) | same checkpoint, `--pmu-extra-int-bits 6` (2026-11-05) | no (ablation) | resource cost of an 18-bit input grid = the first width PAST the DSP port: the 19-bit Winograd pre-adder sums no longer fit the DSP48E2's 18-bit B port. **Synthesized 2026-11-05: 143,863 LUT / 37,879 FF / 14,608 CARRY8 / 692 DSP / 15 cyc** — NO extra DSPs: Vitis keeps one DSP per pair product (`mul_19s_19s_38_1_1` instances) and moves the pre-adds plus a correction add into fabric, +12,156 LUT (+9.2 %) / +4,730 FF (+14.3 %) / +1,492 CARRY8 over 17 bits = the cost of the two 18-bit retrains (`pmu18f4096`, `pmu18f2048`) |
 | `pmu17f4096` | `<17,13>` (LSB 1/16 GeV, clip 4096) | retrained `h5n16_h8_qat_pmu17f4096_s1` (`--pmu-fixed-clip 4096`, 2026-11-05; rest **55.2 %** / 83.3 = the float-momenta model, boost 55.0 -> 48.7) | **200/200** | the 16f2048 grid + one bit of RANGE (clipped jets at \|β\|=0.95: 11.8 -> 1.6 %); best at rest, never below 16f2048 at any β; now the dashed curve of `boost_n16_mixer_vs_npelican.png` |
 | `pmu17f2048` | `<17,12>` (LSB 1/32 GeV, clip 2048) | retrained `h5n16_h8_qat_pmu17f2048_s1` (`--pmu-fixed-clip 2048`, 2026-11-05; rest 54.5 % / 83.0, boost 54.5 -> **50.1**) | **200/200** | the 16f2048 grid + one bit of RESOLUTION: flattest quantized curve (54.1 % at 0.8); dot_t `<6,9>` (8 GeV² LSB) in both 17-bit models vs `<6,8>` at 16 bits, T0 ROM still 64 entries |
-| `pmu18f4096` | `<18,13>` (LSB 1/32 GeV, clip 4096) | retrained `h5n16_h8_qat_pmu18f4096_s1` (`--pmu-fixed-clip 4096`, 2026-11-05; rest 54.9 % / 83.0, boost 55.1 -> 52.7) | **200/200** | both 17-bit bits at once; near boost-flat (54.7 % at 0.8); dot_t `<6,10>` (16 GeV² LSB), T0 ROM still 64 entries; pays the second DSP per pair product that `proxy_in18` measures |
+| `pmu18f4096` | `<18,13>` (LSB 1/32 GeV, clip 4096) | retrained `h5n16_h8_qat_pmu18f4096_s1` (`--pmu-fixed-clip 4096`, 2026-11-05; rest 54.9 % / 83.0, boost 55.1 -> 52.7) | **200/200** | both 17-bit bits at once; near boost-flat (54.7 % at 0.8); dot_t `<6,10>` (16 GeV² LSB), T0 ROM still 64 entries; pays the +9 % LUT / +14 % FF of the 18-bit input that `proxy_in18` measured (no extra DSPs) |
 | `pmu18f2048` | `<18,12>` (LSB 1/64 GeV, clip 2048) | retrained `h5n16_h8_qat_pmu18f2048_s1` (`--pmu-fixed-clip 2048`, 2026-11-05; rest **55.1 %** / 83.1, boost 55.3 -> **53.0**) | **200/200** | two bits of RESOLUTION: the flattest quantized curve (54.7 % at 0.8, 53.0 at 0.95 = 1.8 pt under the float-momenta model, +3 on the best 17-bit curve); resolution beats range again, so at >= 17 bits the LSB is the bit to buy; dot_t `<6,10>` |
 | `pmu14` | `<14,10>` (LSB 1/16 GeV, clip 512) | retrained `h5n16_h8_qat_pmu14_s1` (clip left to the learned scale; rest 53.4 % / 82.5, boost 53.1 -> 38.2) | 197/200, see note | real 14-bit model: training keeps the 512 GeV clip and spends the bits on the LSB |
 | `pmu16` | `<16,10>` (LSB 1/64 GeV, clip 512) | retrained `h5n16_h8_qat_pmu16_s1` (rest 54.0 % / 82.6, boost 53.9 -> 40.4) | 186/200 (<= 1 LSB) | real 16-bit model, same pattern |
@@ -59,11 +59,11 @@ csynth `== Interface` table first: `model_input` must be NPARTICLES x 4 x W bits
 for W = 12 / 14 / 16 / 17 / 18), five 6-bit `model_out` ports, 5-bit `nobj`. For the 17-bit build also check the
 instance list: the pair products must appear as single-DSP `ama_addmuladd_17s_17s_18s_36s` blocks (csynth DSP
 total 676, Vivado 692, as for 12-16 bits); any `mul_18s_18s`/two-DSP pattern there means the port limit bit.
-For the 18-bit build (`proxy_in18`) the opposite is expected: the 19-bit pre-adder sums overflow the B port, so
-the instance list should show a two-DSP multiplier per pair product (a `mul_19s_19s_38_*` or an
-`ama_addmuladd_*` + `mul_*` pair) and the DSP total should rise by ~272 (csynth ~948, Vivado ~964); if Vitis
-instead keeps the DSP count and grows the LUTs, it has moved one pre-adder into fabric, which is the number to
-quote either way.
+For the 18-bit build (`proxy_in18`, synthesized 2026-11-05) the 19-bit pre-adder sums overflow the B port and
+Vitis takes the second route: the DSP count stays at 676 / 692, the 272 pair products appear as `mul_19s_19s_38_1_1`
+instances (one DSP each, csynth DSP-expression modules 509 -> 237, instance DSPs 167 -> 439) with the pre-adds and
+a correction add in fabric, and the cost lands in LUTs/FFs (+9.2 % / +14.3 % over 17 bits) and one cycle less
+latency (15).
 
 Status 2026-11-04: all exports done; the momentum grid is the whole QAT boost loss (float momenta = boost-flat
 55 %), and `pmu16f2048` is the quantized grid to deploy for a boost-robust model. The two width proxies are
@@ -74,16 +74,19 @@ synthesized (deployment config, U250 @ 5 ns, `csim=0 golden=0`; reports in `../r
 | `pmu12` (2026-10-22) | `<12,10>` | 768 b | 4.455 ns, 676, 58,880, 500,777 | 128,240 (127,340 + 900) | 32,191 | 12,674 | 692 | 16 cyc, II=1 |
 | `proxy_in14` | `<14,12>` | 896 b | 4.370 ns, 676, 60,476, 504,521 | **129,592** (+1,352, +1.05 %) | 32,649 (+1.4 %) | 12,676 | **692** | 16 cyc, II=1 |
 | `proxy_in16` | `<16,14>` | 1024 b | 4.455 ns, 676, 62,074, 508,329 | **130,346** (+2,106, +1.64 %) | 32,913 (+2.2 %) | 13,116 (+3.5 %) | **692** | 16 cyc, II=1 |
+| `proxy_in17` (2026-11-05) | `<17,15>` | 1088 b | 4.455 ns, 676, 62,877, 510,217 | **131,707** (+3,467, +2.70 %) | 33,149 (+3.0 %) | 13,116 (+3.5 %) | **692** | 16 cyc, II=1 |
+| `proxy_in18` (2026-11-05) | `<18,16>` | 1152 b | 4.455 ns, 676, 57,358, 526,929 | **143,863** (+15,623, +12.2 %) | 37,879 (+17.7 %) | 14,608 (+15.3 %) | **692** | **15 cyc**, II=1 |
 
-(post-synth, before `opt_design`: 129,773 / 130,527 LUT.) So the 16-bit grid that lifts the model from 52.2 to
+(post-synth, before `opt_design`: 129,773 / 130,527 / 131,881 / 144,103 LUT.) So the 16-bit grid that lifts the model from 52.2 to
 54.8 % at rest and from 34.9 to 45.8 % at |β| = 0.95 costs 1.6 % more LUTs, 2.2 % more FFs, no DSPs and no
 cycles: `pmu16f2048` is 1.60x the 4-feature Mixer's LUTs (was 1.58x) at +0.2 pt accuracy instead of -2.4.
 The LUT growth is the dot front-end's post-product arithmetic (saturation compares of the dot cast and the
 Winograd correction subtractions, +4 bits per +2 input bits); the pre-adder sums live inside the DSP48E2
-(`ama_addmuladd_16s_16s_17s_34s`), which holds one pair product per DSP up to 17-bit inputs — an 18-bit or
-wider grid (or the 24-bit `pmufloat` type) would need a second DSP for each of the 272 pair products
-(`proxy_in18` measures exactly that step; synthesis owed — the two 18-bit retrains `pmu18f4096` / `pmu18f2048` are
-the near-boost-flat models, 52.7 / 53.0 % at |β| = 0.95, that would pay it). Per
+(`ama_addmuladd_16s_16s_17s_34s` / `17s_17s_18s_36s`), which holds one pair product per DSP up to 17-bit inputs.
+At 18 bits (`proxy_in18`, measured) Vitis does NOT spend a second DSP: it keeps one DSP48E2 per pair product
+(`mul_19s_19s_38_1_1`) and moves the pre-adds plus a correction add into fabric, so the step 17 -> 18 costs
++12,156 LUT (+9.2 %), +4,730 FF (+14.3 %) and +1,492 CARRY8 for the same 692 DSPs and one cycle less (15) —
+the price of the near-boost-flat `pmu18f4096` / `pmu18f2048` models (52.7 / 53.0 % at |β| = 0.95). Per
 input bit over 12 -> 16: ~530 LUT and ~180 FF (the two 2-bit steps are uneven, +1,352 vs +754 LUT, Vivado
 having moved adders between LUT6s and CARRY8 chains at 16 bits). A proxy is resource-equivalent to the
 retrained variant of the same width (`pmu14`/`pmu14f2048`, `pmu16`/`pmu16f2048`) up to constant-dependent
