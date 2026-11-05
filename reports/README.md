@@ -182,6 +182,8 @@ test 52.22 % / macro AUC 81.54). Export with `--bn-guard-bits 8` (200/200 golden
 | 16p h8 NOUT=5, pmu-12 w6a6i6, bn-guard 8 (post-synth) | 160,690 | 49,280 | 1,029 | 19,444 | 16 cyc, II=1, timing met | 2026-10-21 | `csynth_hls4ml5_h8n16.rpt`, `vsynth_hls4ml5_h8n16_postsynth.rpt` |
 | same, **post-opt_design** (like-for-like with the Mixer) | **160,426** | **49,277** | **1,029** | 19,444 | — | 2026-10-21 | `vsynth_hls4ml5_h8n16_opt.rpt` |
 | same checkpoint, **deployment config** (branch `hls4ml5-deploy`: Lever 8 BN1 fold + T0 ROM, Lever 9 `winograd=1`, `const_beams=1`, sticky-bit biases), post-opt | **128,240** | **32,191** | **692** | 12,674 | 16 cyc, II=1, est. 4.455 ns | 2026-10-22 | `csynth_hls4ml5_h8n16_deploy.rpt`, `vsynth_hls4ml5_h8n16_deploy_opt.rpt` |
+| deployment config, **14-bit momentum input** (`variants/proxy_in14`: `input_t <14,12>`, `model_input` 896 bits; same checkpoint, `--pmu-extra-int-bits 2`), post-opt | **129,592** (+1.05 %) | **32,649** (+1.4 %) | **692** | 12,676 | 16 cyc, II=1, est. 4.370 ns | 2026-11-04 | `csynth_hls4ml5_proxy_in14.rpt`, `vsynth_hls4ml5_proxy_in14_{postsynth,opt,opt_hier}.rpt` |
+| deployment config, **16-bit momentum input** (`variants/proxy_in16`: `input_t <16,14>`, `model_input` 1024 bits; `--pmu-extra-int-bits 4`), post-opt | **130,346** (+1.64 %) | **32,913** (+2.2 %) | **692** | 13,116 | 16 cyc, II=1, est. 4.455 ns | 2026-11-04 | `csynth_hls4ml5_proxy_in16_TRUNCATED.rpt` (cut at 6 MiB, summary intact), `vsynth_hls4ml5_proxy_in16_{postsynth,opt,opt_hier}.rpt` |
 
 DSP (lever7-blockfp row) = 684 dots + 171 BN1 (guard-bit literal on DSP) + 85 2->2 MACs + 95 rescales.
 Deployment row: 272 Winograd pair products (136 particle pairs x 2) + 32 xi/eta + 0 BN1 (168 T0 ROM muxes)
@@ -190,3 +192,20 @@ candidates: 85 before) + ~150 Lever-8 / BN2 / 1/N̄ rescales (exact-float32 cons
 vs the lever7-blockfp row: LUT -20 %, FF -35 %, CARRY8 -35 %, DSP -33 %, same 16 cycles. The post-opt row is the
 number next to the Mixer (81.3k LUT / 28.6k FF / 0 DSP / 21 cyc, post-opt): 1.97x LUT, 1.72x FF, +1,029 DSP,
 5 cycles faster, -2.4 pt accuracy; see `../README.md` and `mlpmixer/hls4ml5/README.md` Step 5.
+
+Momentum-grid rows (2026-11-04, width proxies of the same checkpoint; the retrained `pmu14*` / `pmu16*` variants
+have the same `input_t` widths and differ only in constants): a wider momentum input costs LUTs and FFs only.
+Post-opt vs the 12-bit row: 14-bit +1,352 LUT / +458 FF / +2 CARRY8, 16-bit +2,106 LUT / +722 FF / +442 CARRY8,
+DSP 692 in all three, 16 cycles, II=1, csynth clock estimate 4.37-4.46 ns on a 5 ns target. Per input bit over
+the 12 -> 16 span: ~530 LUT (0.4 %) and ~180 FF (the 12 -> 14 and 14 -> 16 steps are uneven, +1,352 vs +754 LUT,
+because Vivado moved adders between LUT6s and CARRY8 chains: LUT6 28,616 -> 27,424, CARRY8 +440). csynth puts
+the growth in the dot front-end's post-product arithmetic (expression LUT deltas per +2 input bits: `icmp`
++1.8k = the saturation compares of the dot cast, `sub` +1.7k = the Winograd correction / Minkowski-sign
+subtractions, `add` +0.1k; `select`/`or`/`xor` unchanged); the pre-adder sums sit inside the DSP48E2
+(`ama_addmuladd_14s_14s_15s_30s` / `16s_16s_17s_34s`, one DSP per pair product), and the 32 xi/eta products
+go 12x12 -> 14x14 -> 16x16 at one DSP each. The one-DSP-per-pair-product form holds while the pre-adder sums
+fit the 18-bit DSP port, i.e. up to 17-bit momentum inputs; an 18-bit or wider grid (the ~20 bits a boost-flat
+fixed-point curve would need, or the 24-bit `pmufloat` type) needs a second DSP for each of the 272 pair
+products (expected, not measured). Against the 4-feature Mixer the 16-bit build is 1.60x LUT (was 1.58x),
+1.15x FF, 0.98x CARRY8, +692 DSP, 5 cycles faster, and with the `pmu16f2048` checkpoint (54.81 %) it is 0.2 pt
+MORE accurate than the synthesized Mixer point (54.59 %) instead of 2.4 pt less.
