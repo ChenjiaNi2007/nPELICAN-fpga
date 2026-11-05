@@ -17,10 +17,11 @@ firmware `input_t ap_fixed<12,10>`) the constraint? PyTorch side: `mlpmixer/hls4
 | `pmu12` | `<12,10>` (LSB 0.25 GeV, clip 512) | `h5n16_h8_qat_s1` (= committed `firmware/weights`) | yes, 200/200 | baseline = deployment-config result (128,240 LUT / 692 DSP) |
 | `proxy_in14` | `<14,12>` (LSB 0.25, clip 2048) | same checkpoint, `--pmu-extra-int-bits 2` | no (ablation) | resource cost of a 14-bit input grid, available before the retrains finish |
 | `proxy_in16` | `<16,14>` (LSB 0.25, clip 8192) | same checkpoint, `--pmu-extra-int-bits 4` | no (ablation) | resource cost of a 16-bit input grid |
-| `pmu14` | `<14,10>` (LSB 1/16 GeV, clip 512) | retrained `h5n16_h8_qat_pmu14_s1` (clip left to the learned scale) | 197/200, see note | real 14-bit model: training keeps the 512 GeV clip and spends the bits on the LSB |
-| `pmu16` | `<16,10>` (LSB 1/64 GeV, clip 512) | retrained `h5n16_h8_qat_pmu16_s1` | see GATE.txt | real 16-bit model, same pattern |
-| `pmu14f2048`, `pmu16f2048` | `<14,12>` / `<16,12>` (LSB 0.25 / 1/16 GeV, clip 2048) | retrained with `--pmu-fixed-clip 2048` (constant grid) | see GATE.txt | the boost-robust grids, trained |
-| `pmufloat` | wide fallback input_t | retrained without a momentum quantizer | approximate | float-momenta upper bound (firmware can only approximate it) |
+| `pmu14` | `<14,10>` (LSB 1/16 GeV, clip 512) | retrained `h5n16_h8_qat_pmu14_s1` (clip left to the learned scale; rest 53.4 % / 82.5, boost 53.1 -> 38.2) | 197/200, see note | real 14-bit model: training keeps the 512 GeV clip and spends the bits on the LSB |
+| `pmu16` | `<16,10>` (LSB 1/64 GeV, clip 512) | retrained `h5n16_h8_qat_pmu16_s1` (rest 54.0 % / 82.6, boost 53.9 -> 40.4) | 186/200 (<= 1 LSB) | real 16-bit model, same pattern |
+| `pmu14f2048` | `<14,12>` (LSB 0.25 GeV, clip 2048) | retrained `h5n16_h8_qat_pmu14f2048_s1` (`--pmu-fixed-clip 2048`; rest 53.9 % / 82.3, boost 53.8 -> 40.4) | **200/200** | 12-bit LSB at 4x the range |
+| `pmu16f2048` | `<16,12>` (LSB 1/16 GeV, clip 2048) | retrained `h5n16_h8_qat_pmu16f2048_s1` (`--pmu-fixed-clip 2048`; rest 54.8 % / 83.1, boost 54.8 -> 45.8) | 198/200 (dots-level 200/200) | the best quantized grid found: rest = float-momenta model |
+| `pmufloat` | `<24,13>` (loader fallback for float momenta) | retrained without a momentum quantizer (`h5n16_h8_qat_pmufloat_s1`, rest 55.1 % / 83.0, boost-flat 55.2 -> 54.8) | 195/200 (dots-level 200/200) | float-momenta upper bound; the 24-bit input_t only approximates it |
 
 Gate note for the wider grids: a mismatch of 1-3 output LSBs on a few events is the PyTorch reference, not the
 firmware. With LSB <= 1/16 GeV the squared momenta (E² ≈ 1.6e5 GeV² for a 400 GeV constituent) need more than
@@ -48,3 +49,9 @@ Remote recipe (deployment config, U250, 5 ns), per variant:
 For the gated variants use `csim=1 golden=1` and expect `GOLDEN SUMMARY: events=200 exact=200`. Check the
 csynth `== Interface` table first: `model_input` must be NPARTICLES x 4 x W bits (768 / 896 / 1024 for
 W = 12 / 14 / 16), five 6-bit `model_out` ports, 5-bit `nobj`.
+
+Status 2026-11-04 (all exports done; synthesis owed): the momentum grid is the whole QAT boost loss (float momenta
+= boost-flat 55 %), and `pmu16f2048` is the quantized grid to deploy for a boost-robust model. Expected firmware
+delta vs `pmu12`: `model_input` 768 -> 896 / 1024 bits, Winograd pair products 14x14 / 16x16 (one DSP each),
+wider dot adder trees; the 2->2 / ReLU / 2->0 stages are unchanged. Numbers: csynth + `vivado_synth_opt_<name>.rpt`
+per variant, to be added to the README RESULT tables.

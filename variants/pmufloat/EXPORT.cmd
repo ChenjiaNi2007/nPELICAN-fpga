@@ -1,0 +1,3 @@
+# 2026-11-04 20:14:29  checkpoint: PELICAN-nano/model/h5n16_h8_qat_pmufloat_s1_best.pt
+/Users/chenjiani/Desktop/Rankin Research/PELICAN-nano/.venv/bin/python model_loader.py --model /Users/chenjiani/Desktop/Rankin Research/PELICAN-nano/model/h5n16_h8_qat_pmufloat_s1_best.pt --quant --repo /Users/chenjiani/Desktop/Rankin Research/PELICAN-nano --out variants/pmufloat/weights.h 
+(cd /Users/chenjiani/Desktop/Rankin Research/PELICAN-nano && /Users/chenjiani/Desktop/Rankin Research/PELICAN-nano/.venv/bin/python scripts/export_golden.py --checkpoint model/h5n16_h8_qat_pmufloat_s1_best.pt --testfile data/hls4ml5_n16/test.h5 --num 200 --outdir /Users/chenjiani/Desktop/Rankin Research/nPELICAN-fpga-deploy/variants/pmufloat)
