@@ -215,3 +215,17 @@ install one and `build_prj.tcl tag=<name>` for a per-variant project dir (`nPELI
 `vivado -mode batch -source vivado_synth.tcl -tclargs _<name>` -> `vivado_synth_opt_<name>.rpt`). Full
 recipe and table: `variants/README.md`. The loader now replays `pmu_clip_min` (PELICAN-nano
 `--pmu-clip-min`, a floor on the momentum clip point) like `input_clip_min`.
+
+### RESULT (2026-11-04) — 14/16-bit momentum input, width proxies, U250 @ 5 ns
+
+Post-opt vs the 12-bit deployment build (128,240 LUT / 32,191 FF / 12,674 CARRY8 / 692 DSP / 16 cyc):
+`proxy_in14` (`<14,12>`) **129,592 LUT (+1.05 %) / 32,649 FF (+1.4 %) / 12,676 CARRY8 / 692 DSP / 16 cyc**,
+`proxy_in16` (`<16,14>`) **130,346 LUT (+1.64 %) / 32,913 FF (+2.2 %) / 13,116 CARRY8 / 692 DSP / 16 cyc**;
+csynth clock estimates 4.37 / 4.46 ns. The wider grid is paid in the dot front-end's post-product LUTs only
+(~530 LUT and ~180 FF per input bit); the Winograd pair products stay one DSP48E2 each up to 17-bit inputs.
+With the `pmu16f2048` checkpoint this is the boost-robust deployment: 54.8 % rest / 45.8 % at |β| = 0.95 for
+1.6 % more LUTs than the 12-bit model. Reports `reports/{csynth,vsynth}_hls4ml5_proxy_in{14,16}*.rpt`;
+analysis in `reports/README.md` and `variants/README.md`.
+`variants/proxy_in17` (`<17,15>`, 2026-11-05) is the next resource build: 17 bits is the last width at which the
+Winograd pre-adder sums (18 bits) fit the DSP48E2's 18-bit port, so it should keep the 692 DSPs; the two 17-bit
+retrains (`pmu17f4096`: LSB 1/16 @ 4096; `pmu17f2048`: LSB 1/32 @ 2048) follow as gated variants when done.

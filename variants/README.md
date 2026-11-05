@@ -17,6 +17,9 @@ firmware `input_t ap_fixed<12,10>`) the constraint? PyTorch side: `mlpmixer/hls4
 | `pmu12` | `<12,10>` (LSB 0.25 GeV, clip 512) | `h5n16_h8_qat_s1` (= committed `firmware/weights`) | yes, 200/200 | baseline = deployment-config result (128,240 LUT / 692 DSP) |
 | `proxy_in14` | `<14,12>` (LSB 0.25, clip 2048) | same checkpoint, `--pmu-extra-int-bits 2` | no (ablation) | resource cost of a 14-bit input grid, available before the retrains finish |
 | `proxy_in16` | `<16,14>` (LSB 0.25, clip 8192) | same checkpoint, `--pmu-extra-int-bits 4` | no (ablation) | resource cost of a 16-bit input grid |
+| `proxy_in17` | `<17,15>` (LSB 0.25, clip 16384) | same checkpoint, `--pmu-extra-int-bits 5` (2026-11-05) | no (ablation) | resource cost of a 17-bit input grid = the last width with one DSP per Winograd pair product (18-bit pre-adder sums fill the DSP48E2's 18-bit port; 18-bit inputs need a second DSP on each of the 272 pair products). Expected ~130.9k LUT / 692 DSP / 16 cyc |
+| `pmu17f4096` | `<17,13>` (LSB 1/16 GeV, clip 4096) | retrain `h5n16_h8_qat_pmu17f4096_s1` (`--pmu-fixed-clip 4096`), launched 2026-11-05 | pending | the 16f2048 grid + one bit of RANGE (clipped jets at \|β\|=0.95: 11.8 -> 1.6 %) |
+| `pmu17f2048` | `<17,12>` (LSB 1/32 GeV, clip 2048) | retrain `h5n16_h8_qat_pmu17f2048_s1` (`--pmu-fixed-clip 2048`), launched 2026-11-05 | pending | the 16f2048 grid + one bit of RESOLUTION |
 | `pmu14` | `<14,10>` (LSB 1/16 GeV, clip 512) | retrained `h5n16_h8_qat_pmu14_s1` (clip left to the learned scale; rest 53.4 % / 82.5, boost 53.1 -> 38.2) | 197/200, see note | real 14-bit model: training keeps the 512 GeV clip and spends the bits on the LSB |
 | `pmu16` | `<16,10>` (LSB 1/64 GeV, clip 512) | retrained `h5n16_h8_qat_pmu16_s1` (rest 54.0 % / 82.6, boost 53.9 -> 40.4) | 186/200 (<= 1 LSB) | real 16-bit model, same pattern |
 | `pmu14f2048` | `<14,12>` (LSB 0.25 GeV, clip 2048) | retrained `h5n16_h8_qat_pmu14f2048_s1` (`--pmu-fixed-clip 2048`; rest 53.9 % / 82.3, boost 53.8 -> 40.4) | **200/200** | 12-bit LSB at 4x the range |
@@ -40,18 +43,39 @@ Remote recipe (deployment config, U250, 5 ns), per variant:
 
     git pull                                   # branch hls4ml5-deploy
     export NPELICAN_PART=xcu250-figd2104-2L-e
-    variants/use.sh proxy_in14
-    vitis_hls -f build_prj.tcl "reset=1 csim=0 synth=1 cosim=0 validation=0 export=0 vsynth=0 golden=0 winograd=1 const_beams=1 tag=proxy_in14"
-    vivado -mode batch -source vivado_synth.tcl -tclargs _proxy_in14
+    variants/use.sh proxy_in17
+    vitis_hls -f build_prj.tcl "reset=1 csim=0 synth=1 cosim=0 validation=0 export=0 vsynth=0 golden=0 winograd=1 const_beams=1 tag=proxy_in17"
+    vivado -mode batch -source vivado_synth.tcl -tclargs _proxy_in17
     variants/use.sh --restore
-    # -> nPELICAN_prj_proxy_in14/solution/syn/report/nPELICAN_csynth.rpt, vivado_synth_opt_proxy_in14.rpt
+    # -> nPELICAN_prj_proxy_in17/solution/syn/report/nPELICAN_csynth.rpt, vivado_synth_opt_proxy_in17.rpt
+    # (proxy_in14 / proxy_in16 were run the same way on 2026-11-04; results below)
 
 For the gated variants use `csim=1 golden=1` and expect `GOLDEN SUMMARY: events=200 exact=200`. Check the
-csynth `== Interface` table first: `model_input` must be NPARTICLES x 4 x W bits (768 / 896 / 1024 for
-W = 12 / 14 / 16), five 6-bit `model_out` ports, 5-bit `nobj`.
+csynth `== Interface` table first: `model_input` must be NPARTICLES x 4 x W bits (768 / 896 / 1024 / 1088 for
+W = 12 / 14 / 16 / 17), five 6-bit `model_out` ports, 5-bit `nobj`. For the 17-bit build also check the
+instance list: the pair products must appear as single-DSP `ama_addmuladd_17s_17s_18s_36s` blocks (csynth DSP
+total 676, Vivado 692, as for 12-16 bits); any `mul_18s_18s`/two-DSP pattern there means the port limit bit.
 
-Status 2026-11-04 (all exports done; synthesis owed): the momentum grid is the whole QAT boost loss (float momenta
-= boost-flat 55 %), and `pmu16f2048` is the quantized grid to deploy for a boost-robust model. Expected firmware
-delta vs `pmu12`: `model_input` 768 -> 896 / 1024 bits, Winograd pair products 14x14 / 16x16 (one DSP each),
-wider dot adder trees; the 2->2 / ReLU / 2->0 stages are unchanged. Numbers: csynth + `vivado_synth_opt_<name>.rpt`
-per variant, to be added to the README RESULT tables.
+Status 2026-11-04: all exports done; the momentum grid is the whole QAT boost loss (float momenta = boost-flat
+55 %), and `pmu16f2048` is the quantized grid to deploy for a boost-robust model. The two width proxies are
+synthesized (deployment config, U250 @ 5 ns, `csim=0 golden=0`; reports in `../reports/`):
+
+| build | `input_t` | `model_input` | csynth (est. clock, DSP, FF, LUT est.) | Vivado post-opt LUT (logic + SRL) | FF | CARRY8 | DSP | latency |
+|---|---|---|---|---|---|---|---|---|
+| `pmu12` (2026-10-22) | `<12,10>` | 768 b | 4.455 ns, 676, 58,880, 500,777 | 128,240 (127,340 + 900) | 32,191 | 12,674 | 692 | 16 cyc, II=1 |
+| `proxy_in14` | `<14,12>` | 896 b | 4.370 ns, 676, 60,476, 504,521 | **129,592** (+1,352, +1.05 %) | 32,649 (+1.4 %) | 12,676 | **692** | 16 cyc, II=1 |
+| `proxy_in16` | `<16,14>` | 1024 b | 4.455 ns, 676, 62,074, 508,329 | **130,346** (+2,106, +1.64 %) | 32,913 (+2.2 %) | 13,116 (+3.5 %) | **692** | 16 cyc, II=1 |
+
+(post-synth, before `opt_design`: 129,773 / 130,527 LUT.) So the 16-bit grid that lifts the model from 52.2 to
+54.8 % at rest and from 34.9 to 45.8 % at |β| = 0.95 costs 1.6 % more LUTs, 2.2 % more FFs, no DSPs and no
+cycles: `pmu16f2048` is 1.60x the 4-feature Mixer's LUTs (was 1.58x) at +0.2 pt accuracy instead of -2.4.
+The LUT growth is the dot front-end's post-product arithmetic (saturation compares of the dot cast and the
+Winograd correction subtractions, +4 bits per +2 input bits); the pre-adder sums live inside the DSP48E2
+(`ama_addmuladd_16s_16s_17s_34s`), which holds one pair product per DSP up to 17-bit inputs — an 18-bit or
+wider grid (or the 24-bit `pmufloat` type) would need a second DSP for each of the 272 pair products. Per
+input bit over 12 -> 16: ~530 LUT and ~180 FF (the two 2-bit steps are uneven, +1,352 vs +754 LUT, Vivado
+having moved adders between LUT6s and CARRY8 chains at 16 bits). A proxy is resource-equivalent to the
+retrained variant of the same width (`pmu14`/`pmu14f2048`, `pmu16`/`pmu16f2048`) up to constant-dependent
+noise (BN2/bias literals, T0 ROM contents); the gated builds of the retrained checkpoints (`csim=1 golden=1`)
+are still owed if an exact deployable figure is needed. The uploaded 16-bit csynth report is cut at 6 MiB
+(summary/timing/instances intact, `== Interface` table missing; stored as `csynth_hls4ml5_proxy_in16_TRUNCATED.rpt`).
