@@ -21,6 +21,8 @@ firmware `input_t ap_fixed<12,10>`) the constraint? PyTorch side: `mlpmixer/hls4
 | `proxy_in18` | `<18,16>` (LSB 0.25, clip 32768) | same checkpoint, `--pmu-extra-int-bits 6` (2026-11-05) | no (ablation) | resource cost of an 18-bit input grid = the first width PAST the DSP port: the 19-bit Winograd pre-adder sums no longer fit the DSP48E2's 18-bit B port, so each of the 272 pair products needs a second DSP (expected ~964 DSP in Vivado / ~948 csynth, +272 on 692/676) plus ~0.5k more LUT; measures what the two 18-bit retrains (`pmu18f4096`, `pmu18f2048`) would cost |
 | `pmu17f4096` | `<17,13>` (LSB 1/16 GeV, clip 4096) | retrained `h5n16_h8_qat_pmu17f4096_s1` (`--pmu-fixed-clip 4096`, 2026-11-05; rest **55.2 %** / 83.3 = the float-momenta model, boost 55.0 -> 48.7) | **200/200** | the 16f2048 grid + one bit of RANGE (clipped jets at \|β\|=0.95: 11.8 -> 1.6 %); best at rest, never below 16f2048 at any β; now the dashed curve of `boost_n16_mixer_vs_npelican.png` |
 | `pmu17f2048` | `<17,12>` (LSB 1/32 GeV, clip 2048) | retrained `h5n16_h8_qat_pmu17f2048_s1` (`--pmu-fixed-clip 2048`, 2026-11-05; rest 54.5 % / 83.0, boost 54.5 -> **50.1**) | **200/200** | the 16f2048 grid + one bit of RESOLUTION: flattest quantized curve (54.1 % at 0.8); dot_t `<6,9>` (8 GeV² LSB) in both 17-bit models vs `<6,8>` at 16 bits, T0 ROM still 64 entries |
+| `pmu18f4096` | `<18,13>` (LSB 1/32 GeV, clip 4096) | retrained `h5n16_h8_qat_pmu18f4096_s1` (`--pmu-fixed-clip 4096`, 2026-11-05; rest 54.9 % / 83.0, boost 55.1 -> 52.7) | **200/200** | both 17-bit bits at once; near boost-flat (54.7 % at 0.8); dot_t `<6,10>` (16 GeV² LSB), T0 ROM still 64 entries; pays the second DSP per pair product that `proxy_in18` measures |
+| `pmu18f2048` | `<18,12>` (LSB 1/64 GeV, clip 2048) | retrained `h5n16_h8_qat_pmu18f2048_s1` (`--pmu-fixed-clip 2048`, 2026-11-05; rest **55.1 %** / 83.1, boost 55.3 -> **53.0**) | **200/200** | two bits of RESOLUTION: the flattest quantized curve (54.7 % at 0.8, 53.0 at 0.95 = 1.8 pt under the float-momenta model, +3 on the best 17-bit curve); resolution beats range again, so at >= 17 bits the LSB is the bit to buy; dot_t `<6,10>` |
 | `pmu14` | `<14,10>` (LSB 1/16 GeV, clip 512) | retrained `h5n16_h8_qat_pmu14_s1` (clip left to the learned scale; rest 53.4 % / 82.5, boost 53.1 -> 38.2) | 197/200, see note | real 14-bit model: training keeps the 512 GeV clip and spends the bits on the LSB |
 | `pmu16` | `<16,10>` (LSB 1/64 GeV, clip 512) | retrained `h5n16_h8_qat_pmu16_s1` (rest 54.0 % / 82.6, boost 53.9 -> 40.4) | 186/200 (<= 1 LSB) | real 16-bit model, same pattern |
 | `pmu14f2048` | `<14,12>` (LSB 0.25 GeV, clip 2048) | retrained `h5n16_h8_qat_pmu14f2048_s1` (`--pmu-fixed-clip 2048`; rest 53.9 % / 82.3, boost 53.8 -> 40.4) | **200/200** | 12-bit LSB at 4x the range |
@@ -44,7 +46,7 @@ Remote recipe (deployment config, U250, 5 ns), per variant:
 
     git pull                                   # branch hls4ml5-deploy
     export NPELICAN_PART=xcu250-figd2104-2L-e
-    name=proxy_in17                            # then proxy_in18; gated: pmu17f4096 pmu17f2048 (csim=1 golden=1)
+    name=proxy_in17                            # then proxy_in18; gated (csim=1 golden=1): pmu17f4096 pmu17f2048 pmu18f4096 pmu18f2048
     variants/use.sh $name
     vitis_hls -f build_prj.tcl "reset=1 csim=0 synth=1 cosim=0 validation=0 export=0 vsynth=0 golden=0 winograd=1 const_beams=1 tag=$name"
     vivado -mode batch -source vivado_synth.tcl -tclargs _$name
@@ -80,7 +82,8 @@ The LUT growth is the dot front-end's post-product arithmetic (saturation compar
 Winograd correction subtractions, +4 bits per +2 input bits); the pre-adder sums live inside the DSP48E2
 (`ama_addmuladd_16s_16s_17s_34s`), which holds one pair product per DSP up to 17-bit inputs — an 18-bit or
 wider grid (or the 24-bit `pmufloat` type) would need a second DSP for each of the 272 pair products
-(`proxy_in18` measures exactly that step; synthesis owed). Per
+(`proxy_in18` measures exactly that step; synthesis owed — the two 18-bit retrains `pmu18f4096` / `pmu18f2048` are
+the near-boost-flat models, 52.7 / 53.0 % at |β| = 0.95, that would pay it). Per
 input bit over 12 -> 16: ~530 LUT and ~180 FF (the two 2-bit steps are uneven, +1,352 vs +754 LUT, Vivado
 having moved adders between LUT6s and CARRY8 chains at 16 bits). A proxy is resource-equivalent to the
 retrained variant of the same width (`pmu14`/`pmu14f2048`, `pmu16`/`pmu16f2048`) up to constant-dependent
