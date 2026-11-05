@@ -231,3 +231,7 @@ Winograd pre-adder sums (18 bits) fit the DSP48E2's 18-bit port, so it should ke
 retrains are exported and gated 200/200 (`variants/pmu17f4096`: LSB 1/16 @ 4096, `<17,13>`, 55.2 % rest / 48.7 % at
 |β| = 0.95; `variants/pmu17f2048`: LSB 1/32 @ 2048, `<17,12>`, 54.5 % / 50.1 %) — build them with `csim=1 golden=1`
 like `pmu16f2048`; the csynth instance list must show single-DSP `ama_addmuladd_17s_17s_18s_36s` pair products.
+`variants/proxy_in18` (`<18,16>`, 2026-11-05) is the companion build one bit past the port: its 19-bit pre-adder sums
+need a second DSP per pair product (expected +272 DSP, ~964 in Vivado), which is the price of the two 18-bit retrains
+(`pmu18f4096`: LSB 1/32 @ 4096 = both 17-bit bits at once; `pmu18f2048`: LSB 1/64 @ 2048) — exported here as soon as
+they finish training.
