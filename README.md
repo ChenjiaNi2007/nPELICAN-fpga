@@ -228,4 +228,6 @@ With the `pmu16f2048` checkpoint this is the boost-robust deployment: 54.8 % res
 analysis in `reports/README.md` and `variants/README.md`.
 `variants/proxy_in17` (`<17,15>`, 2026-11-05) is the next resource build: 17 bits is the last width at which the
 Winograd pre-adder sums (18 bits) fit the DSP48E2's 18-bit port, so it should keep the 692 DSPs; the two 17-bit
-retrains (`pmu17f4096`: LSB 1/16 @ 4096; `pmu17f2048`: LSB 1/32 @ 2048) follow as gated variants when done.
+retrains are exported and gated 200/200 (`variants/pmu17f4096`: LSB 1/16 @ 4096, `<17,13>`, 55.2 % rest / 48.7 % at
+|β| = 0.95; `variants/pmu17f2048`: LSB 1/32 @ 2048, `<17,12>`, 54.5 % / 50.1 %) — build them with `csim=1 golden=1`
+like `pmu16f2048`; the csynth instance list must show single-DSP `ama_addmuladd_17s_17s_18s_36s` pair products.
