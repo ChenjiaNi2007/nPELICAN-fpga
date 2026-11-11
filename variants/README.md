@@ -93,3 +93,32 @@ retrained variant of the same width (`pmu14`/`pmu14f2048`, `pmu16`/`pmu16f2048`)
 noise (BN2/bias literals, T0 ROM contents); the gated builds of the retrained checkpoints (`csim=1 golden=1`)
 are still owed if an exact deployable figure is needed. The uploaded 16-bit csynth report is cut at 6 MiB
 (summary/timing/instances intact, `== Interface` table missing; stored as `csynth_hls4ml5_proxy_in16_TRUNCATED.rpt`).
+
+## Weight / activation / dot widths below 6 bits (2026-11-07, `lowbits_*`)
+
+Same firmware, momentum grid fixed at the best point above (`pmu18f2048`: 18 bits, LSB 1/64 GeV, clip 2048,
+`input_t <18,12>`), retrained with the Brevitas widths lowered (`PELICAN-nano/scripts/hls4ml5_lowbits.sh`,
+recipe otherwise identical to the 18-bit retrain, seed 1): w = `--weight-bit-width` (2->2 and 2->0 weights),
+a = `--act-bit-width` (post-aggregation tensors `t2_t`, ReLU `relu_t`, 2->0 values, logits `out_t`),
+i = `--input-bit-width` (the dot quantizer `dot_t`). Every width is read from the checkpoint by
+model_loader.py, so each variant carries its own `types_generated.h`. Accuracies: rest = 260k-jet test,
+boost = 20k jets x 8 directions (`mlpmixer/hls4ml5/results/pmu_bits/boost_n16_npelican_h8_qat_lowbits_<tag>.csv`).
+
+| name | w / a / i | `dot_t` / `t2_t` / `relu_t` / `out_t` | source checkpoint | rest acc | acc at \|β\| = 0.95 | golden |
+|---|---|---|---|---|---|---|
+| (`pmu18f2048`) | 6 / 6 / 6 | `<6,10>` / `<6,0>`... | `h5n16_h8_qat_pmu18f2048_s1` | 55.11 % | 53.0 % | 200/200 |
+| `lowbits_w4a6i6` | 4 / 6 / 6 | `<6,9>` / `<6,0>` / `<6,1>` / `<6,3>` | `h5n16_h8_qat_p18_w4a6i6_s1` | 54.58 % | 51.8 % | 199/200 (one event 3 LSB off already at the dots level = the float32-dot reference note above; firmware exact) |
+| `lowbits_w6a4i6` | 6 / 4 / 6 | `<6,10>` / `<4,2>` / `<4,2>` / `<4,2>` | `h5n16_h8_qat_p18_w6a4i6_s1` | 54.25 % | 52.2 % | 200/200 |
+| `lowbits_w4a4i6` | 4 / 4 / 6 | `<6,11>` / `<4,1>` / `<4,2>` / `<4,2>` | `h5n16_h8_qat_p18_w4a4i6_s1` | 54.19 % | 50.1 % | 200/200 |
+| `lowbits_w5a5i5` | 5 / 5 / 5 | `<5,10>` / `<5,1>` / `<5,2>` / `<5,3>` | `h5n16_h8_qat_p18_w5a5i5_s1` | 54.33 % | 48.5 % | 200/200 |
+| `lowbits_w4a4i4` | 4 / 4 / 4 | `<4,10>` / `<4,1>` / `<4,2>` / `<4,3>` | `h5n16_h8_qat_p18_w4a4i4_s1` | 52.32 % | 47.3 % | 200/200 |
+
+Reading: weights to 4 bits cost 0.5 pt at rest, activations to 4 bits 0.9 pt, both together 0.9 pt at rest
+and 2.9 pt at |β| = 0.95; the dot quantizer is the sensitive one (i5 costs ~3 pt of boost flatness, i4 another
+2.8 pt at rest), so i stays at 6. `lowbits_w4a4i6` is the candidate low-bit operating point (nominal 2->2 lane
+product (4 x 4) / (6 x 6) = 0.44 of the 6-bit cost), `lowbits_w4a6i6` the conservative one (0.67). What moves in
+hardware: the 2,592-lane 2->2 dense + ReLU (constant products ~ w x a bits, adder trees ~ a bits), the lane
+registers (a bits), and possibly the ~200 6-bit x 6-bit 2->2 products that Vitis binds to DSPs in the 18-bit build
+(4-bit products normally stay in fabric). The 272 momentum pair-product DSPs are untouched. Synthesis owed; the
+same remote recipe as above with `csim=1 golden=1` (expect `exact=200`, 199 for w4a6i6) and the 18-bit interface
+check (`model_input` 1152 bits; five `model_out` ports of the variant's a width).

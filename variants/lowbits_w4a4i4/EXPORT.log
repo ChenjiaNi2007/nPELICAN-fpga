@@ -1,0 +1,59 @@
+/Users/chenjiani/Desktop/Rankin Research/nPELICAN-fpga-deploy/model_loader.py:373: UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.
+Consider using tensor.detach() first. (Triggered internally at /Users/runner/work/pytorch/pytorch/torch/csrc/autograd/generated/python_variable_methods.cpp:839.)
+  s = float(scale.reshape(-1)[0])
+/Users/chenjiani/Desktop/Rankin Research/PELICAN-nano/.venv/lib/python3.12/site-packages/torch/_tensor.py:1675: UserWarning: Named tensors and all their associated APIs are an experimental feature and subject to change. Please do not use them for anything important until they are released as stable. (Triggered internally at /Users/runner/work/pytorch/pytorch/c10/core/TensorImpl.h:1976.)
+  return super().rename(names)
+Checkpoint format: post-refactor (mixing.weight)
+NHIDDEN=8, NOUT=5, head_hidden=0, NSPURIONS=2, jet_quant_split=False
+Extracting snapped dequantized weights (QAT path, via Brevitas)...
+
+Quant config: weight/act/input bits = 4/4/4, pmu=18, po2=True
+QuantLinear weight scales:
+  net2to2.eq_layers.0    scale = 1.250000e-01  ~ 2^-3.00  => 3 fractional bits
+  agg_2to0               scale = 5.000000e-01  ~ 2^-1.00  => 1 fractional bits
+Activation / identity quantizer scales:
+  input_quant                        scale = 6.400000e+01  ~ 2^6.00  => -6 frac bits  signed=True
+  output_quant                       scale = 5.000000e-01  ~ 2^-1.00  => 1 frac bits  signed=True
+  pmu_quant                          scale = 1.562500e-02  ~ 2^-6.00  => 6 frac bits  signed=True
+  net2to2.eq_layers.0.post_agg_quant scale = 1.250000e-01  ~ 2^-3.00  => 3 frac bits  signed=True
+  net2to2.eq_layers.0.act_layer      scale = 2.500000e-01  ~ 2^-2.00  => 2 frac bits  signed=True
+  agg_2to0.post_agg_quant            scale = 3.125000e-02  ~ 2^-5.00  => 5 frac bits  signed=True
+  input_t: |p|max = 2707.25 from /Users/chenjiani/Desktop/Rankin Research/PELICAN-nano/data/hls4ml5_n16/valid.h5
+  (input_t from TRAINED pmu_quant: W=18, I=12, clip ±2^11 vs |p|max=2707.2 in sample, momentum LSB = 2^-6 GeV)
+  BN1 scale gamma/sigma = 0.0570672165926 -> literal 15318864 at F=28 (24 bits, snap err 1.15e-09)
+   bn_t_gen now feeds only the BN2 constants (4 multiplies) + the legacy batch1_2to2 array (Lever 8 T0 ROM: no per-element BN1 multiplies) -- --bn-frac-bits is not a DSP lever any more
+  particle count: NPARTICLES=16 (NPARTICLES2=18, 324 pairs) -> accumulator headroom H1=5 (row/trace), H2=9 (full sum)
+  Lever 8: BN1 T0 ROM 16 x t2_t entries (dotall_t W=4); bn1fold_t=ap_fixed<26,1>
+Wrote variants/lowbits_w4a4i4/types_generated.h
+  bias_t_gen sticky-bit: Fh=6, BIAS_F=7; b1={0.2890625, -0.0234375, 0.0234375, 0.4140625, 0.1171875, 1.2265625, -0.0859375, 0.0390625} b1_diag_total={0.1796875, -0.2109375, 0.4453125, 0.2578125, -0.1953125, -0.1171875, -0.9765625, 0.1171875} b2={-0.0859375, -0.0078125, -0.8203125, -0.4921875, -0.6796875}
+
+Wrote variants/lowbits_w4a4i4/weights.h  (NHIDDEN=8, NOUT=5, NSPURIONS=2, head_hidden=0, NPARTICLES=16, sticky-bit biases Fh=6, Lever 8 T0 ROM=yes)
+/Users/chenjiani/Desktop/Rankin Research/PELICAN-nano/.venv/lib/python3.12/site-packages/torch/_tensor.py:1675: UserWarning: Named tensors and all their associated APIs are an experimental feature and subject to change. Please do not use them for anything important until they are released as stable. (Triggered internally at /Users/runner/work/pytorch/pytorch/c10/core/TensorImpl.h:1976.)
+  return super().rename(names)
+# quantizer scales (scale = 2^-k), signedness, bit widths
+#   input_quant                        scale=6.400000e+01  2^--6.00  bits=4  signed=True
+#   output_quant                       scale=5.000000e-01  2^-1.00  bits=4  signed=True
+#   pmu_quant                          scale=1.562500e-02  2^-6.00  bits=18  signed=True
+#   net2to2.eq_layers.0.post_agg_quant scale=1.250000e-01  2^-3.00  bits=4  signed=True
+#   net2to2.eq_layers.0.act_layer      scale=2.500000e-01  2^-2.00  bits=4  signed=True
+#   agg_2to0.post_agg_quant            scale=3.125000e-02  2^-5.00  bits=4  signed=True
+#   net2to2.eq_layers.0.mixing.weight  scale=1.250000e-01  2^-3.00  bits=4  signed=True
+#   agg_2to0.mixing.weight             scale=5.000000e-01  2^-1.00  bits=4  signed=True
+
+op-order verification:
+  eops_2_to_2 stacked order == firmware T0..T5 (identity perm): T0=batch1 OK
+  eops_2_to_0 stacked order: index0=sum_all(sum), index1=sum_diag(trace) == firmware R[h][0]=sum, R[h][1]=trace
+
+=== sanity ===
+row counts: pmu=200 nobj=200 logits=200 (expect 200)
+logits values/line = [5] (expect [5])
+dots values/line = [324] (expect [324] = (18)^2)
+output_quant scale = 5.000000e-01 (2^-1.00)
+max |logit/s - round(logit/s)| = 0.000e+00 (assert < 1e-6)
+AUC over 200 events = 0.8320 (expect ~0.85-0.95)
+golden_pmu line0 vs test.h5 Pmu[0] max|diff| = 0.000e+00 (expect 0)
+
+wrote: /Users/chenjiani/Desktop/Rankin Research/nPELICAN-fpga-deploy/variants/lowbits_w4a4i4/golden_pmu.dat
+wrote: /Users/chenjiani/Desktop/Rankin Research/nPELICAN-fpga-deploy/variants/lowbits_w4a4i4/golden_nobj.dat
+wrote: /Users/chenjiani/Desktop/Rankin Research/nPELICAN-fpga-deploy/variants/lowbits_w4a4i4/golden_logits.dat
+wrote: /Users/chenjiani/Desktop/Rankin Research/nPELICAN-fpga-deploy/variants/lowbits_w4a4i4/golden_stage_dump.txt
